@@ -5,10 +5,23 @@
         <TargetFramework>net8.0</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
+        <PackAsTool>true</PackAsTool>
+        <ToolCommandName>minfold</ToolCommandName>
+        <PackageOutputPath>./nupkg</PackageOutputPath>
+        <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+        <Title>Minfold</Title>
+        <Authors>Matěj "lofcz" Štágl</Authors>
+        <Description>Minfold a strongly opinionated EF Core scaffolder</Description>
+        <Copyright>MIT</Copyright>
+        <RepositoryUrl>https://github.com/lofcz/minfold</RepositoryUrl>
     </PropertyGroup>
 
     <ItemGroup>
       <ProjectReference Include="..\Minfold\Minfold.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
     </ItemGroup>
 
 </Project>
