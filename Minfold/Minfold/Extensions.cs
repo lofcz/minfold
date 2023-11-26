@@ -57,5 +57,13 @@ public static class Extensions
         };
     }
     
-    
+    public static string? FirstCharToLower(this string? str)
+    {
+        if (!string.IsNullOrEmpty(str) && char.IsUpper(str[0]))
+        {
+            return str.Length is 1 ? char.ToLower(str[0]).ToString() : char.ToLower(str[0]) + str[1..];   
+        }
+
+        return str;
+    }
 }
