@@ -1,8 +1,10 @@
 using System.Collections.Concurrent;
+using System.Collections.Immutable;
 using System.Diagnostics;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Text;
 
 namespace Minfold;
 
@@ -83,10 +85,47 @@ public class Minfold
         return source;
     }
 
-    public async Task<string> UpdateModel(CsModelSource tree)
+    public async Task<string> UpdateModel(CsModelSource tree, SqlTable table)
     {
-        ClassRewriter classVisitor = new ClassRewriter();
-        CompilationUnitSyntax newNode = (CompilationUnitSyntax)classVisitor.Visit(await tree.ModelAst.GetRootAsync());
+        /*DocumentId docId;
+        
+        AdhocWorkspace TestWorkspace()
+        {
+            var workspace = new AdhocWorkspace();
+
+            string projName = "NewProject";
+            var projectId = ProjectId.CreateNewId();
+            var versionStamp = VersionStamp.Create();
+            var projectInfo = ProjectInfo.Create(projectId, versionStamp, projName, projName, LanguageNames.CSharp);
+            var newProject = workspace.AddProject(projectInfo);
+            var sourceText = SourceText.From(tree.ModelSourceCode);
+            Document? newDocument = workspace.AddDocument(newProject.Id, "NewFile.cs", sourceText);
+            docId = newDocument.Id;
+            return workspace;
+        }
+
+        AdhocWorkspace wrks = TestWorkspace();
+        Document? docu = wrks.CurrentSolution.GetDocument(docId);
+        SemanticModel? model = await docu.GetSemanticModelAsync();*/
+        
+        /*
+            var references = new List<MetadataReference>
+            {
+                MetadataReference.CreateFromFile(typeof(object).Assembly.Location),
+                MetadataReference.CreateFromFile(typeof(Console).Assembly.Location),
+                MetadataReference.CreateFromFile(typeof(System.Runtime.AssemblyTargetedPatchBandAttribute).Assembly.Location),
+                MetadataReference.CreateFromFile(typeof(Microsoft.CSharp.RuntimeBinder.CSharpArgumentInfo).Assembly.Location),
+            };
+         
+         CSharpCompilation compilation = CSharpCompilation.Create("MyCompilation")
+            .WithOptions(new CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary))
+            .AddReferences(references)
+            .AddSyntaxTrees(tree.ModelAst);
+        ImmutableArray<Diagnostic> diag = compilation.GetDiagnostics();*/
+
+        SyntaxNode root = await tree.ModelAst.GetRootAsync();
+        ModelClassRewriter modelClassVisitor = new ModelClassRewriter(table.Name, table, null);
+        CompilationUnitSyntax newNode = (CompilationUnitSyntax)modelClassVisitor.Visit(root);
         return newNode.NormalizeWhitespace().ToFullString();
     }
 
@@ -95,7 +134,8 @@ public class Minfold
         await AnalyzeSqlSchema(sqlConn, dbName);
         await LoadCsCode(codePath);
 
-        string str = await UpdateModel(Source.Models.FirstOrDefault(x =>x.Name is "User")!);
+        string str = await UpdateModel(Source.Models.FirstOrDefault(x => x.Name is "User")!, SqlChema.FirstOrDefault(x => x.Key is "User").Value);
+        await File.WriteAllTextAsync(Source.Models.FirstOrDefault(x => x.Name is "User")!.ModelPath, str);
         int z = 0;
     }
 }

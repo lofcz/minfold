@@ -37,7 +37,7 @@ internal class SqlService
                 continue;
             }
             
-            SqlTableColumn column = new(columnName, ordinalPosition, isNullable, isIdentity, dt, new List<SqlForeignKey>());
+            SqlTableColumn column = new(columnName, ordinalPosition, isNullable, isIdentity, (SqlDbTypeExt)dt, []);
             
             if (tables.TryGetValue(tableName, out SqlTable? table))
             {
@@ -45,7 +45,7 @@ internal class SqlService
             }
             else
             {
-                tables.TryAdd(tableName, new SqlTable(tableName, new List<SqlTableColumn> { column }));
+                tables.TryAdd(tableName, new SqlTable(tableName, [ column ]));
             }
         }
 
@@ -99,7 +99,7 @@ internal class SqlService
             }
             else
             {
-                foreignKeys.TryAdd(tableName, new List<SqlForeignKey> { key });
+                foreignKeys.TryAdd(tableName, [key]);
             }
         }
 

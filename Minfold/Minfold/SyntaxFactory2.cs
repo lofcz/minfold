@@ -5,7 +5,7 @@ namespace Minfold;
 
 public static class SyntaxFactory2
 {
-    public static PropertyDeclarationSyntax MakeProperty(string name, SqlDbType type, bool nullable)
+    public static PropertyDeclarationSyntax MakeProperty(string name, SqlDbTypeExt type, bool nullable)
     {
         PropertyDeclarationSyntax property = SyntaxFactory.PropertyDeclaration(type.ToTypeSyntax(nullable), name)
             .AddModifiers(SyntaxFactory.Token(SyntaxKind.PublicKeyword))
@@ -17,7 +17,7 @@ public static class SyntaxFactory2
         return property;
     }
     
-    public static ParameterSyntax MakeParameter(string name, SqlDbType type, bool nullable)
+    public static ParameterSyntax MakeParameter(string name, SqlDbTypeExt type, bool nullable)
     {
         ParameterSyntax property = SyntaxFactory.Parameter(SyntaxFactory.Identifier(name))
             .WithType(type.ToTypeSyntax(nullable));
