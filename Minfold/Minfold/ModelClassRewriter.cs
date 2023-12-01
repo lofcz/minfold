@@ -503,12 +503,15 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
 
                 foreach (AttributeSyntax attr in aList.Attributes)
                 {
-                    if (attr.Name is IdentifierNameSyntax ident && ForeignKeyAttributes.Contains(ident.Identifier.ValueText))
+                    switch (attr.Name)
                     {
-                        continue;
+                        case IdentifierNameSyntax ident when ForeignKeyAttributes.Contains(ident.Identifier.ValueText):
+                        case GenericNameSyntax genIdent when ForeignKeyAttributes.Contains(genIdent.Identifier.ValueText):
+                            continue;
+                        default:
+                            keptAttrs.Add(attr);
+                            break;
                     }
-
-                    keptAttrs.Add(attr);
                 }
 
                 if (keptAttrs.Count > 0)
