@@ -99,13 +99,14 @@ public enum SqlDbTypeExt
     Unknown
 }
 
-public record CsPropertyDecl(string Name, SqlDbTypeExt Type, bool Nullable);
+public record CsPropertyDecl(string Name, SqlDbTypeExt Type, bool Nullable, List<SqlForeignKey> FkForeignKeys);
 
-public record CsPropertyMap(string Name, bool Unmapped);
+public record CsForeignKey(string? Target, bool? Enforced);
+public record CsPropertyInfo(bool Mapped, List<CsForeignKey> ForeignKeys);
 
 public class CsPropertiesInfo
 {
-    public Dictionary<string, bool> Properties { get; set; } = new Dictionary<string, bool>();
+    public Dictionary<string, CsPropertyInfo> Properties { get; set; } = new Dictionary<string, CsPropertyInfo>();
 }
 
 public class CsPropertyDeclPatch(CsPropertyDecl property, bool solved, bool mapped)
@@ -115,7 +116,9 @@ public class CsPropertyDeclPatch(CsPropertyDecl property, bool solved, bool mapp
     public bool Mapped { get; set; } = mapped;
 }
 
-public record ModelPatch(List<CsPropertyDecl> PropertiesAdd, List<string> PropertiesRemove, List<CsPropertyDecl> PropertiesUpdate);
+public record ModelPropertiesPatch(List<CsPropertyDecl> PropertiesAdd, List<string> PropertiesRemove, List<CsPropertyDecl> PropertiesUpdate, CsPropertiesInfo PropertiesInfo);
+public record ModelForeignKeysPatch(Dictionary<string, CsPropertyFkDecl> PropertiesUpdate);
+public record CsPropertyFkDecl(string Name, List<SqlForeignKey> ForeignKeys);
 
 public class ModelClassRewriter : CSharpSyntaxRewriter
 {
@@ -124,15 +127,19 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
     private SqlTable table;
     private string expectedClassName;
     private SemanticModel model;
+    private readonly Dictionary<string, CsModelSource> tablesMap;
+    private readonly CsModelSource modelSource;
     
     /// <summary>
     /// Updates a model
     /// </summary>
-    public ModelClassRewriter(string expectedClassName, SqlTable table, SemanticModel semanticModel)
+    public ModelClassRewriter(string expectedClassName, SqlTable table, SemanticModel semanticModel, Dictionary<string, CsModelSource> tablesMap, CsModelSource modelSource)
     {
         this.table = table;
         this.expectedClassName = expectedClassName;
         model = semanticModel;
+        this.tablesMap = tablesMap;
+        this.modelSource = modelSource;
     }
     
     private static ClassDeclarationSyntax RemoveProperties(ClassDeclarationSyntax node, string[] properties)
@@ -156,6 +163,8 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
         return node;
     }
 
+    private static HashSet<string> ForeignKeyAttributes = [ "ReferenceKey", "ReferenceKeyAttribute" ];
+
     private static ClassDeclarationSyntax UpdateProperty(ClassDeclarationSyntax node, CsPropertyDecl property)
     {
         MemberDeclarationSyntax? existingProp = node.Members.FirstOrDefault(x => x is PropertyDeclarationSyntax propSyntax2 && propSyntax2.Identifier.ValueText == property.Name);
@@ -166,6 +175,31 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
         }
 
         propSyntax = propSyntax.WithIdentifier(SyntaxFactory.Identifier(property.Name)).WithType(property.Type.ToTypeSyntax(property.Nullable));
+
+        List<AttributeListSyntax> keptAttrLists = [];
+        
+        foreach (AttributeListSyntax aList in propSyntax.AttributeLists)
+        {
+            List<AttributeSyntax> keptAttrs = [];
+
+            foreach (AttributeSyntax attr in aList.Attributes)
+            {
+                if (attr.Name is IdentifierNameSyntax ident && ForeignKeyAttributes.Contains(ident.Identifier.ValueText))
+                {
+                    continue;
+                }
+
+                keptAttrs.Add(attr);
+            }
+
+            if (keptAttrs.Count > 0)
+            {
+                keptAttrLists.Add(aList.WithAttributes(SyntaxFactory.SeparatedList(keptAttrs)));   
+            }
+        }
+        
+        propSyntax = propSyntax.WithAttributeLists(SyntaxFactory.List(keptAttrLists));
+        
         node = node.ReplaceNode(existingProp, propSyntax);
         return node;
     }
@@ -199,8 +233,47 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
                 {
                     mapped = !propDecl.AttributeLists.Any(x => x.Attributes.Any(y => y.Name is IdentifierNameSyntax ident && NotMappedAttributes.Contains(ident.Identifier.ValueText)));
                 }
+
+                List<CsForeignKey> keys = [];
                 
-                info.Properties.Add(propDecl.Identifier.ValueText, mapped);   
+                foreach (AttributeSyntax attr in propDecl.AttributeLists.SelectMany(aList => aList.Attributes))
+                {
+                    if (attr.Name is IdentifierNameSyntax ident && ForeignKeyAttributes.Contains(ident.Identifier.ValueText))
+                    {
+                        if (attr.ArgumentList is not null)
+                        {
+                            string? refIdentVal = null;
+                            bool? enforced = null;
+                            
+                            for (int j = 0; j < attr.ArgumentList.Arguments.Count; j++)
+                            {
+                                switch (j)
+                                {
+                                    case 0 when attr.ArgumentList.Arguments[j].Expression is TypeOfExpressionSyntax { Type: IdentifierNameSyntax refIdent }:
+                                        refIdentVal = refIdent.Identifier.ValueText;
+                                        break;
+                                    case 1 when attr.ArgumentList.Arguments[j].Expression is LiteralExpressionSyntax literalExpr:
+                                    {
+                                        if (literalExpr.Token.IsKind(SyntaxKind.TrueKeyword))
+                                        {
+                                            enforced = true;
+                                        }
+                                        else if (literalExpr.Token.IsKind(SyntaxKind.FalseKeyword))
+                                        {
+                                            enforced = false;
+                                        }
+
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            keys.Add(new CsForeignKey(refIdentVal, enforced));
+                        }
+                    }
+                }
+                
+                info.Properties.Add(propDecl.Identifier.ValueText, new CsPropertyInfo(mapped, keys));   
             }
         }
 
@@ -399,6 +472,99 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
         return node;
     }
 
+    private ClassDeclarationSyntax UpdateForeignKeys(ClassDeclarationSyntax node, ModelForeignKeysPatch patch)
+    {
+        List<MemberDeclarationSyntax> members = [];
+        
+        foreach (MemberDeclarationSyntax member in node.Members)
+        {
+            if (member is not PropertyDeclarationSyntax propDecl)
+            {
+                members.Add(member);
+                continue;
+            }
+
+            if (!patch.PropertiesUpdate.TryGetValue(propDecl.Identifier.ValueText, out CsPropertyFkDecl? patchProp))
+            {
+                members.Add(member);
+                continue;
+            }
+
+            if (propDecl.Identifier.ValueText is "MujSloupec")
+            {
+                int c = 0;
+            }
+            
+            List<AttributeListSyntax> keptAttrLists = [];
+        
+            foreach (AttributeListSyntax aList in propDecl.AttributeLists)
+            {
+                List<AttributeSyntax> keptAttrs = [];
+
+                foreach (AttributeSyntax attr in aList.Attributes)
+                {
+                    if (attr.Name is IdentifierNameSyntax ident && ForeignKeyAttributes.Contains(ident.Identifier.ValueText))
+                    {
+                        continue;
+                    }
+
+                    keptAttrs.Add(attr);
+                }
+
+                if (keptAttrs.Count > 0)
+                {
+                    keptAttrLists.Add(aList.WithAttributes(SyntaxFactory.SeparatedList(keptAttrs)));   
+                }
+            }
+
+            foreach (SqlForeignKey fk in patchProp.ForeignKeys)
+            {
+                string modelName = fk.RefTable;
+                string columnName = fk.RefColumn;
+                bool selfRef = false;
+                
+                if (tablesMap.TryGetValue(fk.RefTable.ToLowerInvariant(), out CsModelSource? str))
+                {
+                    if (string.Equals(str.Name, expectedClassName, StringComparison.InvariantCultureIgnoreCase))
+                    {
+                        selfRef = true;
+                    }
+                    
+                    modelName = str.Name;
+
+                    // currently we are single-passing both props and FKs, if we generated the column before this will fail but the newly generated column is named correctly
+                    if (str.Columns.TryGetValue(columnName.ToLowerInvariant(), out string? existingColumn))
+                    {
+                        columnName = existingColumn;
+                    }
+                }
+
+                ExpressionSyntax expr = selfRef ? SyntaxFactory.IdentifierName(SyntaxFactory.Identifier(columnName)) : SyntaxFactory.MemberAccessExpression(SyntaxKind.SimpleMemberAccessExpression, SyntaxFactory.IdentifierName(modelName), SyntaxFactory.IdentifierName(columnName));
+                
+                keptAttrLists.Add(SyntaxFactory.AttributeList(SyntaxFactory.SeparatedList(new []
+                {
+                    SyntaxFactory.Attribute(SyntaxFactory.IdentifierName("ReferenceKey"), SyntaxFactory.AttributeArgumentList(SyntaxFactory.SeparatedList(new []
+                    {
+                        SyntaxFactory.AttributeArgument(SyntaxFactory.TypeOfExpression(SyntaxFactory.IdentifierName(modelName))),
+                        SyntaxFactory.AttributeArgument(SyntaxFactory.InvocationExpression(SyntaxFactory.IdentifierName(SyntaxFactory.Identifier("nameof")), SyntaxFactory.ArgumentList(
+                            SyntaxFactory.SeparatedList(new []
+                            {
+                                SyntaxFactory.Argument(expr)
+                            })
+                        ))),
+                        SyntaxFactory.AttributeArgument(SyntaxFactory.LiteralExpression(fk.NotEnforced ? SyntaxKind.FalseLiteralExpression : SyntaxKind.TrueLiteralExpression))
+                    })))
+                })));
+            }
+
+            PropertyDeclarationSyntax propDeclNew = propDecl.WithAttributeLists(SyntaxFactory.List(keptAttrLists));
+            members.Add(propDeclNew);
+        }
+
+        node = node.WithMembers(SyntaxFactory.List(members));
+        return node;
+    }
+
     private ClassDeclarationSyntax AddPropertiesExtendCtor(ClassDeclarationSyntax node, IEnumerable<CsPropertyDecl> properties)
     {
         CsPropertyDecl[] propertiesArr = properties.ToArray();
@@ -441,41 +607,72 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
         return node;
     }
 
-    private static HashSet<string> NotMappedAttributes = new HashSet<string> { "NotMapped", "NotMappedAttribute" };
+    private static HashSet<string> NotMappedAttributes = ["NotMapped", "NotMappedAttribute"];
 
-    private ModelPatch ComputePatch(ClassDeclarationSyntax node)
+    private ModelForeignKeysPatch ComputeFksPatch(ClassDeclarationSyntax node)
     {
-        ModelPatch patch = new ModelPatch([], [], []);
-
-        List<CsPropertyDeclPatch> decls = [];
-
         CsPropertiesInfo properties = Properties(node);
+        ModelForeignKeysPatch patch = new ModelForeignKeysPatch([]);
         
-        foreach (MemberDeclarationSyntax member in node.Members.Where(x => x is PropertyDeclarationSyntax propDecl))
+        foreach (MemberDeclarationSyntax member in node.Members)
         {
             if (member is not PropertyDeclarationSyntax propDecl)
             {
                 continue;
             }
 
-            if (propDecl.Identifier.ValueText is "MyEnum")
+            if (!properties.Properties.TryGetValue(propDecl.Identifier.ValueText, out CsPropertyInfo? propInfo))
             {
-                int z = 0;
+                continue;
+            }
+
+            if (!propInfo.Mapped)
+            {
+                continue;
             }
             
-            if (properties.Properties.TryGetValue(propDecl.Identifier.ValueText, out bool mapped))
+            if (!table.Columns.TryGetValue(propDecl.Identifier.ValueText.ToLowerInvariant(), out SqlTableColumn? column))
             {
-                decls.Add(new CsPropertyDeclPatch(propDecl.ToPropertyDecl(model), false, mapped));   
+                continue;
+            }
+
+            if (column.ForeignKeys.Count > 0)
+            {
+                int zz = 0;
+            }
+
+            patch.PropertiesUpdate.TryAdd(propDecl.Identifier.ValueText, new CsPropertyFkDecl(propDecl.Identifier.ValueText, column.ForeignKeys));
+        }
+
+        return patch;
+    }
+    
+    private ModelPropertiesPatch ComputePatch(ClassDeclarationSyntax node)
+    {
+        List<CsPropertyDeclPatch> decls = [];
+        CsPropertiesInfo properties = Properties(node);
+        ModelPropertiesPatch patch = new ModelPropertiesPatch([], [], [], properties);
+        
+        foreach (MemberDeclarationSyntax member in node.Members)
+        {
+            if (member is not PropertyDeclarationSyntax propDecl)
+            {
+                continue;
+            }
+            
+            if (properties.Properties.TryGetValue(propDecl.Identifier.ValueText, out CsPropertyInfo? prop))
+            {
+                decls.Add(new CsPropertyDeclPatch(propDecl.ToPropertyDecl(model), false, prop.Mapped));   
             }
         }
 
-        foreach (SqlTableColumn column in table.Columns)
+        foreach (SqlTableColumn column in table.Columns.Values)
         {
             CsPropertyDeclPatch? prop = decls.FirstOrDefault(x => string.Equals(x.Property.Name, column.Name, StringComparison.InvariantCultureIgnoreCase));
 
             if (prop is null)
             {
-                patch.PropertiesAdd.Add(new CsPropertyDecl(column.Name.FirstCharToUpper(), column.SqlType, column.IsNullable));
+                patch.PropertiesAdd.Add(new CsPropertyDecl(column.Name.FirstCharToUpper(), column.SqlType, column.IsNullable, column.ForeignKeys));
                 continue;
             }
 
@@ -488,7 +685,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
                     continue;
                 }
                 
-                patch.PropertiesUpdate.Add(new CsPropertyDecl(prop.Property.Name, column.SqlType, column.IsNullable));
+                patch.PropertiesUpdate.Add(new CsPropertyDecl(prop.Property.Name, column.SqlType, column.IsNullable, column.ForeignKeys));
                 prop.Solved = true;
                 continue;
             }
@@ -511,12 +708,57 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
             return node;
         }
 
-        ModelPatch patch = ComputePatch(node);
+        ModelPropertiesPatch patch = ComputePatch(node);
         node = RemovePropertiesShrinkCtor(node, patch.PropertiesRemove);
         node = ChangePropertiesTypeUpdateCtor(node, patch.PropertiesUpdate);   
-        node = AddPropertiesExtendCtor(node, patch.PropertiesAdd);   
+        node = AddPropertiesExtendCtor(node, patch.PropertiesAdd);
+        
+        ModelForeignKeysPatch fksPatch = ComputeFksPatch(node);
+        node = UpdateForeignKeys(node, fksPatch);
+        
         NewCode = node.NormalizeWhitespace().ToFullString();
         
+        return node;
+    }
+}
+
+public class PropertyMapper : CSharpSyntaxRewriter
+{
+    private string expectedClassName;
+    private readonly CsModelSource modelSource;
+    
+    /// <summary>
+    /// Maps model
+    /// </summary>
+    public PropertyMapper(string expectedClassName, CsModelSource modelSource)
+    {
+        this.expectedClassName = expectedClassName;
+        this.modelSource = modelSource;
+    }
+    
+    private void MapColumns(ClassDeclarationSyntax node)
+    {
+        modelSource.Columns.Clear();
+
+        foreach (MemberDeclarationSyntax member in node.Members)
+        {
+            if (member is not PropertyDeclarationSyntax propDecl)
+            {
+                continue;
+            }
+
+            modelSource.Columns.TryAdd(propDecl.Identifier.ValueText.ToLowerInvariant(), propDecl.Identifier.ValueText);
+        }
+    }
+    
+    public override SyntaxNode VisitClassDeclaration(ClassDeclarationSyntax node)
+    {
+        if (node.Identifier.ValueText != expectedClassName)
+        {
+            return node;
+        }
+        
+        MapColumns(node);
         return node;
     }
 }

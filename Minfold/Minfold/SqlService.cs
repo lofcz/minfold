@@ -18,7 +18,7 @@ internal class SqlService
         await using SqlConnection conn = Connect();
         await conn.OpenAsync();
         
-        SqlCommand command = new($"use {dbName} select TABLE_NAME, COLUMN_NAME, ORDINAL_POSITION, IS_NULLABLE, DATA_TYPE, columnproperty(object_id(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsIdentity') as IS_IDENTITY from information_schema.columns", conn);
+        SqlCommand command = new($"use {dbName} select TABLE_NAME, COLUMN_NAME, ORDINAL_POSITION, IS_NULLABLE, DATA_TYPE, columnproperty(object_id(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsIdentity') as IS_IDENTITY from information_schema.columns order by TABLE_NAME, COLUMN_NAME", conn);
         await using SqlDataReader reader = await command.ExecuteReaderAsync();
 
         Dictionary<string, SqlTable> tables = new();
@@ -39,13 +39,13 @@ internal class SqlService
             
             SqlTableColumn column = new(columnName, ordinalPosition, isNullable, isIdentity, (SqlDbTypeExt)dt, []);
             
-            if (tables.TryGetValue(tableName, out SqlTable? table))
+            if (tables.TryGetValue(tableName.ToLowerInvariant(), out SqlTable? table))
             {
-                table.Columns.Add(column);
+                table.Columns.Add(column.Name.ToLowerInvariant(), column);
             }
             else
             {
-                tables.TryAdd(tableName, new SqlTable(tableName, [ column ]));
+                tables.TryAdd(tableName.ToLowerInvariant(), new SqlTable(tableName, new Dictionary<string, SqlTableColumn> { {column.Name.ToLowerInvariant(), column} }));
             }
         }
 
@@ -93,13 +93,13 @@ internal class SqlService
 
             SqlForeignKey key = new SqlForeignKey(fkName, tableName, column, refTable, refColumn, notEnforced);
 
-            if (foreignKeys.TryGetValue(tableName, out List<SqlForeignKey>? keys))
+            if (foreignKeys.TryGetValue(tableName.ToLowerInvariant(), out List<SqlForeignKey>? keys))
             {
                 keys.Add(key);
             }
             else
             {
-                foreignKeys.TryAdd(tableName, [key]);
+                foreignKeys.TryAdd(tableName.ToLowerInvariant(), [key]);
             }
         }
 
