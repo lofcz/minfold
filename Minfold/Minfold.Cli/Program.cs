@@ -31,7 +31,7 @@ class Program
         
         connStringOption.AddAlias("-c");
         
-        Option<string> codePathOption = new("--codePath", "Path to a folder containing Db.cs, 'Dao, Models' folders")
+        Option<string> codePathOption = new("--codePath", "Path to a folder containing a single .csproj project. If multiple projects are present, use --project to choose one.")
         {
             IsRequired = true
         };

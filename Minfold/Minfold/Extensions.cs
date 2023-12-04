@@ -131,4 +131,10 @@ public static class Extensions
 
         return str;
     }
+    
+    public static string ReplaceLast(this string source, string find, string replace)
+    {
+        int place = source.LastIndexOf(find, StringComparison.InvariantCulture);
+        return place == -1 ? source : source.Remove(place, find.Length).Insert(place, replace);
+    }
 }

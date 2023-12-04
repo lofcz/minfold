@@ -490,11 +490,6 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
                 continue;
             }
 
-            if (propDecl.Identifier.ValueText is "MujSloupec")
-            {
-                int c = 0;
-            }
-            
             List<AttributeListSyntax> keptAttrLists = [];
         
             foreach (AttributeListSyntax aList in propDecl.AttributeLists)
@@ -523,7 +518,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
             foreach (SqlForeignKey fk in patchProp.ForeignKeys)
             {
                 string modelName = fk.RefTable;
-                string columnName = fk.RefColumn;
+                string columnName = fk.RefColumn.FirstCharToUpper() ?? string.Empty;
                 bool selfRef = false;
                 
                 if (tablesMap.TryGetValue(fk.RefTable.ToLowerInvariant(), out CsModelSource? str))

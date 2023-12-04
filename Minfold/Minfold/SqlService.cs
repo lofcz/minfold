@@ -17,8 +17,16 @@ internal class SqlService
     {
         await using SqlConnection conn = Connect();
         await conn.OpenAsync();
-        
-        SqlCommand command = new($"use {dbName} select TABLE_NAME, COLUMN_NAME, ORDINAL_POSITION, IS_NULLABLE, DATA_TYPE, columnproperty(object_id(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsIdentity') as IS_IDENTITY from information_schema.columns order by TABLE_NAME, COLUMN_NAME", conn);
+
+        SqlCommand command = new($$"""
+            use {{dbName}}
+            select TABLE_NAME, COLUMN_NAME, ORDINAL_POSITION, IS_NULLABLE, DATA_TYPE,
+                   columnproperty(object_id(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsIdentity') as IS_IDENTITY,
+                   columnproperty(object_id(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsComputed') as IS_COMPUTED
+            from information_schema.columns
+            where TABLE_SCHEMA = 'dbo' 
+            order by TABLE_NAME, COLUMN_NAME
+        """, conn);
         await using SqlDataReader reader = await command.ExecuteReaderAsync();
 
         Dictionary<string, SqlTable> tables = new();
@@ -31,13 +39,14 @@ internal class SqlService
             bool isNullable = reader.GetString(3) is "YES";
             string dataType = reader.GetString(4);
             bool isIdentity = reader.GetInt32(5) is 1;
+            bool isComputed = reader.GetInt32(6) is 1;
             
             if (!(Enum.TryParse(typeof(SqlDbType), dataType, true, out object? dataTypeObject) && dataTypeObject is SqlDbType dt))
             {
                 continue;
             }
             
-            SqlTableColumn column = new(columnName, ordinalPosition, isNullable, isIdentity, (SqlDbTypeExt)dt, []);
+            SqlTableColumn column = new(columnName, ordinalPosition, isNullable, isIdentity, (SqlDbTypeExt)dt, [], isComputed);
             
             if (tables.TryGetValue(tableName.ToLowerInvariant(), out SqlTable? table))
             {
