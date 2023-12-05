@@ -15,15 +15,6 @@ public class Minfold
     private CsSource Source = new CsSource(string.Empty, string.Empty, [], string.Empty, string.Empty);
     internal readonly Dictionary<string, CsModelSource> tablesToModelsMap = [];
     internal readonly Dictionary<string, SqlTable> modelsToTablesMap = [];
-
-    record ColumnDefaultVal(SqlTableColumn Column, string? DefaultValue, ColumnDefaultValTypes Type);
-
-    enum ColumnDefaultValTypes
-    {
-        UserAssigned,
-        Optional,
-        Value
-    }
     
     public async Task<Dictionary<string, SqlTable>> AnalyzeSqlSchema(string sqlConn, string dbName)
     {
@@ -63,9 +54,11 @@ public class Minfold
         }
     
         // 2. rules
-        foreach (string pluralCandidate in Inflector.Plural(modelInvariant))
+        string? plural = modelInvariant.Plural();
+
+        if (plural is not null)
         {
-            if (SqlSchema.TryGetValue($"{pluralCandidate}", out SqlTable? tbl3))
+            if (SqlSchema.TryGetValue($"{plural}", out SqlTable? tbl3))
             {
                 return tbl3;
             }
@@ -177,14 +170,134 @@ public class Minfold
         return source;
     }
     
-    public async Task<string> GenerateModel(SqlTable table, Dictionary<string, CsModelSource> tablesMap)
+    public static ColumnDefaultVal? ColumnDefaultValue(string colName, SqlTableColumn? column)
     {
-        const string propPrefix = "    ";
-        const string propPrefix2 = "        ";
-        List<KeyValuePair<string, SqlTableColumn>> ctorCols = table.Columns.Where(x => !x.Value.IsComputed).ToList();
+        if (column is null)
+        {
+            return null;
+        }
+        
+        if (colName is "datecreated")
+        {
+            return new ColumnDefaultVal(column, "DateTime.Now", ColumnDefaultValTypes.Value);
+        }
+            
+        return new ColumnDefaultVal(column, null, ColumnDefaultValTypes.UserAssigned);
+    }
+
+    const string propPrefix = "    ";
+    const string propPrefix2 = "        ";
+    
+    static string Ident(string str, int level = 1)
+    {
+        return level is 2 ? $"{propPrefix2}{str}" : $"{propPrefix}{str}";
+    }
+
+    public static string? DumpCtor(string className, SqlTable table, CsPropertiesInfo? properties)
+    {
+        List<KeyValuePair<string, SqlTableColumn>> ctorCols = table.Columns.Where(x => x.Value is { IsComputed: false, IsIdentity: false }).ToList();
         List<ColumnDefaultVal> ctorDeclCols = ctorCols.OrderBy(x => x.Value.OrdinalPosition).Select(x => ColumnDefaultValue(x.Key, x.Value)).ToList();
         List<ColumnDefaultVal> ctorAssignCols = ctorDeclCols.Where(x => x.Type is not ColumnDefaultValTypes.Value).ToList();
 
+        if (ctorCols.Count > 0)
+        {
+            return $$"""
+             
+                 public {{className}}({{DumpCtorPars()}})
+                 {
+             {{DumpCtorAssignments()}}
+                 }
+             """;
+        }
+        
+        string DumpCtorAssignPar(ColumnDefaultVal par, bool last)
+        {
+            return Ident($"{ColumnName(par.Column).FirstCharToUpper()} = {(par.Type is ColumnDefaultValTypes.Value ? par.DefaultValue : PrefixReservedKeyword(ColumnName(par.Column).FirstCharToLower()))};", 2);
+        } 
+
+        string DumpCtorAssignments()
+        {
+            StringBuilder sb = new StringBuilder();
+
+            for (int i = 0; i < ctorDeclCols.Count; i++)
+            {
+                bool last = i == ctorDeclCols.Count - 1;
+                sb.Append(DumpCtorAssignPar(ctorDeclCols[i], last));
+
+                if (!last)
+                {
+                    sb.Append(Environment.NewLine);   
+                }
+            }
+            
+            return sb.ToString();
+        }
+
+        string ColumnName(SqlTableColumn column)
+        {
+            if (properties is not null)
+            {
+                if (properties.Properties.TryGetValue(column.Name.ToLowerInvariant(), out CsPropertyInfo? info))
+                {
+                    return info.Name;
+                }
+            }
+
+            return column.Name;
+        }
+
+        string DumpCtorParType(ColumnDefaultVal par)
+        {
+            if (properties?.Properties.TryGetValue(par.Column.Name.ToLowerInvariant(), out CsPropertyInfo? info) ?? false)
+            {
+                if (info.Decl.Token is not null && info.Decl.Type is SqlDbTypeExt.CsIdentifier && par.Column.SqlType is SqlDbTypeExt.Int or SqlDbTypeExt.SmallInt or SqlDbTypeExt.TinyInt)
+                {
+                    return $"{info.Decl.Token}{(par.Column.IsNullable ? "?" : string.Empty)}";
+                }
+            }
+            
+            return par.Column.SqlType.ToTypeSyntax(par.Column.IsNullable).ToFullString();
+        }
+
+        string? PrefixReservedKeyword(string? str)
+        {
+            if (str is "ref")
+            {
+                return "@ref";
+            }
+
+            return str;
+        }
+
+        string DumpCtorPar(ColumnDefaultVal par, bool last)
+        {
+            return $"{DumpCtorParType(par)} {PrefixReservedKeyword(ColumnName(par.Column).FirstCharToLower())}{(par.Type is ColumnDefaultValTypes.Optional ? $" = {par.DefaultValue}" : string.Empty)}{(last ? string.Empty : ", ")}";
+        }
+        
+        string DumpCtorPars()
+        {
+            StringBuilder sb = new StringBuilder();
+
+            for (int i = 0; i < ctorAssignCols.Count; i++)
+            {
+                sb.Append(DumpCtorPar(ctorAssignCols[i], i == ctorAssignCols.Count - 1));
+            }
+            
+            return sb.ToString();
+        }
+        
+        return null;
+    }
+
+    public async Task<string> GenerateModel(string className, SqlTable table, Dictionary<string, CsModelSource> tablesMap)
+    {
+        if (tablesMap.TryGetValue(table.Name.ToLowerInvariant(), out CsModelSource? model))
+        {
+            className = model.Name;
+        }
+
+        List<KeyValuePair<string, SqlTableColumn>> ctorCols = table.Columns.Where(x => !x.Value.IsComputed).ToList();
+  
         void DumpProperty(StringBuilder sb, SqlTableColumn column, bool last, bool first, bool nextAnyFks)
         {
             if (!first && column.ForeignKeys.Count > 0)
@@ -225,11 +338,7 @@ public class Minfold
                 sb.Append(Environment.NewLine);
             }
         }
-
-        string Ident(string str, int level = 1)
-        {
-            return level is 2 ? $"{propPrefix2}{str}" : $"{propPrefix}{str}";
-        }
+        
 
         string DumpProperties()
         {
@@ -246,69 +355,6 @@ public class Minfold
 
             return sb.ToString();
         }
-        
-        ColumnDefaultVal ColumnDefaultValue(string colName, SqlTableColumn column)
-        {
-            if (colName is "datecreated")
-            {
-                return new ColumnDefaultVal(column, "DateTime.Now", ColumnDefaultValTypes.Value);
-            }
-            
-            return new ColumnDefaultVal(column, null, ColumnDefaultValTypes.UserAssigned);
-        }
-        
-        string DumpCtorAssignPar(ColumnDefaultVal par, bool last)
-        {
-            return Ident($"{par.Column.Name.FirstCharToUpper()} = {(par.Type is ColumnDefaultValTypes.Value ? par.DefaultValue : par.Column.Name.FirstCharToLower())};", 2);
-        } 
-
-        string DumpCtorAssignments()
-        {
-            StringBuilder sb = new StringBuilder();
-
-            for (int i = 0; i < ctorDeclCols.Count; i++)
-            {
-                bool last = i == ctorDeclCols.Count - 1;
-                sb.Append(DumpCtorAssignPar(ctorDeclCols[i], last));
-
-                if (!last)
-                {
-                    sb.Append(Environment.NewLine);   
-                }
-            }
-            
-            return sb.ToString();
-        }
-
-        string DumpCtorPar(ColumnDefaultVal par, bool last)
-        {
-            return $"{par.Column.SqlType.ToTypeSyntax(par.Column.IsNullable).ToFullString()} {par.Column.Name.FirstCharToLower()}{(par.Type is ColumnDefaultValTypes.Optional ? $" = {par.DefaultValue}" : string.Empty)}{(last ? string.Empty : ", ")}";
-        }
-        
-        string DumpCtorPars()
-        {
-            StringBuilder sb = new StringBuilder();
-
-            for (int i = 0; i < ctorAssignCols.Count; i++)
-            {
-                sb.Append(DumpCtorPar(ctorAssignCols[i], i == ctorAssignCols.Count - 1));
-            }
-            
-            return sb.ToString();
-        }
-
-        string ctor = string.Empty;
-   
-        if (ctorCols.Count > 0)
-        {
-            ctor = $$"""
-            
-                public {{table.Name}}({{DumpCtorPars()}})
-                {
-            {{DumpCtorAssignments()}}
-                }
-            """;
-        }
             
         string str = $$"""
         using System;
@@ -319,21 +365,21 @@ public class Minfold
         using Minfold.Annotations;           
                        
         namespace {{Source.ProjectNamespace}};
-        public class {{table.Name}}
+        public class {{className}}
         {
         {{DumpProperties()}}
-            public {{table.Name}}()
+            public {{className}}()
             {
         
             }
-        {{ctor}}
+        {{DumpCtor(className, table, null)}}
         }
         """;
         
         return str;
     }
 
-    public async Task<string> UpdateModel(CsModelSource tree, SqlTable table, Dictionary<string, CsModelSource> tablesMap)
+    public async Task<ModelClassRewriteResult> UpdateModel(CsModelSource tree, SqlTable table, Dictionary<string, CsModelSource> tablesMap)
     {
         /*DocumentId docId;
         
@@ -370,8 +416,15 @@ public class Minfold
             .AddReferences(references)
             .AddSyntaxTrees(tree.ModelAst);
         ImmutableArray<Diagnostic> diag = compilation.GetDiagnostics();*/
+
+        string modelName = table.Name;
         
-        ModelClassRewriter modelClassVisitor = new ModelClassRewriter(table.Name, table, null, tablesMap, tree);
+        if (tablesMap.TryGetValue(table.Name.ToLowerInvariant(), out CsModelSource? model))
+        {
+            modelName = model.Name;
+        }
+        
+        ModelClassRewriter modelClassVisitor = new ModelClassRewriter(modelName, table, tablesMap, tree);
         CompilationUnitSyntax newNode = (CompilationUnitSyntax)modelClassVisitor.Visit(tree.ModelRootNode);
 
         bool usingAnnotations = newNode.Usings.Any(x => x.NamespaceOrType is QualifiedNameSyntax { Left: IdentifierNameSyntax { Identifier.ValueText: "Minfold" }, Right.Identifier.ValueText: "Annotations" });
@@ -381,8 +434,8 @@ public class Minfold
             QualifiedNameSyntax name = SyntaxFactory.QualifiedName(SyntaxFactory.IdentifierName("Minfold"), SyntaxFactory.IdentifierName("Annotations"));
             newNode = newNode.AddUsings(SyntaxFactory.UsingDirective(name).NormalizeWhitespace());   
         }
-        
-        return newNode.NormalizeWhitespace().ToFullString();
+
+        return new ModelClassRewriteResult(modelClassVisitor.ClassRewritten, newNode.NormalizeWhitespace().ToFullString());
     }
 
     void MapTables()
@@ -434,9 +487,18 @@ public class Minfold
                 return;
             }
             
-            string str = await UpdateModel(source.Value, mappedTable, tablesToModelsMap);
-            await File.WriteAllTextAsync(source.Value.ModelPath, str, token);
-            synchronizedTables.TryAdd(mappedTable.Name.ToLowerInvariant(), true);
+            ModelClassRewriteResult updateResult = await UpdateModel(source.Value, mappedTable, tablesToModelsMap);
+
+            if (source.Value.Name.ToLowerInvariant() is "tenant")
+            {
+                int z = 0;
+            }
+
+            if (updateResult.Rewritten)
+            {
+                await File.WriteAllTextAsync(source.Value.ModelPath, updateResult.Text, token);
+                synchronizedTables.TryAdd(mappedTable.Name.ToLowerInvariant(), true);   
+            }
         });
 
         List<SqlTable> notSynchronized = []; 
@@ -447,9 +509,30 @@ public class Minfold
             {
                 return;
             }
+
+            string className = source.Value.Name.FirstCharToUpper() ?? string.Empty;
+
+            if (className is "LlmContextPairUserReviews")
+            {
+                int z = 0;
+            }
             
-            string str = await GenerateModel(source.Value, tablesToModelsMap);
-            await File.WriteAllTextAsync($"{Source.ProjectPath}\\Dao\\Models\\{source.Value.Name.FirstCharToUpper()}.cs", str, token);
+            if (tablesToModelsMap.TryGetValue(source.Value.Name.ToLowerInvariant(), out CsModelSource? tbl))
+            {
+                className = tbl.Name.FirstCharToUpper() ?? string.Empty;
+            }
+            else
+            {
+                string? singular = className.Singular();
+
+                if (singular is not null)
+                {
+                    className = singular;
+                }
+            }
+            
+            string str = await GenerateModel(className, source.Value, tablesToModelsMap);
+            await File.WriteAllTextAsync($"{Source.ProjectPath}\\Dao\\Models\\{className}.cs", str, token);
         });
 
         int z = 0;

@@ -24,19 +24,19 @@ public static class Extensions
         )
     );
 
-    static CsPropertyDecl ToPropertyDecl(TypeSyntax type, string ident, bool nullable)
+    private static CsPropertyDecl ToPropertyDecl(TypeSyntax type, string ident, bool nullable)
     {
         return type switch
         {
-            PredefinedTypeSyntax baseType => new CsPropertyDecl(ident, baseType.Keyword.ValueText.ToSqlType(), nullable, []),
+            PredefinedTypeSyntax baseType => new CsPropertyDecl(ident, baseType.Keyword.ValueText.ToSqlType(), nullable, [], type.ToFullString()),
             NullableTypeSyntax nullableType => ToPropertyDecl(nullableType.ElementType, ident, true),
-            IdentifierNameSyntax identSyntax => new CsPropertyDecl(ident, identSyntax.Identifier.ValueText.ToSqlType(), nullable, []),
-            GenericNameSyntax genIdent => new CsPropertyDecl(ident, SqlDbTypeExt.CsIdentifier, nullable, []),
-            _ => new CsPropertyDecl(ident, SqlDbTypeExt.Unknown, nullable, [])
+            IdentifierNameSyntax identSyntax => new CsPropertyDecl(ident, identSyntax.Identifier.ValueText.ToSqlType(), nullable, [], type.ToFullString()),
+            GenericNameSyntax genIdent => new CsPropertyDecl(ident, SqlDbTypeExt.CsIdentifier, nullable, [], type.ToFullString()),
+            _ => new CsPropertyDecl(ident, SqlDbTypeExt.Unknown, nullable, [], type.ToFullString())
         };
     }
     
-    public static CsPropertyDecl ToPropertyDecl(this PropertyDeclarationSyntax prop, SemanticModel model)
+    public static CsPropertyDecl ToPropertyDecl(this PropertyDeclarationSyntax prop)
     {
         string ident = prop.Identifier.ValueText;
         return ToPropertyDecl(prop.Type, ident, false);

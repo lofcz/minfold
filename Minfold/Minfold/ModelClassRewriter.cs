@@ -99,10 +99,9 @@ public enum SqlDbTypeExt
     Unknown
 }
 
-public record CsPropertyDecl(string Name, SqlDbTypeExt Type, bool Nullable, List<SqlForeignKey> FkForeignKeys);
-
+public record CsPropertyDecl(string Name, SqlDbTypeExt Type, bool Nullable, List<SqlForeignKey> FkForeignKeys, string? Token);
 public record CsForeignKey(string? Target, bool? Enforced);
-public record CsPropertyInfo(bool Mapped, List<CsForeignKey> ForeignKeys);
+public record CsPropertyInfo(string Name, bool Mapped, List<CsForeignKey> ForeignKeys, ColumnDefaultVal? DefaultVal, CsPropertyDecl Decl);
 
 public class CsPropertiesInfo
 {
@@ -116,6 +115,13 @@ public class CsPropertyDeclPatch(CsPropertyDecl property, bool solved, bool mapp
     public bool Mapped { get; set; } = mapped;
 }
 
+public enum ModelActionType
+{
+    EmptyCtor,
+    ModelCtor
+}
+
+public record ModelActionsPatch(List<ModelActionType> Actions);
 public record ModelPropertiesPatch(List<CsPropertyDecl> PropertiesAdd, List<string> PropertiesRemove, List<CsPropertyDecl> PropertiesUpdate, CsPropertiesInfo PropertiesInfo);
 public record ModelForeignKeysPatch(Dictionary<string, CsPropertyFkDecl> PropertiesUpdate);
 public record CsPropertyFkDecl(string Name, List<SqlForeignKey> ForeignKeys);
@@ -123,21 +129,20 @@ public record CsPropertyFkDecl(string Name, List<SqlForeignKey> ForeignKeys);
 public class ModelClassRewriter : CSharpSyntaxRewriter
 {
     public string NewCode { get; set; }
+    public bool ClassRewritten { get; set; }
  
     private SqlTable table;
     private string expectedClassName;
-    private SemanticModel model;
     private readonly Dictionary<string, CsModelSource> tablesMap;
     private readonly CsModelSource modelSource;
     
     /// <summary>
     /// Updates a model
     /// </summary>
-    public ModelClassRewriter(string expectedClassName, SqlTable table, SemanticModel semanticModel, Dictionary<string, CsModelSource> tablesMap, CsModelSource modelSource)
+    public ModelClassRewriter(string expectedClassName, SqlTable table, Dictionary<string, CsModelSource> tablesMap, CsModelSource modelSource)
     {
         this.table = table;
         this.expectedClassName = expectedClassName;
-        model = semanticModel;
         this.tablesMap = tablesMap;
         this.modelSource = modelSource;
     }
@@ -204,7 +209,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
         return node;
     }
 
-    private static CsPropertiesInfo Properties(ClassDeclarationSyntax node)
+    private CsPropertiesInfo Properties(ClassDeclarationSyntax node)
     {
         CsPropertiesInfo info = new CsPropertiesInfo();
         int lastIndex = node.Members.LastIndexOf(x => x.IsKind(SyntaxKind.PropertyDeclaration));
@@ -272,8 +277,15 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
                         }
                     }
                 }
-                
-                info.Properties.Add(propDecl.Identifier.ValueText, new CsPropertyInfo(mapped, keys));   
+
+                SqlTableColumn? tableColumn = null;
+
+                if (table.Columns.TryGetValue(propDecl.Identifier.ValueText.ToLowerInvariant(), out SqlTableColumn? col))
+                {
+                    tableColumn = col;
+                }
+
+                info.Properties.TryAdd(propDecl.Identifier.ValueText.ToLowerInvariant(), new CsPropertyInfo(propDecl.Identifier.ValueText, mapped, keys, Minfold.ColumnDefaultValue(propDecl.Identifier.ValueText.ToLowerInvariant(), tableColumn), propDecl.ToPropertyDecl()));   
             }
         }
 
@@ -366,20 +378,15 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
 
     private static ClassDeclarationSyntax ExtendConstructor(ClassDeclarationSyntax node, CsPropertyDecl[] properties)
     {
-        bool ctorUpdated = false;
-        
-        foreach (MemberDeclarationSyntax mNode in node.Members.Where(x => x.IsKind(SyntaxKind.ConstructorDeclaration)))
+        if (node.Identifier.ValueText.ToLowerInvariant().Trim() is "form")
         {
-            if (mNode is not ConstructorDeclarationSyntax ctorNode)
-            {
-                continue;
-            }
+            int z = 0;
+        }
+        
+        bool ctorUpdated = false;
 
-            if (ctorNode.ParameterList.Parameters.Count is 0)
-            {
-                continue;
-            }
-
+        void DoExtendConstructor(MemberDeclarationSyntax mNode, ConstructorDeclarationSyntax ctorNode)
+        {
             int insertIndex = ctorNode.ParameterList.Parameters.IndexOf(x => x.Default is not null);
 
             if (insertIndex is -1)
@@ -404,7 +411,55 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
             
             node = node.ReplaceNode(mNode, ctorNode);
             ctorUpdated = true;
-            break;
+        }
+
+        void TryExtendCtor(ConstructorDeclarationSyntax? ctorNode)
+        {
+            if (ctorNode is null)
+            {
+                foreach (MemberDeclarationSyntax mNode in node.Members.Where(x => x.IsKind(SyntaxKind.ConstructorDeclaration)))
+                {
+                    if (mNode is not ConstructorDeclarationSyntax ctorNode2)
+                    {
+                        continue;
+                    }
+
+                    if (ctorNode2.ParameterList.Parameters.Count is 0)
+                    {
+                        continue;
+                    }
+
+                    ctorNode = ctorNode2;
+                    break;
+                }   
+            }
+
+            if (ctorNode is not null)
+            {
+                DoExtendConstructor(ctorNode, ctorNode);
+                ctorUpdated = true;
+            }
+        }
+
+        TryExtendCtor(null);
+        
+        if (!ctorUpdated)
+        {
+            MemberDeclarationSyntax? emptyCtorNode = node.Members.FirstOrDefault(x => x.IsKind(SyntaxKind.ConstructorDeclaration));
+            int insertIndex = 0;
+
+            if (emptyCtorNode is not null)
+            {
+                insertIndex = node.Members.IndexOf(emptyCtorNode) + 1;
+            }
+
+            ConstructorDeclarationSyntax newCtor = SyntaxFactory.ConstructorDeclaration(node.Identifier.ValueText)
+                .WithBody(SyntaxFactory.Block())
+                .AddModifiers(SyntaxFactory.Token(SyntaxKind.PublicKeyword));
+            
+            SyntaxList<MemberDeclarationSyntax> newMembers = node.Members.Insert(insertIndex, newCtor);
+            node = node.WithMembers(newMembers);
+            TryExtendCtor(newCtor);
         }
 
         return node;
@@ -573,7 +628,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
         }
         
         node = AddProperties(node, propertiesArr);
-        node = ExtendConstructor(node, propertiesArr);
+        //node = ExtendConstructor(node, propertiesArr);
         return node;
     }
 
@@ -587,7 +642,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
         }
         
         node = RemoveProperties(node, propertiesArr);
-        node = ShrinkConstructor(node, propertiesArr);
+        //node = ShrinkConstructor(node, propertiesArr);
         return node;
     }
 
@@ -601,7 +656,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
         }
         
         node = propertiesArr.Aggregate(node, UpdateProperty);
-        node = propertiesArr.Aggregate(node, UpdateConstructorProperty);
+        //node = propertiesArr.Aggregate(node, UpdateConstructorProperty);
         return node;
     }
 
@@ -619,7 +674,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
                 continue;
             }
 
-            if (!properties.Properties.TryGetValue(propDecl.Identifier.ValueText, out CsPropertyInfo? propInfo))
+            if (!properties.Properties.TryGetValue(propDecl.Identifier.ValueText.ToLowerInvariant(), out CsPropertyInfo? propInfo))
             {
                 continue;
             }
@@ -644,11 +699,28 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
 
         return patch;
     }
+
+    private ModelActionsPatch ComputeActionsPatch(ClassDeclarationSyntax node, CsPropertiesInfo properties)
+    {
+        ModelActionsPatch patch = new ModelActionsPatch([]);
+        List<ConstructorDeclarationSyntax> ctors = GetCtors(node);
+
+        if (!ctors.Any(x => x.ParameterList.Parameters.Count is 0 && x.Modifiers.Any(y => y.IsKind(SyntaxKind.PublicKeyword)) && !x.Modifiers.Any(y => y.IsKind(SyntaxKind.StaticKeyword))))
+        {
+            patch.Actions.Add(ModelActionType.EmptyCtor);
+        }
+
+        if (properties.Properties.Count > 0 && !ctors.Any(x => x.ParameterList.Parameters.Count > 0 && x.Modifiers.Any(y => y.IsKind(SyntaxKind.PublicKeyword)) && !x.Modifiers.Any(y => y.IsKind(SyntaxKind.StaticKeyword))))
+        {
+            patch.Actions.Add(ModelActionType.ModelCtor);
+        }
+
+        return patch;
+    }
     
-    private ModelPropertiesPatch ComputePatch(ClassDeclarationSyntax node)
+    private ModelPropertiesPatch ComputePatch(ClassDeclarationSyntax node, CsPropertiesInfo properties)
     {
         List<CsPropertyDeclPatch> decls = [];
-        CsPropertiesInfo properties = Properties(node);
         ModelPropertiesPatch patch = new ModelPropertiesPatch([], [], [], properties);
         
         foreach (MemberDeclarationSyntax member in node.Members)
@@ -658,9 +730,9 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
                 continue;
             }
             
-            if (properties.Properties.TryGetValue(propDecl.Identifier.ValueText, out CsPropertyInfo? prop))
+            if (properties.Properties.TryGetValue(propDecl.Identifier.ValueText.ToLowerInvariant(), out CsPropertyInfo? prop))
             {
-                decls.Add(new CsPropertyDeclPatch(propDecl.ToPropertyDecl(model), false, prop.Mapped));   
+                decls.Add(new CsPropertyDeclPatch(propDecl.ToPropertyDecl(), false, prop.Mapped));   
             }
         }
 
@@ -670,7 +742,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
 
             if (prop is null)
             {
-                patch.PropertiesAdd.Add(new CsPropertyDecl(column.Name.FirstCharToUpper(), column.SqlType, column.IsNullable, column.ForeignKeys));
+                patch.PropertiesAdd.Add(new CsPropertyDecl(column.Name.FirstCharToUpper(), column.SqlType, column.IsNullable, column.ForeignKeys, null));
                 continue;
             }
 
@@ -683,7 +755,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
                     continue;
                 }
                 
-                patch.PropertiesUpdate.Add(new CsPropertyDecl(prop.Property.Name, column.SqlType, column.IsNullable, column.ForeignKeys));
+                patch.PropertiesUpdate.Add(new CsPropertyDecl(prop.Property.Name, column.SqlType, column.IsNullable, column.ForeignKeys, null));
                 prop.Solved = true;
                 continue;
             }
@@ -695,8 +767,109 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
         {
             patch.PropertiesRemove.Add(currentDecl.Property.Name);
         }
+
+        if (node.Identifier.ValueText.ToLowerInvariant() is "llmconfig")
+        {
+            int z = 0;
+        }
         
         return patch;
+    }
+    
+    private static List<ConstructorDeclarationSyntax> GetCtors(ClassDeclarationSyntax node)
+    {
+        List<ConstructorDeclarationSyntax> ctors = [];
+
+        foreach (MemberDeclarationSyntax mNode in node.Members.Where(x => x.IsKind(SyntaxKind.ConstructorDeclaration)))
+        {
+            if (mNode is not ConstructorDeclarationSyntax ctorNode)
+            {
+                continue;
+            }
+
+            ctors.Add(ctorNode);
+        }
+
+        return ctors;
+    }
+
+    private ClassDeclarationSyntax EnsureNonEmptyCtor(ClassDeclarationSyntax node, CsPropertiesInfo properties)
+    {
+        List<ConstructorDeclarationSyntax> ctors = GetCtors(node);
+
+        int insertIndex = -1;
+        
+        ConstructorDeclarationSyntax? nonEmptyCtor = ctors.FirstOrDefault(x => x.ParameterList.Parameters.Count > 0 && !x.Modifiers.Any(y => y.IsKind(SyntaxKind.StaticKeyword)));
+
+        if (nonEmptyCtor is not null)
+        {
+            node = node.WithMembers(node.Members.Remove(nonEmptyCtor));
+            ctors = GetCtors(node);
+        }
+        
+        if (ctors.Count > 0)
+        {
+            ConstructorDeclarationSyntax? emptyCtor = ctors.FirstOrDefault(x => x.ParameterList.Parameters.Count is 0 && !x.Modifiers.Any(y => y.IsKind(SyntaxKind.StaticKeyword)));
+
+            if (emptyCtor is not null)
+            {
+                insertIndex = node.Members.IndexOf(emptyCtor) + 1;   
+            }
+        }
+
+        if (insertIndex is -1)
+        {
+            insertIndex = node.Members.Count;
+        }
+
+        string? ctortext = Minfold.DumpCtor(node.Identifier.ValueText, table, properties);
+
+        if (ctortext is null)
+        {
+            return node;
+        }
+
+        MemberDeclarationSyntax? mmbr = SyntaxFactory.ParseMemberDeclaration(ctortext);
+
+        if (mmbr is not null)
+        {
+            node = node.WithMembers(node.Members.Insert(insertIndex, mmbr));
+        }
+        
+        string text = node.NormalizeWhitespace().ToFullString();
+        
+        return node;
+    }
+    
+    private ClassDeclarationSyntax EnsureEmptyCtor(ClassDeclarationSyntax node)
+    {
+        List<ConstructorDeclarationSyntax> ctors = GetCtors(node);
+
+        if (!ctors.Any(x => x.ParameterList.Parameters.Count is 0 && x.Modifiers.Any(y => y.IsKind(SyntaxKind.PublicKeyword)) && !x.Modifiers.Any(y => y.IsKind(SyntaxKind.StaticKeyword))))
+        {
+            MemberDeclarationSyntax? appendAfter = null;
+            
+            foreach (MemberDeclarationSyntax x in node.Members)
+            {
+                if (x is ConstructorDeclarationSyntax)
+                {
+                    break;
+                }
+
+                appendAfter = x;
+            }
+
+            if (appendAfter is not null)
+            {
+                SyntaxList<MemberDeclarationSyntax> newMembers = node.Members.Insert(node.Members.IndexOf(appendAfter) + 1, SyntaxFactory.ConstructorDeclaration(node.Identifier.ValueText)
+                    .WithBody(SyntaxFactory.Block())
+                    .AddModifiers(SyntaxFactory.Token(SyntaxKind.PublicKeyword))
+                );
+                node = node.WithMembers(newMembers);
+            }
+        }
+
+        return node;
     }
     
     public override SyntaxNode VisitClassDeclaration(ClassDeclarationSyntax node)
@@ -706,7 +879,14 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
             return node;
         }
 
-        ModelPropertiesPatch patch = ComputePatch(node);
+        ClassRewritten = true;
+
+        CsPropertiesInfo properties = Properties(node);
+        ModelActionsPatch actionsPatch = ComputeActionsPatch(node, properties);
+
+        node = EnsureEmptyCtor(node);
+        
+        ModelPropertiesPatch patch = ComputePatch(node, properties);
         node = RemovePropertiesShrinkCtor(node, patch.PropertiesRemove);
         node = ChangePropertiesTypeUpdateCtor(node, patch.PropertiesUpdate);   
         node = AddPropertiesExtendCtor(node, patch.PropertiesAdd);
@@ -714,49 +894,10 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
         ModelForeignKeysPatch fksPatch = ComputeFksPatch(node);
         node = UpdateForeignKeys(node, fksPatch);
         
+        node = EnsureNonEmptyCtor(node, properties);
+        
         NewCode = node.NormalizeWhitespace().ToFullString();
         
-        return node;
-    }
-}
-
-public class PropertyMapper : CSharpSyntaxRewriter
-{
-    private string expectedClassName;
-    private readonly CsModelSource modelSource;
-    
-    /// <summary>
-    /// Maps model
-    /// </summary>
-    public PropertyMapper(string expectedClassName, CsModelSource modelSource)
-    {
-        this.expectedClassName = expectedClassName;
-        this.modelSource = modelSource;
-    }
-    
-    private void MapColumns(ClassDeclarationSyntax node)
-    {
-        modelSource.Columns.Clear();
-
-        foreach (MemberDeclarationSyntax member in node.Members)
-        {
-            if (member is not PropertyDeclarationSyntax propDecl)
-            {
-                continue;
-            }
-
-            modelSource.Columns.TryAdd(propDecl.Identifier.ValueText.ToLowerInvariant(), propDecl.Identifier.ValueText);
-        }
-    }
-    
-    public override SyntaxNode VisitClassDeclaration(ClassDeclarationSyntax node)
-    {
-        if (node.Identifier.ValueText != expectedClassName)
-        {
-            return node;
-        }
-        
-        MapColumns(node);
         return node;
     }
 }
