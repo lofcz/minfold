@@ -11,10 +11,35 @@ public record CsModelSource(string Name, string ModelPath, string? DaoPath, stri
 public record CsSource(string DbPath, string DbSource, ConcurrentDictionary<string, CsModelSource> Models, string ProjectNamespace, string ProjectPath);
 public record ColumnDefaultVal(SqlTableColumn Column, string? DefaultValue, ColumnDefaultValTypes Type);
 public record ModelClassRewriteResult(bool Rewritten, string Text);
+public record ModelActionsPatch(List<ModelActionType> Actions);
+public record CsPropertyDecl(string Name, SqlDbTypeExt Type, bool Nullable, List<SqlForeignKey> FkForeignKeys, string? Token);
+public record CsForeignKey(string? Target, bool? Enforced);
+public record CsPropertyInfo(string Name, bool Mapped, List<CsForeignKey> ForeignKeys, ColumnDefaultVal? DefaultVal, CsPropertyDecl Decl);
+public record ModelPropertiesPatch(List<CsPropertyDecl> PropertiesAdd, List<string> PropertiesRemove, List<CsPropertyDecl> PropertiesUpdate, CsPropertiesInfo PropertiesInfo);
+public record ModelForeignKeysPatch(Dictionary<string, CsPropertyFkDecl> PropertiesUpdate);
+public record CsPropertyFkDecl(string Name, List<SqlForeignKey> ForeignKeys);
 
 public enum ColumnDefaultValTypes
 {
     UserAssigned,
     Optional,
     Value
+}
+
+public enum ModelActionType
+{
+    EmptyCtor,
+    ModelCtor
+}
+
+public class CsPropertiesInfo
+{
+    public Dictionary<string, CsPropertyInfo> Properties { get; set; } = new Dictionary<string, CsPropertyInfo>();
+}
+
+public class CsPropertyDeclPatch(CsPropertyDecl property, bool solved, bool mapped)
+{
+    public CsPropertyDecl Property { get; set; } = property;
+    public bool Solved { get; set; } = solved;
+    public bool Mapped { get; set; } = mapped;
 }
