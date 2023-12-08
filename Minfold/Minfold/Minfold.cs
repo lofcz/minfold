@@ -454,7 +454,7 @@ public class Minfold
         """;
     }
 
-    public async Task<ClassRewriteResult> UpdateOrCreateDao(CsModelSource tree, SqlTable table, Dictionary<string, CsModelSource> tablesMap, CsPropertiesInfo? properties, ConcurrentDictionary<string, bool> synchronizationMap)
+    public async Task<ClassRewriteResult> UpdateOrCreateDao(CsModelSource tree, SqlTable table, Dictionary<string, CsModelSource> tablesMap, CsPropertiesInfo? properties)
     {
         string daoName = $"{tree.Name}Dao";
         string modelName = tree.Name;
@@ -477,16 +477,16 @@ public class Minfold
             string? identColName = null;
             string? identColType = null;
             
-            KeyValuePair<string, SqlTableColumn> identityCol = table.Columns.FirstOrDefault(x => x.Value.IsIdentity);
+            KeyValuePair<string, SqlTableColumn> pkCol = table.Columns.FirstOrDefault(x => x.Value.IsPrimaryKey);
             Dictionary<string, string>? customUsings = null;
 
-            if (identityCol.Value is not null)
+            if (pkCol.Value is not null)
             {
-                identColName = identityCol.Value.Name;
+                identColName = pkCol.Value.Name;
 
-                if (identityCol.Value.SqlType is not SqlDbTypeExt.CsIdentifier)
+                if (pkCol.Value.SqlType is not SqlDbTypeExt.CsIdentifier)
                 {
-                    identColType = identityCol.Value.SqlType.ToTypeSyntax(false).ToFullString();
+                    identColType = pkCol.Value.SqlType.ToTypeSyntax(false).ToFullString();
                 }
 
                 if (properties?.Properties.TryGetValue(identColName.ToLowerInvariant(), out CsPropertyInfo? propInfo) ?? false)
@@ -503,20 +503,24 @@ public class Minfold
 
             string dbSet = table.Name;
 
-            if (Source.DbSetMap.TryGetValue(modelName.ToLowerInvariant(), out string? dbSetName))
+            if (Source.DbSetMap.TryGetValue(modelName.ToLowerInvariant(), out CsDbSetDecl? dbSetName))
             {
-                dbSet = dbSetName;
+                dbSet = dbSetName.SetName;
+            }
+            else
+            {
+                Source.DbSetMap.TryAdd(modelName.ToLowerInvariant(), new CsDbSetDecl(modelName, table.Name, null));
             }
             
             string daoText = GenerateDaoCode(daoName, modelName, tree.ModelInfo.Namespace ?? $"{Source.ProjectNamespace}.Dao", dbSet, identColName, identColType, true, customUsings);
             await File.WriteAllTextAsync(path, daoText);
-            synchronizationMap.TryAdd(daoName.ToLowerInvariant(), true);
+            synchronizedDaoFiles.TryAdd(daoName.ToLowerInvariant(), true);
             return new ClassRewriteResult(false, null);
         }
         
         DaoClassRewriter daoClassVisitor = new DaoClassRewriter(daoName, modelName, table, tablesMap, tree);
         CompilationUnitSyntax newNode = (CompilationUnitSyntax)daoClassVisitor.Visit(tree.DaoRootNode);
-        synchronizationMap.TryAdd(daoName.ToLowerInvariant(), true);
+        synchronizedDaoFiles.TryAdd(daoName.ToLowerInvariant(), true);
 
         return new ClassRewriteResult(daoClassVisitor.ClassRewritten, newNode.NormalizeWhitespace().ToFullString());
     }
@@ -546,10 +550,15 @@ public class Minfold
             newNode = newNode.AddUsings(SyntaxFactory.UsingDirective(name).NormalizeWhitespace());   
         }
 
+        if (!Source.DbSetMap.TryGetValue(modelName.ToLowerInvariant(), out CsDbSetDecl? decl))
+        {
+            Source.DbSetMap.TryAdd(modelName.ToLowerInvariant(), new CsDbSetDecl(modelName, table.Name, null));
+        }
+        
         return new ModelClassRewriteResult(modelClassVisitor.ClassRewritten, newNode.NormalizeWhitespace().ToFullString(), modelClassVisitor.PropertiesMap);
     }
 
-    void MapTables()
+    private void MapTables()
     {
         tablesToModelsMap.Clear();
         modelsToTablesMap.Clear();
@@ -569,7 +578,7 @@ public class Minfold
         }
     }
 
-    async Task MapDbSet()
+    private async Task MapDbSet()
     {
         string path = $"{Source.ProjectPath}\\Dao\\Db.cs";
         
@@ -583,21 +592,56 @@ public class Minfold
         SyntaxTree dbsetAst = CSharpSyntaxTree.ParseText(content);
         SyntaxNode root = await dbsetAst.GetRootAsync();
         
-        DbSetMapper modelClassVisitor = new DbSetMapper("Db", Source.DbSetMap);
-        modelClassVisitor.Visit(root);
+        DbSetMapper dbSetMapper = new DbSetMapper("Db", Source.DbSetMap);
+        dbSetMapper.Visit(root);
     }
 
+    private async Task UpdateDbSet()
+    {
+        string path = $"{Source.ProjectPath}\\Dao\\Db.cs";
+
+        if (!File.Exists(path))
+        {
+            return;
+        }
+
+        string dbSetText = await File.ReadAllTextAsync(path);
+        
+        SyntaxTree dbsetAst = CSharpSyntaxTree.ParseText(dbSetText);
+        SyntaxNode root = await dbsetAst.GetRootAsync();
+
+        List<CsDbSetDecl> decls = [];
+        
+        foreach (KeyValuePair<string, CsDbSetDecl> pair in Source.DbSetMap)
+        {
+            if (!synchronizedModelFiles.TryGetValue(pair.Key, out bool synchronized) || !synchronized)
+            {
+                continue;
+            }
+
+            decls.Add(pair.Value);
+        }
+        
+        DbSetClassRewritter dbSetRewritter = new DbSetClassRewritter("Db", decls);
+        CompilationUnitSyntax newNode = (CompilationUnitSyntax)dbSetRewritter.Visit(root);
+
+        await File.WriteAllTextAsync(path, newNode.NormalizeWhitespace().ToFullString());
+    }
+
+    private ConcurrentDictionary<string, bool> synchronizedTables = [];
+    private ConcurrentDictionary<string, bool> synchronizedModelFiles = [];
+    private ConcurrentDictionary<string, bool> synchronizedDaoFiles = [];
+    
     public async Task Synchronize(string sqlConn, string dbName, string codePath)
     {
+        synchronizedTables = [];
+        synchronizedModelFiles = [];
+        synchronizedDaoFiles = [];
+        
         await AnalyzeSqlSchema(sqlConn, dbName);
         await LoadCsCode(codePath);
         await MapDbSet();
         MapTables();
- 
-        // 1. models
-        ConcurrentDictionary<string, bool> synchronizedTables = [];
-        ConcurrentDictionary<string, bool> synchronizedModelFiles = [];
-        ConcurrentDictionary<string, bool> synchronizedDaoFiles = [];
 
         await Parallel.ForEachAsync(Source.Models, async (source, token) =>
         {
@@ -617,18 +661,8 @@ public class Minfold
             {
                 return;
             }
-
-            if (source.Value.Name.ToLowerInvariant() is "mytable")
-            {
-                int z = 0;
-            }
             
             ModelClassRewriteResult modelUpdateResult = await UpdateModel(source.Value, mappedTable, tablesToModelsMap);
-
-            if (source.Value.Name.ToLowerInvariant() is "tenant")
-            {
-                int z = 0;
-            }
             
             if (modelUpdateResult.Rewritten)
             {
@@ -637,7 +671,7 @@ public class Minfold
                 synchronizedModelFiles.TryAdd(source.Key, true);
             }
             
-            ClassRewriteResult daoUpdateResult = await UpdateOrCreateDao(source.Value, mappedTable, tablesToModelsMap, modelUpdateResult.Properties, synchronizedDaoFiles);
+            ClassRewriteResult daoUpdateResult = await UpdateOrCreateDao(source.Value, mappedTable, tablesToModelsMap, modelUpdateResult.Properties);
             
             if (daoUpdateResult.Rewritten && source.Value.DaoPath is not null)
             {
@@ -699,7 +733,7 @@ public class Minfold
                 }
                 
                 CsModelSource model = new CsModelSource(className, path, daoPath, modelGen.Code, daoCode, modelAst, daoAst, "", source.Value, root, daoRootNode, modelGen.Columns, new ModelInfo { Namespace = modelGen.Namespace });
-                ClassRewriteResult daoUpdateResult = await UpdateOrCreateDao(model, source.Value, tablesToModelsMap, ModelClassRewriter.Properties(classNode, source.Value, (CompilationUnitSyntax)root), synchronizedDaoFiles);
+                ClassRewriteResult daoUpdateResult = await UpdateOrCreateDao(model, source.Value, tablesToModelsMap, ModelClassRewriter.Properties(classNode, source.Value, (CompilationUnitSyntax)root));
             
                 if (daoUpdateResult.Rewritten && daoPath is not null)
                 {
@@ -729,6 +763,8 @@ public class Minfold
                 }
             }
         });
+
+        await UpdateDbSet();
     }
 
     private static readonly HashSet<string> ProtectedDaos = ["batchdao", "sqldao", "daobase"];

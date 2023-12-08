@@ -11,15 +11,40 @@ public class DbSetMapper : CSharpSyntaxRewriter
     public bool ClassRewritten { get; set; }
     
     private string expectedClassName;
-    private readonly Dictionary<string, string> dbSetMap;
+    private readonly Dictionary<string, CsDbSetDecl> dbSetMap;
     
     /// <summary>
     /// Updates a dao
     /// </summary>
-    public DbSetMapper(string expectedClassName, Dictionary<string, string> dbSetMap)
+    public DbSetMapper(string expectedClassName, Dictionary<string, CsDbSetDecl> dbSetMap)
     {
         this.expectedClassName = expectedClassName;
         this.dbSetMap = dbSetMap;
+    }
+
+    public static CsDbSetDecl? MemberIsDbSetDecl(MemberDeclarationSyntax memberDecl)
+    {
+        if (memberDecl is not PropertyDeclarationSyntax propDecl)
+        {
+            return null;
+        }
+
+        if (propDecl.Type is not GenericNameSyntax genIdent)
+        {
+            return null;
+        }
+
+        if (genIdent.TypeArgumentList.Arguments.Count is not 1)
+        {
+            return null;
+        }
+
+        if (genIdent.Identifier.ValueText is not "DbSet")
+        {
+            return null;
+        }
+        
+        return new CsDbSetDecl(genIdent.TypeArgumentList.Arguments[0].ToFullString().Trim(), propDecl.Identifier.ValueText.Trim(), propDecl);
     }
     
     public override SyntaxNode VisitClassDeclaration(ClassDeclarationSyntax node)
@@ -31,35 +56,14 @@ public class DbSetMapper : CSharpSyntaxRewriter
 
         foreach (MemberDeclarationSyntax memberDecl in node.Members)
         {
-            if (memberDecl is not PropertyDeclarationSyntax propDecl)
-            {
-                continue;
-            }
-
-            if (propDecl.Type is not GenericNameSyntax genIdent)
-            {
-                continue;
-            }
-
-            if (genIdent.TypeArgumentList.Arguments.Count is not 1)
-            {
-                continue;
-            }
-
-            if (genIdent.Identifier.ValueText is not "DbSet")
-            {
-                continue;
-            }
+            CsDbSetDecl? setDecl = MemberIsDbSetDecl(memberDecl);
             
-            if (!propDecl.Modifiers.Any(SyntaxKind.VirtualKeyword))
+            if (setDecl is null)
             {
-                // [todo] warn
+                continue;
             }
 
-            string modelName = genIdent.TypeArgumentList.Arguments[0].ToFullString();
-            string setName = propDecl.Identifier.ValueText;
-
-            if (!dbSetMap.TryAdd(modelName.ToLowerInvariant(), setName))
+            if (!dbSetMap.TryAdd(setDecl.ModelName.ToLowerInvariant(), setDecl))
             {
                 // [todo] warn
             }

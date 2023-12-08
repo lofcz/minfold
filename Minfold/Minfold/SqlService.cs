@@ -19,13 +19,22 @@ internal class SqlService
         await conn.OpenAsync();
 
         SqlCommand command = new($$"""
-            use {{dbName}}
-            select TABLE_NAME, COLUMN_NAME, ORDINAL_POSITION, IS_NULLABLE, DATA_TYPE,
-                   columnproperty(object_id(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsIdentity') as IS_IDENTITY,
-                   columnproperty(object_id(TABLE_SCHEMA + '.' + TABLE_NAME), COLUMN_NAME, 'IsComputed') as IS_COMPUTED
-            from information_schema.columns
-            where TABLE_SCHEMA = 'dbo' 
-            order by TABLE_NAME, COLUMN_NAME
+        use {{dbName}}
+        select col.TABLE_NAME, col.COLUMN_NAME, col.ORDINAL_POSITION, col.IS_NULLABLE, col.DATA_TYPE,
+                columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'IsIdentity') as IS_IDENTITY,
+                columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'IsComputed') as IS_COMPUTED,
+        		isnull(j.pk, cast(0 as bit)) as IS_PRIMARY
+        from information_schema.COLUMNS col
+        left join (select k.COLUMN_NAME, k.TABLE_NAME, iif(k.CONSTRAINT_NAME is null, 0, 1) as pk
+                   from information_schema.TABLE_CONSTRAINTS AS c
+                   join information_schema.KEY_COLUMN_USAGE AS k on c.TABLE_NAME = k.TABLE_NAME 
+        				and c.CONSTRAINT_CATALOG = k.CONSTRAINT_CATALOG 
+        				and c.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA 
+        				and c.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+                   where c.CONSTRAINT_TYPE = 'PRIMARY KEY'
+                  ) j on col.COLUMN_NAME = j.COLUMN_NAME and j.TABLE_NAME = col.TABLE_NAME
+        where TABLE_SCHEMA = 'dbo' 
+        order by col.TABLE_NAME, col.COLUMN_NAME
         """, conn);
         await using SqlDataReader reader = await command.ExecuteReaderAsync();
 
@@ -40,13 +49,14 @@ internal class SqlService
             string dataType = reader.GetString(4);
             bool isIdentity = reader.GetInt32(5) is 1;
             bool isComputed = reader.GetInt32(6) is 1;
+            bool isPk = reader.GetInt32(7) is 1;
             
             if (!(Enum.TryParse(typeof(SqlDbType), dataType, true, out object? dataTypeObject) && dataTypeObject is SqlDbType dt))
             {
                 continue;
             }
             
-            SqlTableColumn column = new(columnName, ordinalPosition, isNullable, isIdentity, (SqlDbTypeExt)dt, [], isComputed);
+            SqlTableColumn column = new(columnName, ordinalPosition, isNullable, isIdentity, (SqlDbTypeExt)dt, [], isComputed, isPk);
             
             if (tables.TryGetValue(tableName.ToLowerInvariant(), out SqlTable? table))
             {
