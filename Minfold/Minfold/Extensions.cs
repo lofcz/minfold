@@ -28,10 +28,10 @@ public static class Extensions
     {
         return type switch
         {
-            PredefinedTypeSyntax baseType => new CsPropertyDecl(ident, baseType.Keyword.ValueText.ToSqlType(), nullable, [], type.ToFullString()),
+            PredefinedTypeSyntax baseType => new CsPropertyDecl(ident, baseType.Keyword.ValueText.ToSqlType(), nullable, [], type.ToFullString().Trim()),
             NullableTypeSyntax nullableType => ToPropertyDecl(nullableType.ElementType, ident, true),
-            IdentifierNameSyntax identSyntax => new CsPropertyDecl(ident, identSyntax.Identifier.ValueText.ToSqlType(), nullable, [], type.ToFullString()),
-            GenericNameSyntax genIdent => new CsPropertyDecl(ident, SqlDbTypeExt.CsIdentifier, nullable, [], type.ToFullString()),
+            IdentifierNameSyntax identSyntax => new CsPropertyDecl(ident, identSyntax.Identifier.ValueText.ToSqlType(), nullable, [], type.ToFullString().Trim()),
+            GenericNameSyntax genIdent => new CsPropertyDecl(genIdent.ToFullString(), SqlDbTypeExt.CsIdentifier, nullable, [], type.ToFullString().Trim()),
             _ => new CsPropertyDecl(ident, SqlDbTypeExt.Unknown, nullable, [], type.ToFullString())
         };
     }

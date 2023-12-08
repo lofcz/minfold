@@ -10,21 +10,27 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
 {
     public string NewCode { get; set; }
     public bool ClassRewritten { get; set; }
+    public string? Namespace { get; set; }
+    public CsPropertiesInfo? PropertiesMap { get; set; }
  
     private SqlTable table;
     private string expectedClassName;
     private readonly Dictionary<string, CsModelSource> tablesMap;
     private readonly CsModelSource modelSource;
+    private bool scanNamespace;
+    private readonly CompilationUnitSyntax rootNode;
     
     /// <summary>
     /// Updates a model
     /// </summary>
-    public ModelClassRewriter(string expectedClassName, SqlTable table, Dictionary<string, CsModelSource> tablesMap, CsModelSource modelSource)
+    public ModelClassRewriter(string expectedClassName, SqlTable table, Dictionary<string, CsModelSource> tablesMap, CsModelSource modelSource, bool scanNamespace, CompilationUnitSyntax rootNode)
     {
         this.table = table;
         this.expectedClassName = expectedClassName;
         this.tablesMap = tablesMap;
         this.modelSource = modelSource;
+        this.scanNamespace = scanNamespace;
+        this.rootNode = rootNode;
     }
     
     private static ClassDeclarationSyntax RemoveProperties(ClassDeclarationSyntax node, string[] properties)
@@ -89,7 +95,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
         return node;
     }
 
-    private CsPropertiesInfo Properties(ClassDeclarationSyntax node)
+    public static CsPropertiesInfo Properties(ClassDeclarationSyntax node, SqlTable table, CompilationUnitSyntax rootNode)
     {
         CsPropertiesInfo info = new CsPropertiesInfo();
         int lastIndex = node.Members.LastIndexOf(x => x.IsKind(SyntaxKind.PropertyDeclaration));
@@ -159,13 +165,21 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
                 }
 
                 SqlTableColumn? tableColumn = null;
-
+                CsPropertyDecl propDeclInfo = propDecl.ToPropertyDecl();
+                CsTypeAlias? alias = null;
+                
                 if (table.Columns.TryGetValue(propDecl.Identifier.ValueText.ToLowerInvariant(), out SqlTableColumn? col))
                 {
                     tableColumn = col;
+
+                    if (propDeclInfo.Type is SqlDbTypeExt.CsIdentifier && tableColumn.SqlType is not SqlDbTypeExt.CsIdentifier)
+                    {
+                        Dictionary<string, string>? usings = GetUsings(rootNode);
+                        alias = new CsTypeAlias(propDeclInfo.Token ?? string.Empty, usings);
+                    }
                 }
 
-                info.Properties.TryAdd(propDecl.Identifier.ValueText.ToLowerInvariant(), new CsPropertyInfo(propDecl.Identifier.ValueText, mapped, keys, Minfold.ColumnDefaultValue(propDecl.Identifier.ValueText.ToLowerInvariant(), tableColumn), propDecl.ToPropertyDecl()));   
+                info.Properties.TryAdd(propDecl.Identifier.ValueText.ToLowerInvariant(), new CsPropertyInfo(propDecl.Identifier.ValueText, mapped, keys, Minfold.ColumnDefaultValue(propDecl.Identifier.ValueText.ToLowerInvariant(), tableColumn), propDecl.ToPropertyDecl(), alias));   
             }
         }
 
@@ -180,6 +194,33 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
 
             return -1;
         }
+    }
+    
+    private static List<string> GetUsingsInner(CompilationUnitSyntax rootNode)
+    {
+        List<string> usings = [];
+        usings.AddRange(rootNode.Usings.Select(n => n.NamespaceOrType.ToFullString().Trim()));
+
+        return usings;
+    }
+
+    private static Dictionary<string, string>? GetUsings(CompilationUnitSyntax node)
+    {
+        List<string> usings = GetUsingsInner(node);
+
+        if (usings.Count is 0)
+        {
+            return null;
+        }
+        
+        Dictionary<string, string> parsed = [];
+
+        foreach (string str in usings)
+        {
+            parsed.TryAdd(str.Trim().Replace(" ", "").Replace(";", ""), str);
+        }
+        
+        return parsed;
     }
     
     private static ClassDeclarationSyntax AddProperties(ClassDeclarationSyntax node, IEnumerable<CsPropertyDecl> properties)
@@ -258,11 +299,6 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
 
     private static ClassDeclarationSyntax ExtendConstructor(ClassDeclarationSyntax node, CsPropertyDecl[] properties)
     {
-        if (node.Identifier.ValueText.ToLowerInvariant().Trim() is "form")
-        {
-            int z = 0;
-        }
-        
         bool ctorUpdated = false;
 
         void DoExtendConstructor(MemberDeclarationSyntax mNode, ConstructorDeclarationSyntax ctorNode)
@@ -544,7 +580,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
 
     private ModelForeignKeysPatch ComputeFksPatch(ClassDeclarationSyntax node)
     {
-        CsPropertiesInfo properties = Properties(node);
+        CsPropertiesInfo properties = Properties(node, table, rootNode);
         ModelForeignKeysPatch patch = new ModelForeignKeysPatch([]);
         
         foreach (MemberDeclarationSyntax member in node.Members)
@@ -751,6 +787,20 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
 
         return node;
     }
+
+    private void ScanNamespace(ClassDeclarationSyntax node)
+    {
+        while (node.Parent is not null)
+        {
+            NamespaceDeclarationSyntax? namespaceDecl = (NamespaceDeclarationSyntax?)node.Parent.ChildNodes().FirstOrDefault(x => x is NamespaceDeclarationSyntax);
+
+            if (namespaceDecl is not null)
+            {
+                Namespace = namespaceDecl.Name.ToFullString();
+                break;
+            }
+        }
+    }
     
     public override SyntaxNode VisitClassDeclaration(ClassDeclarationSyntax node)
     {
@@ -759,9 +809,14 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
             return node;
         }
 
+        if (scanNamespace)
+        {
+            ScanNamespace(node);
+        }
+
         ClassRewritten = true;
 
-        CsPropertiesInfo properties = Properties(node);
+        CsPropertiesInfo properties = Properties(node, table, rootNode);
         ModelActionsPatch actionsPatch = ComputeActionsPatch(node, properties);
 
         node = EnsureEmptyCtor(node);
@@ -775,7 +830,8 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
         node = UpdateForeignKeys(node, fksPatch);
         
         node = EnsureNonEmptyCtor(node, properties);
-        
+
+        PropertiesMap = Properties(node, table, rootNode);
         NewCode = node.NormalizeWhitespace().ToFullString();
         
         return node;
