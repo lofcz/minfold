@@ -683,11 +683,6 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
         {
             patch.PropertiesRemove.Add(currentDecl.Property.Name);
         }
-
-        if (node.Identifier.ValueText.ToLowerInvariant() is "llmconfig")
-        {
-            int z = 0;
-        }
         
         return patch;
     }
