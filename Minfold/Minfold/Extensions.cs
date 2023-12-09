@@ -36,6 +36,14 @@ public static class Extensions
         };
     }
     
+    private const string PropPrefix = "    ";
+    private const string PropPrefix2 = "        ";
+    
+    public static string Indent(this string str, int level = 1)
+    {
+        return level is 2 ? $"{PropPrefix2}{str}" : $"{PropPrefix}{str}";
+    }
+    
     public static CsPropertyDecl ToPropertyDecl(this PropertyDeclarationSyntax prop)
     {
         string ident = prop.Identifier.ValueText;

@@ -14,9 +14,6 @@ namespace Minfold;
 
 public class Minfold
 {
-    const string propPrefix = "    ";
-    const string propPrefix2 = "        ";
-    
     private Dictionary<string, SqlTable> SqlSchema = [];
     private CsSource Source = new CsSource(string.Empty, string.Empty, [], [], string.Empty, string.Empty, []);
     private readonly Dictionary<string, CsModelSource> tablesToModelsMap = [];
@@ -191,11 +188,6 @@ public class Minfold
             
         return new ColumnDefaultVal(column, null, ColumnDefaultValTypes.UserAssigned);
     }
-    
-    static string Ident(string str, int level = 1)
-    {
-        return level is 2 ? $"{propPrefix2}{str}" : $"{propPrefix}{str}";
-    }
 
     public static string? DumpCtor(string className, SqlTable table, CsPropertiesInfo? properties)
     {
@@ -216,7 +208,7 @@ public class Minfold
         
         string DumpCtorAssignPar(ColumnDefaultVal par, bool last)
         {
-            return Ident($"{ColumnName(par.Column).FirstCharToUpper()} = {(par.Type is ColumnDefaultValTypes.Value ? par.DefaultValue : PrefixReservedKeyword(ColumnName(par.Column).FirstCharToLower()))};", 2);
+            return $"{ColumnName(par.Column).FirstCharToUpper()} = {(par.Type is ColumnDefaultValTypes.Value ? par.DefaultValue : PrefixReservedKeyword(ColumnName(par.Column).FirstCharToLower()))};".Indent(2);
         } 
 
         string DumpCtorAssignments()
@@ -296,6 +288,7 @@ public class Minfold
     public async Task<CsModelGenerateResult> GenerateModel(string className, SqlTable table, Dictionary<string, CsModelSource> tablesMap)
     {
         Dictionary<string, string> propertiesMap = [];
+        CsPropertiesInfo properties = new CsPropertiesInfo();
         
         if (tablesMap.TryGetValue(table.Name.ToLowerInvariant(), out CsModelSource? model))
         {
@@ -304,6 +297,8 @@ public class Minfold
         
         void DumpProperty(StringBuilder sb, SqlTableColumn column, bool last, bool first, bool nextAnyFks)
         {
+            List<CsForeignKey> foreignKeys = [];
+            
             if (!first && column.ForeignKeys.Count > 0)
             {
                 sb.Append(Environment.NewLine);
@@ -331,11 +326,12 @@ public class Minfold
                     memberPrefix = $"{tblName}.";
                 }
                 
-                sb.Append($$"""{{propPrefix}}[ReferenceKey(typeof({{tblName}}), nameof({{memberPrefix}}{{colName}}), {{(fk.NotEnforced ? "false" : "true")}})]""");
+                sb.Append($$"""[ReferenceKey(typeof({{tblName}}), nameof({{memberPrefix}}{{colName}}), {{(fk.NotEnforced ? "false" : "true")}})]""".Indent());
                 sb.Append(Environment.NewLine);
+                foreignKeys.Add(new CsForeignKey(tblName, !fk.NotEnforced));
             }
             
-            sb.Append($$"""{{propPrefix}}public {{column.SqlType.ToTypeSyntax(column.IsNullable).ToFullString()}} {{column.Name.FirstCharToUpper()}} { get;{{(column.IsComputed ? "private" : string.Empty)}} set; }""");
+            sb.Append($$"""public {{column.SqlType.ToTypeSyntax(column.IsNullable).ToFullString()}} {{column.Name.FirstCharToUpper()}} { get;{{(column.IsComputed ? "private" : string.Empty)}} set; }""".Indent());
             
             if (!nextAnyFks && !last && column.ForeignKeys.Count > 0)
             {
@@ -343,6 +339,7 @@ public class Minfold
             }
 
             propertiesMap.TryAdd(column.Name.ToLowerInvariant(), column.Name.FirstCharToUpper() ?? string.Empty);
+            properties.Properties.TryAdd(column.Name.ToLowerInvariant(), new CsPropertyInfo(column.Name.FirstCharToUpper() ?? string.Empty, true, foreignKeys, null, new CsPropertyDecl(column.Name.FirstCharToUpper() ?? string.Empty, column.SqlType, column.IsNullable, column.ForeignKeys, null), null, column, true));
         }
         
 
@@ -382,7 +379,7 @@ public class Minfold
         }
         """;
         
-        return new CsModelGenerateResult(className, str, Source.ProjectNamespace, propertiesMap);
+        return new CsModelGenerateResult(className, str, Source.ProjectNamespace, propertiesMap, properties);
     }
 
     string GenerateDaoGetWhereId(string modelName, string dbSetMappedTableName, string identityColumnId, string identityColumnType)
@@ -622,7 +619,7 @@ public class Minfold
             decls.Add(pair.Value);
         }
         
-        DbSetClassRewritter dbSetRewritter = new DbSetClassRewritter("Db", decls);
+        DbSetClassRewritter dbSetRewritter = new DbSetClassRewritter("Db", decls, modelsToTablesMap, modelProperties);
         CompilationUnitSyntax newNode = (CompilationUnitSyntax)dbSetRewritter.Visit(root);
 
         await File.WriteAllTextAsync(path, newNode.NormalizeWhitespace().ToFullString());
@@ -631,12 +628,14 @@ public class Minfold
     private ConcurrentDictionary<string, bool> synchronizedTables = [];
     private ConcurrentDictionary<string, bool> synchronizedModelFiles = [];
     private ConcurrentDictionary<string, bool> synchronizedDaoFiles = [];
+    private ConcurrentDictionary<string, CsPropertiesInfo> modelProperties = [];
     
     public async Task Synchronize(string sqlConn, string dbName, string codePath)
     {
         synchronizedTables = [];
         synchronizedModelFiles = [];
         synchronizedDaoFiles = [];
+        modelProperties = [];
         
         await AnalyzeSqlSchema(sqlConn, dbName);
         await LoadCsCode(codePath);
@@ -663,6 +662,11 @@ public class Minfold
             }
             
             ModelClassRewriteResult modelUpdateResult = await UpdateModel(source.Value, mappedTable, tablesToModelsMap);
+
+            if (modelUpdateResult.Properties is not null)
+            {
+                modelProperties.TryAdd(source.Key, modelUpdateResult.Properties);   
+            }
             
             if (modelUpdateResult.Rewritten)
             {
@@ -710,6 +714,8 @@ public class Minfold
             string path = $"{Source.ProjectPath}\\Dao\\Models\\{className}.cs";
             
             CsModelGenerateResult modelGen = await GenerateModel(className, source.Value, tablesToModelsMap);
+            modelProperties.TryAdd(source.Key, modelGen.PropertiesInfo);   
+            
             await File.WriteAllTextAsync(path, modelGen.Code, token);
             synchronizedTables.TryAdd(source.Key, true);
             synchronizedModelFiles.TryAdd(source.Key, true);

@@ -179,7 +179,41 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
                     }
                 }
 
-                info.Properties.TryAdd(propDecl.Identifier.ValueText.ToLowerInvariant(), new CsPropertyInfo(propDecl.Identifier.ValueText, mapped, keys, Minfold.ColumnDefaultValue(propDecl.Identifier.ValueText.ToLowerInvariant(), tableColumn), propDecl.ToPropertyDecl(), alias));   
+                bool canSet = true;
+                bool anySet = false;
+                
+                if (propDecl.ExpressionBody is not null)
+                {
+                    canSet = false;
+                }
+                else if (propDecl.AccessorList is null)
+                {
+                    canSet = false;
+                }
+                else
+                {
+                    foreach (AccessorDeclarationSyntax accessor in propDecl.AccessorList.Accessors)
+                    {
+                        if (!accessor.Keyword.IsKind(SyntaxKind.SetKeyword))
+                        {
+                            continue;
+                        }
+
+                        anySet = true;
+
+                        if (accessor.Modifiers.Any(x => x.IsKind(SyntaxKind.PrivateKeyword)))
+                        {
+                            canSet = false;
+                        }
+                    }
+                }
+
+                if (canSet)
+                {
+                    canSet = anySet;
+                }
+                
+                info.Properties.TryAdd(propDecl.Identifier.ValueText.ToLowerInvariant(), new CsPropertyInfo(propDecl.Identifier.ValueText, mapped, keys, Minfold.ColumnDefaultValue(propDecl.Identifier.ValueText.ToLowerInvariant(), tableColumn), propDecl.ToPropertyDecl(), alias, tableColumn, canSet));   
             }
         }
 

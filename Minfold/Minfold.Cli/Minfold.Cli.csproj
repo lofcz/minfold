@@ -7,7 +7,6 @@
         <Nullable>enable</Nullable>
         <PackAsTool>true</PackAsTool>
         <ToolCommandName>minfold</ToolCommandName>
-        <PackageOutputPath>./nupkg</PackageOutputPath>
         <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
         <Title>Minfold</Title>
         <Authors>Matěj "lofcz" Štágl</Authors>

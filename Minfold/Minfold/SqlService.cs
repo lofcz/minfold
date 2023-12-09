@@ -23,8 +23,10 @@ internal class SqlService
         select col.TABLE_NAME, col.COLUMN_NAME, col.ORDINAL_POSITION, col.IS_NULLABLE, col.DATA_TYPE,
                 columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'IsIdentity') as IS_IDENTITY,
                 columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'IsComputed') as IS_COMPUTED,
-        		isnull(j.pk, cast(0 as bit)) as IS_PRIMARY
+        		isnull(j.pk, cast(0 as bit)) as IS_PRIMARY,
+                cc.definition as COMPUTED_DEFINITION
         from information_schema.COLUMNS col
+        left join sys.computed_columns cc on cc.object_id = object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME) and cc.column_id = columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'ColumnId')
         left join (select k.COLUMN_NAME, k.TABLE_NAME, iif(k.CONSTRAINT_NAME is null, 0, 1) as pk
                    from information_schema.TABLE_CONSTRAINTS AS c
                    join information_schema.KEY_COLUMN_USAGE AS k on c.TABLE_NAME = k.TABLE_NAME 
@@ -50,13 +52,14 @@ internal class SqlService
             bool isIdentity = reader.GetInt32(5) is 1;
             bool isComputed = reader.GetInt32(6) is 1;
             bool isPk = reader.GetInt32(7) is 1;
+            string? computedSql = reader.GetValue(8) as string;
             
             if (!(Enum.TryParse(typeof(SqlDbType), dataType, true, out object? dataTypeObject) && dataTypeObject is SqlDbType dt))
             {
                 continue;
             }
             
-            SqlTableColumn column = new(columnName, ordinalPosition, isNullable, isIdentity, (SqlDbTypeExt)dt, [], isComputed, isPk);
+            SqlTableColumn column = new(columnName, ordinalPosition, isNullable, isIdentity, (SqlDbTypeExt)dt, [], isComputed, isPk, computedSql);
             
             if (tables.TryGetValue(tableName.ToLowerInvariant(), out SqlTable? table))
             {
