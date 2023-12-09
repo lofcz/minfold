@@ -58,16 +58,24 @@ public class DbSetClassRewritter : CSharpSyntaxRewriter
 
             foreach (KeyValuePair<string, CsPropertyInfo> x in props.Properties)
             {
-                if (x.Value.Column is not null && x.Value.Name.FirstCharToLower() != x.Value.Column.Name)
+                if (x.Value.Column is not null)
                 {
+                    bool preventAutoincrement = x.Value.Column.IsPrimaryKey && !x.Value.Column.IsIdentity;
+                    bool canSkipConventionNaming = x.Value.Name.FirstCharToLower() == x.Value.Column.Name;
+                    
                     if (!x.Value.Mapped || !x.Value.CanSet)
+                    {
+                        continue;
+                    }
+
+                    if (canSkipConventionNaming && !preventAutoincrement && !x.Value.Column.IsComputed)
                     {
                         continue;
                     }
                     
                     sb.Append($"entity.Property(e => e.{x.Value.Name})".Indent(2));
 
-                    if (x.Value.Column.IsPrimaryKey && !x.Value.Column.IsIdentity)
+                    if (preventAutoincrement)
                     {
                         sb.Append(".ValueGeneratedNever()");
                     }
@@ -77,7 +85,11 @@ public class DbSetClassRewritter : CSharpSyntaxRewriter
                         sb.Append($".HasComputedColumnSql(\"{x.Value.Column.ComputedSql}\", false)");
                     }
 
-                    sb.Append($".HasColumnName(\"{x.Value.Column.Name}\")");
+                    if (!canSkipConventionNaming)
+                    {
+                        sb.Append($".HasColumnName(\"{x.Value.Column.Name}\")");    
+                    }
+                    
                     sb.Append(';');
                     sb.AppendLine();
                 }
