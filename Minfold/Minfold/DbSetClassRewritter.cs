@@ -35,6 +35,14 @@ public class DbSetClassRewritter : CSharpSyntaxRewriter
         
         foreach (MemberDeclarationSyntax memberDecl in node.Members)
         {
+            SyntaxToken? ident = memberDecl switch
+            {
+                PropertyDeclarationSyntax propDecl => propDecl.Identifier,
+                FieldDeclarationSyntax fieldDecl => fieldDecl.Declaration.Variables[0].Identifier,
+                MethodDeclarationSyntax methodDecl => methodDecl.Identifier,
+                _ => null
+            };
+            
             if (memberDecl is ConstructorDeclarationSyntax)
             {
                 beforePropMembers.Add(memberDecl);
@@ -45,6 +53,14 @@ public class DbSetClassRewritter : CSharpSyntaxRewriter
 
             if (setDecl is null)
             {
+                if (ident is not null)
+                {
+                    if (sets.Any(x => x.SetName.Equals(ident.Value.ValueText.Trim(), StringComparison.InvariantCultureIgnoreCase)))
+                    {
+                        continue;
+                    }
+                }
+                
                 afterPropMembers.Add(memberDecl);   
             }
         }
