@@ -25,6 +25,7 @@ public record SemanticSolution(MSBuildWorkspace Workspace, Solution Solution);
 public record CsModelGenerateResult(string Name, string Code, string Namespace, Dictionary<string, string> Columns, CsPropertiesInfo PropertiesInfo);
 public record CsTypeAlias(string Symbol, Dictionary<string, string> Usings);
 public record CsDbSetDecl(string ModelName, string SetName, PropertyDeclarationSyntax? Decl);
+public record MinfoldCfg(bool UniformPk);
 
 public enum ColumnDefaultValTypes
 {

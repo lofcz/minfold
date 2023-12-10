@@ -19,6 +19,7 @@ public class Minfold
     private readonly Dictionary<string, CsModelSource> tablesToModelsMap = [];
     private readonly Dictionary<string, SqlTable> modelsToTablesMap = [];
     private readonly ConcurrentDictionary<string, string> daoPaths = new ConcurrentDictionary<string, string>();
+    private MinfoldCfg cfg = new MinfoldCfg(false);
     
     public async Task<Dictionary<string, SqlTable>> AnalyzeSqlSchema(string sqlConn, string dbName)
     {
@@ -511,13 +512,13 @@ public class Minfold
         
         if (tree.DaoPath is null || tree.DaoAst is null || tree.DaoRootNode is null)
         {
-            string daoText = GenerateDaoCode(daoName, modelName, modelNamespace, dbSet, identColName, identColType, true, customUsings);
+            string daoText = GenerateDaoCode(daoName, modelName, modelNamespace, dbSet, identColName, identColType, !cfg.UniformPk, customUsings);
             await File.WriteAllTextAsync(path, daoText);
             synchronizedDaoFiles.TryAdd(daoName.ToLowerInvariant(), true);
             return new ClassRewriteResult(false, null);
         }
         
-        DaoClassRewriter daoClassVisitor = new DaoClassRewriter(daoName, modelName, table, tablesMap, tree, dbSet, identColName, identColType, true, customUsings);
+        DaoClassRewriter daoClassVisitor = new DaoClassRewriter(daoName, modelName, table, tablesMap, tree, dbSet, identColName, identColType, !cfg.UniformPk, customUsings);
         CompilationUnitSyntax newNode = (CompilationUnitSyntax)daoClassVisitor.Visit(tree.DaoRootNode);
 
         List<UsingDirectiveSyntax> addUsings = [];
@@ -658,6 +659,13 @@ public class Minfold
         await File.WriteAllTextAsync(path, newNode.NormalizeWhitespace().ToFullString());
     }
 
+    private void InferCapabilites()
+    {
+        bool uniformPks = File.Exists($"{Source.ProjectPath}\\Dao\\Base\\IEntity.cs");
+
+        cfg = new MinfoldCfg(uniformPks);
+    }
+
     private ConcurrentDictionary<string, bool> synchronizedTables = [];
     private ConcurrentDictionary<string, bool> synchronizedModelFiles = [];
     private ConcurrentDictionary<string, bool> synchronizedDaoFiles = [];
@@ -674,6 +682,7 @@ public class Minfold
         await LoadCsCode(codePath);
         await MapDbSet();
         MapTables();
+        InferCapabilites();
 
         await Parallel.ForEachAsync(Source.Models, async (source, token) =>
         {
@@ -724,11 +733,6 @@ public class Minfold
             }
 
             string className = source.Value.Name.FirstCharToUpper() ?? string.Empty;
-
-            if (className is "LlmContextPairUserReviews")
-            {
-                int z = 0;
-            }
             
             if (tablesToModelsMap.TryGetValue(source.Value.Name.ToLowerInvariant(), out CsModelSource? tbl))
             {
