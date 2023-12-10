@@ -14,17 +14,26 @@ public class DaoClassRewriter : CSharpSyntaxRewriter
     private string expectedClassName, modelName;
     private readonly Dictionary<string, CsModelSource> tablesMap;
     private readonly CsModelSource modelSource;
+    private string dbSetMappedTableName;
+    private string? identityColumnId, identityColumnType;
+    private bool generateGetWhereId;
+    private Dictionary<string, string>? customUsings;
     
     /// <summary>
     /// Updates a dao
     /// </summary>
-    public DaoClassRewriter(string expectedClassName, string modelName, SqlTable table, Dictionary<string, CsModelSource> tablesMap, CsModelSource modelSource)
+    public DaoClassRewriter(string expectedClassName, string modelName, SqlTable table, Dictionary<string, CsModelSource> tablesMap, CsModelSource modelSource, string dbSetMappedTableName, string? identityColumnId, string? identityColumnType, bool generateGetWhereId, Dictionary<string, string>? customUsings)
     {
         this.table = table;
         this.expectedClassName = expectedClassName;
         this.tablesMap = tablesMap;
         this.modelSource = modelSource;
         this.modelName = modelName;
+        this.dbSetMappedTableName = dbSetMappedTableName;
+        this.identityColumnId = identityColumnId;
+        this.identityColumnType = identityColumnType;
+        this.generateGetWhereId = generateGetWhereId;
+        this.customUsings = customUsings;
     }
     
     public override SyntaxNode VisitClassDeclaration(ClassDeclarationSyntax node)
@@ -79,14 +88,54 @@ public class DaoClassRewriter : CSharpSyntaxRewriter
                 {
                     SyntaxFactory.SimpleBaseType(SyntaxFactory.GenericName(SyntaxFactory.Identifier("DaoBase"), SyntaxFactory.TypeArgumentList(SyntaxFactory.SeparatedList<TypeSyntax>(new[]
                     {
-                        SyntaxFactory.IdentifierName("User")
+                        SyntaxFactory.IdentifierName(modelName)
                     }))))
                 })));
+        }
 
-            ClassRewritten = true;
+        bool solved = false;
+
+        MethodDeclarationSyntax? GetWhereIdMethodDecl()
+        {
+            if (identityColumnId is null || identityColumnType is null)
+            {
+                return null;
+            }
+            
+            string code = Minfold.GenerateDaoGetWhereId(modelName, dbSetMappedTableName, identityColumnId, identityColumnType);
+            CompilationUnitSyntax root = (CompilationUnitSyntax)CSharpSyntaxTree.ParseText(code, new CSharpParseOptions(kind: SourceCodeKind.Script)).GetRoot();
+            return (MethodDeclarationSyntax)root.ChildNodes().FirstOrDefault(x => x is MethodDeclarationSyntax)!;
+        }
+        
+        foreach (MemberDeclarationSyntax member in node.Members)
+        {
+            if (member is MethodDeclarationSyntax { Identifier.ValueText: "GetWhereId" })
+            {
+                if (!solved && generateGetWhereId && identityColumnId is not null && identityColumnType is not null)
+                {
+                    MethodDeclarationSyntax getWhereIdDecl = GetWhereIdMethodDecl()!;
+                    node = node.WithMembers(node.Members.Replace(member, getWhereIdDecl));
+                    solved = true;
+                }
+                else
+                {
+                    node = node.WithMembers(node.Members.Remove(member));   
+                }
+            }
+        }
+
+        if (!solved)
+        {
+            MethodDeclarationSyntax? getWhereIdDecl = GetWhereIdMethodDecl();
+
+            if (getWhereIdDecl is not null)
+            {
+                node = node.WithMembers(node.Members.Insert(0, getWhereIdDecl));
+            }
         }
         
         NewCode = node.NormalizeWhitespace().ToFullString();
+        ClassRewritten = true;
         
         return node;
     }

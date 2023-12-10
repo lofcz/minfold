@@ -382,12 +382,12 @@ public class Minfold
         return new CsModelGenerateResult(className, str, Source.ProjectNamespace, propertiesMap, properties);
     }
 
-    string GenerateDaoGetWhereId(string modelName, string dbSetMappedTableName, string identityColumnId, string identityColumnType)
+    public static string GenerateDaoGetWhereId(string modelName, string dbSetMappedTableName, string identityColumnId, string identityColumnType)
     {
         return $$"""
-            public Task<{{modelName}}?> GetWhereId({{identityColumnType}} {{modelName.FirstCharToLower()}}Id)
+            public Task<{{modelName}}?> GetWhereId({{identityColumnType}} {{identityColumnId.FirstCharToLower()}})
             {
-        	    return db.{{dbSetMappedTableName}}.FirstOrDefaultAsync(x => x.{{identityColumnId}} == {{modelName.FirstCharToLower()}}Id);
+        	    return db.{{dbSetMappedTableName}}.FirstOrDefaultAsync(x => x.{{identityColumnId}} == {{identityColumnId.FirstCharToLower()}});
             }    
         """;
     }
@@ -469,54 +469,87 @@ public class Minfold
         
         string path = $"{Source.ProjectPath}\\Dao\\Dao\\{daoName}.cs";
 
+        string? identColName = null;
+        string? identColType = null;
+            
+        KeyValuePair<string, SqlTableColumn> pkCol = table.Columns.FirstOrDefault(x => x.Value.IsPrimaryKey);
+        Dictionary<string, string>? customUsings = null;
+
+        if (pkCol.Value is not null)
+        {
+            identColName = pkCol.Value.Name;
+
+            if (pkCol.Value.SqlType is not SqlDbTypeExt.CsIdentifier)
+            {
+                identColType = pkCol.Value.SqlType.ToTypeSyntax(false).ToFullString();
+            }
+
+            if (properties?.Properties.TryGetValue(identColName.ToLowerInvariant(), out CsPropertyInfo? propInfo) ?? false)
+            {
+                identColName = propInfo.Name;
+                    
+                if (propInfo.TypeAlias is not null)
+                {
+                    identColType = propInfo.TypeAlias.Symbol;
+                    customUsings = propInfo.TypeAlias.Usings;
+                }
+            }
+        }
+
+        string dbSet = table.Name;
+
+        if (Source.DbSetMap.TryGetValue(modelName.ToLowerInvariant(), out CsDbSetDecl? dbSetName))
+        {
+            dbSet = dbSetName.SetName;
+        }
+        else
+        {
+            Source.DbSetMap.TryAdd(modelName.ToLowerInvariant(), new CsDbSetDecl(modelName, table.Name, null));
+        }
+
+        string modelNamespace = tree.ModelInfo.Namespace ?? $"{Source.ProjectNamespace}.Dao";
+        
         if (tree.DaoPath is null || tree.DaoAst is null || tree.DaoRootNode is null)
         {
-            string? identColName = null;
-            string? identColType = null;
-            
-            KeyValuePair<string, SqlTableColumn> pkCol = table.Columns.FirstOrDefault(x => x.Value.IsPrimaryKey);
-            Dictionary<string, string>? customUsings = null;
-
-            if (pkCol.Value is not null)
-            {
-                identColName = pkCol.Value.Name;
-
-                if (pkCol.Value.SqlType is not SqlDbTypeExt.CsIdentifier)
-                {
-                    identColType = pkCol.Value.SqlType.ToTypeSyntax(false).ToFullString();
-                }
-
-                if (properties?.Properties.TryGetValue(identColName.ToLowerInvariant(), out CsPropertyInfo? propInfo) ?? false)
-                {
-                    identColName = propInfo.Name;
-                    
-                    if (propInfo.TypeAlias is not null)
-                    {
-                        identColType = propInfo.TypeAlias.Symbol;
-                        customUsings = propInfo.TypeAlias.Usings;
-                    }
-                }
-            }
-
-            string dbSet = table.Name;
-
-            if (Source.DbSetMap.TryGetValue(modelName.ToLowerInvariant(), out CsDbSetDecl? dbSetName))
-            {
-                dbSet = dbSetName.SetName;
-            }
-            else
-            {
-                Source.DbSetMap.TryAdd(modelName.ToLowerInvariant(), new CsDbSetDecl(modelName, table.Name, null));
-            }
-            
-            string daoText = GenerateDaoCode(daoName, modelName, tree.ModelInfo.Namespace ?? $"{Source.ProjectNamespace}.Dao", dbSet, identColName, identColType, true, customUsings);
+            string daoText = GenerateDaoCode(daoName, modelName, modelNamespace, dbSet, identColName, identColType, true, customUsings);
             await File.WriteAllTextAsync(path, daoText);
             synchronizedDaoFiles.TryAdd(daoName.ToLowerInvariant(), true);
             return new ClassRewriteResult(false, null);
         }
         
-        DaoClassRewriter daoClassVisitor = new DaoClassRewriter(daoName, modelName, table, tablesMap, tree);
+        DaoClassRewriter daoClassVisitor = new DaoClassRewriter(daoName, modelName, table, tablesMap, tree, dbSet, identColName, identColType, true, customUsings);
         CompilationUnitSyntax newNode = (CompilationUnitSyntax)daoClassVisitor.Visit(tree.DaoRootNode);
+
+        List<UsingDirectiveSyntax> addUsings = [];
+        HashSet<string> declaredUsings = [];
+
+        foreach (UsingDirectiveSyntax usingDir in newNode.Usings)
+        {
+            declaredUsings.Add(usingDir.NamespaceOrType.ToFullString().Trim());
+        }
+
+        addUsings.AddRange(from defaultUsing in defaultUsings where !declaredUsings.Contains(defaultUsing) select SyntaxFactory.UsingDirective(SyntaxFactory.IdentifierName(defaultUsing)));
+
+        if (!declaredUsings.Contains($"{Source.ProjectNamespace}.Dao.Base"))
+        {
+            addUsings.Add(SyntaxFactory.UsingDirective(SyntaxFactory.IdentifierName($"{Source.ProjectNamespace}.Dao.Base")));
+        }
+        
+        if (!declaredUsings.Contains(modelNamespace))
+        {
+            addUsings.Add(SyntaxFactory.UsingDirective(SyntaxFactory.IdentifierName(modelNamespace)));
+        }
+
+        if (customUsings is not null)
+        {
+            addUsings.AddRange(from x in customUsings where !declaredUsings.Contains(x.Value) select SyntaxFactory.UsingDirective(SyntaxFactory.IdentifierName(x.Value)));
+        }
+
+        if (addUsings.Count > 0)
+        {
+            newNode = newNode.WithUsings(newNode.Usings.AddRange(addUsings));
+        }
+        
         synchronizedDaoFiles.TryAdd(daoName.ToLowerInvariant(), true);
 
         return new ClassRewriteResult(daoClassVisitor.ClassRewritten, newNode.NormalizeWhitespace().ToFullString());
