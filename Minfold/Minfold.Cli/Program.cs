@@ -37,13 +37,17 @@ class Program
             IsRequired = true
         };
         
-        connStringOption.AddAlias("-p");
+        codePathOption.AddAlias("-p");
 
         RootCommand rootCommand = new RootCommand("Minfold")
         {
-            databaseOption, connStringOption, codePathOption
+            Name = "minfold"
         };
-
+        
+        rootCommand.AddOption(databaseOption);
+        rootCommand.AddOption(connStringOption);
+        rootCommand.AddOption(codePathOption);
+        
         rootCommand.SetHandler(ctx =>
         {
             database = ctx.ParseResult.GetValueForOption(databaseOption);
