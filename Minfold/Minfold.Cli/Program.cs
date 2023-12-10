@@ -1,6 +1,7 @@
 ﻿using System.CommandLine.Builder;
 using System.CommandLine.Parsing;
 using System.Data;
+using System.Diagnostics;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -67,9 +68,24 @@ class Program
         {
             return result;
         }
+
+        Stopwatch sw = new Stopwatch();
+        sw.Start();
         
         Minfold m = new Minfold();
-        await m.Synchronize(conn, database, codePath);
+        MinfoldResult synchronizeResult = await m.Synchronize(conn, database, codePath);
+
+        sw.Stop();
+        
+        if (synchronizeResult.Error is not null)
+        {
+            Console.WriteLine(synchronizeResult.Error.Messsage);
+            Console.WriteLine("Raw exception:");
+            Console.WriteLine(synchronizeResult.Error.Exception.Message);
+            return 1;
+        }
+        
+        Console.WriteLine($"Minfold Synchronize finished successfully in {sw.Elapsed.ToString()}");
         return 0;
     }
 }

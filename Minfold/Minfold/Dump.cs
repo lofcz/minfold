@@ -3,6 +3,7 @@ using System.Data;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.MSBuild;
+using Microsoft.Data.SqlClient;
 
 namespace Minfold;
 
@@ -26,6 +27,28 @@ public record CsModelGenerateResult(string Name, string Code, string Namespace, 
 public record CsTypeAlias(string Symbol, Dictionary<string, string> Usings);
 public record CsDbSetDecl(string ModelName, string SetName, PropertyDeclarationSyntax? Decl);
 public record MinfoldCfg(bool UniformPk);
+public record ResultOrException<T>(T? Result, Exception? Exception);
+public record MinfoldError(MinfoldSteps Step, string Messsage, Exception Exception);
+public record MinfoldResult(MinfoldError? Error);
+
+public record SqlConnectionResult(SqlConnection? Connection, Exception? Exception) : IDisposable, IAsyncDisposable
+{
+    public void Dispose()
+    {
+        Connection?.Dispose();
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        if (Connection is not null)
+        {
+            return Connection.DisposeAsync();
+        }
+        
+        GC.SuppressFinalize(this);
+        return ValueTask.CompletedTask;
+    }
+}
 
 public enum ColumnDefaultValTypes
 {
@@ -38,6 +61,21 @@ public enum ModelActionType
 {
     EmptyCtor,
     ModelCtor
+}
+
+public enum MinfoldSteps
+{
+    ConnectDb,
+    AnalyzeDb,
+    LoadCode,
+    MapSets,
+    InferConfig,
+    LoadConfig,
+    UpdateCreateModels,
+    UpdateCreateDaos,
+    DeleteModels,
+    DeleteDaos,
+    UpdateSets
 }
 
 public class CsPropertiesInfo

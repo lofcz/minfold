@@ -21,14 +21,26 @@ public class Minfold
     private readonly ConcurrentDictionary<string, string> daoPaths = new ConcurrentDictionary<string, string>();
     private MinfoldCfg cfg = new MinfoldCfg(false);
     
-    public async Task<Dictionary<string, SqlTable>> AnalyzeSqlSchema(string sqlConn, string dbName)
+    public async Task<ResultOrException<Dictionary<string, SqlTable>>> AnalyzeSqlSchema(string sqlConn, string dbName)
     {
         SqlService ss = new SqlService(sqlConn);
-        Dictionary<string, SqlTable> schema = await ss.GetSchema(dbName);
-        
-        foreach (KeyValuePair<string, List<SqlForeignKey>> foreignKeyList in await ss.GetForeignKeys(schema.Keys.ToList()))
+        ResultOrException<Dictionary<string, SqlTable>> schema = await ss.GetSchema(dbName);
+
+        if (schema.Exception is not null || schema.Result is null)
         {
-            if (schema.TryGetValue(foreignKeyList.Key, out SqlTable? owner))
+            return schema with { Result = null };
+        }
+        
+        ResultOrException<Dictionary<string, List<SqlForeignKey>>> fks = await ss.GetForeignKeys(schema.Result.Keys.ToList());
+        
+        if (fks.Exception is not null || fks.Result is null)
+        {
+            return new ResultOrException<Dictionary<string, SqlTable>>(null, fks.Exception);
+        }
+        
+        foreach (KeyValuePair<string, List<SqlForeignKey>> foreignKeyList in fks.Result)
+        {
+            if (schema.Result.TryGetValue(foreignKeyList.Key, out SqlTable? owner))
             {
                 foreach (SqlForeignKey fk in foreignKeyList.Value)
                 {
@@ -40,7 +52,7 @@ public class Minfold
             }
         }
 
-        SqlSchema = schema;
+        SqlSchema = schema.Result;
         return schema;
     }
 
@@ -671,14 +683,28 @@ public class Minfold
     private ConcurrentDictionary<string, bool> synchronizedDaoFiles = [];
     private ConcurrentDictionary<string, CsPropertiesInfo> modelProperties = [];
     
-    public async Task Synchronize(string sqlConn, string dbName, string codePath)
+    public async Task<MinfoldResult> Synchronize(string sqlConn, string dbName, string codePath)
     {
         synchronizedTables = [];
         synchronizedModelFiles = [];
         synchronizedDaoFiles = [];
         modelProperties = [];
+
+        SqlService s = new SqlService(sqlConn);
+        Exception? e = await s.TestConnection();
+
+        if (e is not null)
+        {
+            return new MinfoldResult(new MinfoldError(MinfoldSteps.ConnectDb, $"Failed to connect via connection string: {sqlConn}. Please fix your connection string.", e));
+        }
         
-        await AnalyzeSqlSchema(sqlConn, dbName);
+        ResultOrException<Dictionary<string, SqlTable>> sqlSchema = await AnalyzeSqlSchema(sqlConn, dbName);
+
+        if (sqlSchema.Exception is not null)
+        {
+            return new MinfoldResult(new MinfoldError(MinfoldSteps.ConnectDb, $"Failed to analyze sql schema: {sqlConn}.", sqlSchema.Exception));
+        }
+        
         await LoadCsCode(codePath);
         await MapDbSet();
         MapTables();
@@ -808,6 +834,7 @@ public class Minfold
         });
 
         await UpdateDbSet();
+        return new MinfoldResult(null);
     }
 
     private static readonly HashSet<string> ProtectedDaos = ["batchdao", "sqldao", "daobase"];

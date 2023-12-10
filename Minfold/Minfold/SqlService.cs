@@ -12,11 +12,21 @@ internal class SqlService
     {
         this.connString = connString;
     }
-    
-    public async Task<Dictionary<string, SqlTable>> GetSchema(string dbName)
+
+    public async Task<Exception?> TestConnection()
     {
-        await using SqlConnection conn = Connect();
-        await conn.OpenAsync();
+        await using SqlConnectionResult conn = await Connect();
+        return conn.Exception;
+    }
+
+    public async Task<ResultOrException<Dictionary<string, SqlTable>>> GetSchema(string dbName)
+    {
+        await using SqlConnectionResult conn = await Connect();
+
+        if (conn.Exception is not null)
+        {
+            return new ResultOrException<Dictionary<string, SqlTable>>(null, conn.Exception);
+        }
 
         SqlCommand command = new($$"""
         use {{dbName}}
@@ -37,7 +47,7 @@ internal class SqlService
                   ) j on col.COLUMN_NAME = j.COLUMN_NAME and j.TABLE_NAME = col.TABLE_NAME
         where TABLE_SCHEMA = 'dbo' 
         order by col.TABLE_NAME, col.COLUMN_NAME
-        """, conn);
+        """, conn.Connection);
         await using SqlDataReader reader = await command.ExecuteReaderAsync();
 
         Dictionary<string, SqlTable> tables = new();
@@ -71,17 +81,21 @@ internal class SqlService
             }
         }
 
-        return tables;
+        return new ResultOrException<Dictionary<string, SqlTable>>(tables, null);
     }
     
-    public async Task<Dictionary<string, List<SqlForeignKey>>> GetForeignKeys(IList<string> tables)
+    public async Task<ResultOrException<Dictionary<string, List<SqlForeignKey>>>> GetForeignKeys(IList<string> tables)
     {
-        await using SqlConnection conn = Connect();
-        await conn.OpenAsync();
+        await using SqlConnectionResult conn = await Connect();
+
+        if (conn.Exception is not null)
+        {
+            return new ResultOrException<Dictionary<string, List<SqlForeignKey>>>(null, conn.Exception);
+        }
 
         SqlCommand command = new()
         {
-            Connection = conn
+            Connection = conn.Connection
         };
         
         string[] parameters = new string[tables.Count];
@@ -125,11 +139,20 @@ internal class SqlService
             }
         }
 
-        return foreignKeys;
+        return new ResultOrException<Dictionary<string, List<SqlForeignKey>>>(foreignKeys, null);
     }
 
-    private SqlConnection Connect()
+    private async Task<SqlConnectionResult> Connect()
     {
-        return new SqlConnection(connString);
+        try
+        {
+            SqlConnection conn = new SqlConnection(connString);
+            await conn.OpenAsync();
+            return new SqlConnectionResult(conn, null);
+        }
+        catch (Exception e)
+        {
+            return new SqlConnectionResult(null, e);
+        }
     }
 }
