@@ -13,6 +13,8 @@
         <Description>Minfold a strongly opinionated EF Core scaffolder</Description>
         <Copyright>MIT</Copyright>
         <RepositoryUrl>https://github.com/lofcz/minfold</RepositoryUrl>
+        <Version>1.0.2</Version>
+        <PackageReleaseNotes>Fix minfolding new models</PackageReleaseNotes>
     </PropertyGroup>
 
     <ItemGroup>

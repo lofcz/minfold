@@ -350,7 +350,7 @@ public class Minfold
             {
                 sb.Append(Environment.NewLine);
             }
-
+            
             propertiesMap.TryAdd(column.Name.ToLowerInvariant(), column.Name.FirstCharToUpper() ?? string.Empty);
             properties.Properties.TryAdd(column.Name.ToLowerInvariant(), new CsPropertyInfo(column.Name.FirstCharToUpper() ?? string.Empty, true, foreignKeys, null, new CsPropertyDecl(column.Name.FirstCharToUpper() ?? string.Empty, column.SqlType, column.IsNullable, column.ForeignKeys, null), null, column, true));
         }
@@ -392,6 +392,14 @@ public class Minfold
         }
         """;
         
+        if (!Source.DbSetMap.TryGetValue(className.ToLowerInvariant(), out CsDbSetDecl? decl))
+        {
+            Source.DbSetMap.TryAdd(className.ToLowerInvariant(), new CsDbSetDecl(className, table.Name, null));
+        }
+
+        modelsToTablesMap.TryAdd(className.ToLowerInvariant(), table);
+        SyntaxTree tree = CSharpSyntaxTree.ParseText(str);
+        tablesToModelsMap.TryAdd(table.Name.ToLowerInvariant(), new CsModelSource(className, $"{Source.ProjectPath}\\Dao\\Models\\{className}.cs", null, str, null, tree, null, string.Empty, table, tree.GetRoot(), null, propertiesMap, new ModelInfo { Namespace = Source.ProjectNamespace }));
         return new CsModelGenerateResult(className, str, Source.ProjectNamespace, propertiesMap, properties);
     }
 
@@ -451,7 +459,6 @@ public class Minfold
 
             usings += sb.ToString();
         }
-        
         
         return $$"""
         {{usings}}
@@ -773,15 +780,15 @@ public class Minfold
                     className = singular;
                 }
             }
-
+            
             string path = $"{Source.ProjectPath}\\Dao\\Models\\{className}.cs";
             
             CsModelGenerateResult modelGen = await GenerateModel(className, source.Value, tablesToModelsMap);
-            modelProperties.TryAdd(source.Key, modelGen.PropertiesInfo);   
+            modelProperties.TryAdd(className.ToLowerInvariant(), modelGen.PropertiesInfo);   
             
             await File.WriteAllTextAsync(path, modelGen.Code, token);
             synchronizedTables.TryAdd(source.Key, true);
-            synchronizedModelFiles.TryAdd(source.Key, true);
+            synchronizedModelFiles.TryAdd(className.ToLowerInvariant(), true);
 
             SyntaxTree modelAst = CSharpSyntaxTree.ParseText(modelGen.Code, cancellationToken: token);
             SyntaxNode root = await modelAst.GetRootAsync(token);
