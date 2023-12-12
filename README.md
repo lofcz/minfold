@@ -38,7 +38,8 @@ minfold --database DATABASE --connection "CONNECTION_STRING" --codePath "C:\.."
 
 A plugin for Rider is available.
 
-![minfold_min](https://github.com/lofcz/minfold/assets/10260230/ab963aa9-53af-4d70-9fa5-aa949c785d1e)
+![minfold_tool2](https://github.com/lofcz/minfold/assets/10260230/9baa544a-a9dd-4ff4-8cb8-4fd892bc3558)
+
 
 ## Limitations
 
