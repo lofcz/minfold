@@ -1,4 +1,4 @@
-package com.github.lofcz.helloworldplugin
+package com.lofcz.minfold
 
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
@@ -71,10 +71,10 @@ class MinfoldSaveData {
     var saves : MutableList<MinfoldSaveDataEntry> = mutableListOf()
 }
 
-class CalendarToolWindowFactory : ToolWindowFactory, DumbAware {
+class MinfoldToolWindowFactory : ToolWindowFactory, DumbAware {
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
-        val toolWindowContent = CalendarToolWindowContent(toolWindow, project)
+        val toolWindowContent = MinfoldToolWindowFactory(toolWindow, project)
 
         print("ahoj ahoj");
 
@@ -101,7 +101,7 @@ class CalendarToolWindowFactory : ToolWindowFactory, DumbAware {
         }
     }
 
-    private class CalendarToolWindowContent(toolWindow: ToolWindow, project: Project) {
+    private class MinfoldToolWindowFactory(toolWindow: ToolWindow, project: Project) {
 
         val rootFrame = JPanel()
         val contentPanel = JPanel()
