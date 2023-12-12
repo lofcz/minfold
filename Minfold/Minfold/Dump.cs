@@ -94,3 +94,8 @@ public class ModelInfo
 {
     public string? Namespace { get; set; }
 }
+
+public class MinfoldOptions
+{
+    public bool DecorateMessages { get; set; }
+}

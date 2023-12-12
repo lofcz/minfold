@@ -17,11 +17,14 @@ class Program
         string? database = null;
         string? conn = null;
         string? codePath = null;
+        bool decorateStd = false;
         
         Option<string> databaseOption = new("--database", "The database to scaffold")
         {
             IsRequired = true
         };
+        
+        Option<bool?> decorateStreamsOption = new("--stdDecorate", "Decorates stdout,stderror and each output line with a prefix info|warn|err");
         
         databaseOption.AddAlias("-d");
         
@@ -47,12 +50,14 @@ class Program
         rootCommand.AddOption(databaseOption);
         rootCommand.AddOption(connStringOption);
         rootCommand.AddOption(codePathOption);
+        rootCommand.AddOption(decorateStreamsOption);
         
         rootCommand.SetHandler(ctx =>
         {
             database = ctx.ParseResult.GetValueForOption(databaseOption);
             conn = ctx.ParseResult.GetValueForOption(connStringOption);
             codePath = ctx.ParseResult.GetValueForOption(codePathOption);
+            decorateStd = ctx.ParseResult.GetValueForOption(decorateStreamsOption) ?? false;
             
             ctx.ExitCode = database is null || conn is null || codePath is null ? 1 : 0;
         });
@@ -75,21 +80,45 @@ class Program
 
         Stopwatch sw = new Stopwatch();
         sw.Start();
+
+        MinfoldOptions options = new MinfoldOptions { DecorateMessages = decorateStd };
         
         Minfold m = new Minfold();
-        MinfoldResult synchronizeResult = await m.Synchronize(conn, database, codePath);
+        MinfoldResult synchronizeResult = await m.Synchronize(conn, database, codePath, options);
 
         sw.Stop();
+
+        void WriteError(string msg)
+        {
+            if (options.DecorateMessages)
+            {
+                Console.WriteLine($"<|err,err|>{msg}");
+                return;
+            }
+            
+            Console.WriteLine(msg);
+        }
+
+        void WriteSuccess(string msg)
+        {
+            if (options.DecorateMessages)
+            {
+                Console.WriteLine($"<|out,info|>{msg}");
+                return;
+            }
+            
+            Console.WriteLine(msg);
+        }
         
         if (synchronizeResult.Error is not null)
         {
-            Console.WriteLine(synchronizeResult.Error.Messsage);
-            Console.WriteLine("Raw exception:");
-            Console.WriteLine(synchronizeResult.Error.Exception.Message);
+            WriteError(synchronizeResult.Error.Messsage);
+            WriteError("Raw exception:");
+            WriteError(synchronizeResult.Error.Exception.Message);
             return 1;
         }
         
-        Console.WriteLine($"Minfold Synchronize finished successfully in {sw.Elapsed.ToString()}");
+        WriteSuccess($"Minfold Synchronize finished successfully in {sw.Elapsed.ToString()}");
         return 0;
     }
 }

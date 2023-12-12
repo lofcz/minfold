@@ -20,6 +20,7 @@ public class Minfold
     private readonly Dictionary<string, SqlTable> modelsToTablesMap = [];
     private readonly ConcurrentDictionary<string, string> daoPaths = new ConcurrentDictionary<string, string>();
     private MinfoldCfg cfg = new MinfoldCfg(false);
+    private MinfoldOptions options = new MinfoldOptions();
     
     public async Task<ResultOrException<Dictionary<string, SqlTable>>> AnalyzeSqlSchema(string sqlConn, string dbName)
     {
@@ -690,8 +691,9 @@ public class Minfold
     private ConcurrentDictionary<string, bool> synchronizedDaoFiles = [];
     private ConcurrentDictionary<string, CsPropertiesInfo> modelProperties = [];
     
-    public async Task<MinfoldResult> Synchronize(string sqlConn, string dbName, string codePath)
+    public async Task<MinfoldResult> Synchronize(string sqlConn, string dbName, string codePath, MinfoldOptions? opts = null)
     {
+        options = opts ?? new MinfoldOptions();
         synchronizedTables = [];
         synchronizedModelFiles = [];
         synchronizedDaoFiles = [];
