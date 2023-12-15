@@ -10,6 +10,8 @@ using System.Windows.Media;
 using System.Threading.Tasks;
 using Microsoft.VisualStudio.Threading;
 using System.Collections.Generic;
+using static Microsoft.VisualStudio.Threading.AsyncReaderWriterLock;
+using System.Windows.Markup;
 
 namespace MinfoldVs
 {
@@ -19,6 +21,10 @@ namespace MinfoldVs
 	public partial class MinfoldToolControl : UserControl
 	{
 		public static readonly DependencyProperty TextDependency = DependencyProperty.Register(nameof(MinfoldText), typeof(string), typeof(MinfoldToolControl), new UIPropertyMetadata(null));
+		private bool? minfoldAvailable = null;
+		private static readonly SolidColorBrush errorBrush = new SolidColorBrush(Color.FromArgb(255, 255, 65, 54));
+		private static readonly SolidColorBrush warningBrush = new SolidColorBrush(Color.FromArgb(255, 255, 133, 27));
+		private bool busy;
 
 		public string MinfoldText
 		{
@@ -53,60 +59,122 @@ namespace MinfoldVs
 			ioScroll.Height = Math.Abs(minfoldGrid.ActualHeight - inputPanel.ActualHeight - 16);
 		}
 
-		private async void Button_Click(object sender, RoutedEventArgs e)
+		void RenderException(Exception e, string text)
 		{
-			SetIoSize();
+			ioText.Inlines.Clear();
+			ioText.Inlines.Add(new Run($"{text}{Environment.NewLine}") { Foreground = errorBrush });
+			ioText.Inlines.Add(new Run($"Native exception:{Environment.NewLine}") { Foreground = errorBrush });
+			ioText.Inlines.Add(new Run(e.Message) { Foreground = errorBrush });
+			ioText.InvalidateVisual();
+		}
 
-			List<string> outputLines = new List<string>();
+		void RenderError(string text)
+		{
+			ioText.Inlines.Clear();
+			ioText.Inlines.Add(new Run($"{text}") { Foreground = errorBrush });
+			ioText.InvalidateVisual();
+		}
 
-			ProcessStartInfo processStartInfo = new ProcessStartInfo
-			{
-				CreateNoWindow = true,
-				RedirectStandardOutput = true,
-				RedirectStandardInput = true,
-				UseShellExecute = false,
-				Arguments = "--help",
-				FileName = "minfold"
-			};
+		void RenderWarning(string text)
+		{
+			ioText.Inlines.Clear();
+			ioText.Inlines.Add(new Run($"{text}") { Foreground = warningBrush });
+			ioText.InvalidateVisual();
+		}
 
-			Process process = new Process();
-			process.StartInfo = processStartInfo;
-			process.EnableRaisingEvents = true;
+		void RenderText(string text)
+		{
+			ioText.Inlines.Clear();
+			ioText.Inlines.Add(new Run($"{text}"));
+			ioText.InvalidateVisual();
+		}
 
-			process.OutputDataReceived += new DataReceivedEventHandler
-			(
-				delegate (object pSender, DataReceivedEventArgs pE)
-				{
-					outputLines.Add($"{pE.Data}\n");
-
-					/*Dispatcher.Invoke(() =>
-					{
-						ioText.Inlines.Add(new Run($"{pE.Data}\n"));
-					});*/
-				}
-			);
-
+		void RenderData(IEnumerable<string>? lines)
+		{
 			ioText.Inlines.Clear();
 
-			try
+			if (lines is not null) 
 			{
-				process.Start();
-				process.BeginOutputReadLine();
-				await process.WaitForExitAsync();
-				process.CancelOutputRead();
-			}
-			catch (Exception processException)
-			{
-
+				foreach (var x in lines)
+				{
+					ioText.Inlines.Add(new Run($"{x}"));
+				}
 			}
 
-			foreach (var x in outputLines)
+			ioText.InvalidateVisual();
+		}
+
+		private async void Button_Click(object sender, RoutedEventArgs e)
+		{
+			if (busy)
 			{
-				ioText.Inlines.Add(new Run(x));
+				RenderWarning("Minfold in progress, please wait..");
+				return;
 			}
 
-			ioText.Inlines.Add(new Run("muij string 2\n") { Foreground = Brushes.Blue });
-			ioText.Inlines.Add(new Bold(new Run("muij string 2\n") { Foreground = Brushes.Blue }));
+			busy = true;
+			SetIoSize();
+			RenderText("Minfold in progress..");
+
+			if (minfoldAvailable is null)
+			{
+				DataOrException<bool> available = await ProcessDispatcher.Available("minfold");
+
+				if (available.Exception is not null)
+				{
+					RenderException(available.Exception, "Failed to locate whether minfold is available");
+					busy = false;
+					return;
+				}
+
+				if (!available.Data)
+				{
+					DataOrException<bool> dotnetAvailable = await ProcessDispatcher.Available("dotnet");
+
+					if (dotnetAvailable.Exception is not null)
+					{
+						RenderException(dotnetAvailable.Exception, "Dotnet is not available, please install .NET SDK");
+						busy = false;
+						return;
+					}
+
+					DataOrException<List<string>> installResult = await ProcessDispatcher.Run("dotnet", "tool install Minfold.Cli --global");
+
+					if (installResult.Exception is not null)
+					{
+						RenderException(installResult.Exception, "Failed to install Minfold via dotnet tool");
+						busy = false;
+						return;
+					}
+
+					minfoldAvailable = true;
+				}
+				else
+				{
+					minfoldAvailable = true;
+				}
+			}
+
+			if (minfoldAvailable is not true)
+			{
+				RenderError("Minfold is not available and couldn't be installed automatically. Please install manually via: dotnet tool install Minfold.Cli --global");
+				busy = false;
+				return;
+			}
+
+			DataOrException<List<string>> data = await ProcessDispatcher.Run("minfold", "--help");
+
+			if (data.Exception is not null)
+			{
+				RenderException(data.Exception, "Minfold crashed or isn't available");
+				busy = false;
+				return;
+			}
+
+			RenderData(data.Data);
+			busy = false;
+			//ioText.Inlines.Add(new Run("muij string 2\n") { Foreground = Brushes.Blue });
+			//ioText.Inlines.Add(new Bold(new Run("muij string 2\n") { Foreground = Brushes.Blue }));
 		}
 
 		private void UserControl_SizeChanged(object sender, SizeChangedEventArgs e)
