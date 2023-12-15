@@ -27,7 +27,7 @@ namespace MinfoldVs
 
 		public static readonly DependencyProperty LabelDependency = DependencyProperty.Register(nameof(Label), typeof(string), typeof(LabelTextBox), new UIPropertyMetadata(null));
 		public static readonly DependencyProperty PlaceholderDependeny = DependencyProperty.Register(nameof(Placeholder), typeof(string), typeof(LabelTextBox), new UIPropertyMetadata(null));
-
+		public static readonly DependencyProperty ProtectContentDependency = DependencyProperty.Register(nameof(ProtectContent), typeof(bool), typeof(LabelTextBox), new UIPropertyMetadata(null));
 
 		public string Label
 		{
@@ -46,6 +46,15 @@ namespace MinfoldVs
 				SetValue(PlaceholderDependeny, value);
 			}
 		}
-		
+
+		public bool ProtectContent
+		{
+			get { return (bool)GetValue(ProtectContentDependency); }
+			set
+			{
+				SetValue(ProtectContentDependency, value);
+			}
+		}
+
 	}
 }

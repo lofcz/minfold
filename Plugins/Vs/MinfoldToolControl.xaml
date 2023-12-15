@@ -12,6 +12,7 @@
              >
     <UserControl.Resources>
         <ResourceDictionary Source="Styles.xaml"/>
+        
     </UserControl.Resources>
     <Grid>
         <StackPanel>
@@ -19,13 +20,16 @@
                 <minfoldvs:LabelTextBox Label="Database:" Placeholder="MyDatabase" />
             </DockPanel>
             <DockPanel HorizontalAlignment="Stretch" Height="30">
-                <minfoldvs:LabelTextBox Label="Connection String:" Placeholder="DataSource=SERVER:PORT;Initial Catalog=DATABASE..."/>
+                <minfoldvs:LabelTextBox ProtectContent="true"  Label="Connection String:" Placeholder="DataSource=SERVER:PORT;Initial Catalog=DATABASE..."/>
             </DockPanel>
             <DockPanel HorizontalAlignment="Stretch" Height="30">
                 <minfoldvs:LabelTextBox Label="Code Path:" Placeholder="Path to the folder with a .csproj project"/>
             </DockPanel>
             <DockPanel HorizontalAlignment="Stretch" Height="30">
                 <minfoldvs:LabelTextBox Label="Additional parameters:" Placeholder="Optional: --param1 param1Value"/>
+            </DockPanel>
+            <DockPanel HorizontalAlignment="Stretch" Height="25">
+                <Button  HorizontalAlignment="Left" Content="Minfold" Width="72" Margin="5,0,0,0"/>
             </DockPanel>
         </StackPanel>
     </Grid>
