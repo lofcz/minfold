@@ -8,28 +8,36 @@
              Foreground="{DynamicResource {x:Static vsshell:VsBrushes.WindowTextKey}}"
              mc:Ignorable="d"
              d:DesignHeight="300" d:DesignWidth="300"
-             Name="MyToolWindow"
+             Name="MinfoldWindow"
+             SizeChanged="UserControl_SizeChanged"
              >
     <UserControl.Resources>
         <ResourceDictionary Source="Styles.xaml"/>
         
     </UserControl.Resources>
-    <Grid>
+    <Grid Name="minfoldGrid">
         <StackPanel>
-            <DockPanel HorizontalAlignment="Stretch" Height="30">
-                <minfoldvs:LabelTextBox Label="Database:" Placeholder="MyDatabase" />
-            </DockPanel>
-            <DockPanel HorizontalAlignment="Stretch" Height="30">
-                <minfoldvs:LabelTextBox ProtectContent="true"  Label="Connection String:" Placeholder="DataSource=SERVER:PORT;Initial Catalog=DATABASE..."/>
-            </DockPanel>
-            <DockPanel HorizontalAlignment="Stretch" Height="30">
-                <minfoldvs:LabelTextBox Label="Code Path:" Placeholder="Path to the folder with a .csproj project"/>
-            </DockPanel>
-            <DockPanel HorizontalAlignment="Stretch" Height="30">
-                <minfoldvs:LabelTextBox Label="Additional parameters:" Placeholder="Optional: --param1 param1Value"/>
-            </DockPanel>
-            <DockPanel HorizontalAlignment="Stretch" Height="25">
-                <Button  HorizontalAlignment="Left" Content="Minfold" Width="72" Margin="5,0,0,0"/>
+            <StackPanel Name="inputPanel">
+                <DockPanel HorizontalAlignment="Stretch" Height="30">
+                    <minfoldvs:LabelTextBox Label="Database:" Placeholder="MyDatabase" />
+                </DockPanel>
+                <DockPanel HorizontalAlignment="Stretch" Height="30">
+                    <minfoldvs:LabelTextBox ProtectContent="true" Label="Connection String:" Placeholder="DataSource=SERVER:PORT;Initial Catalog=DATABASE..."/>
+                </DockPanel>
+                <DockPanel HorizontalAlignment="Stretch" Height="30">
+                    <minfoldvs:LabelTextBox Label="Code Path:" Placeholder="Path to the folder with a .csproj project"/>
+                </DockPanel>
+                <DockPanel HorizontalAlignment="Stretch" Height="30">
+                    <minfoldvs:LabelTextBox Label="Additional parameters:" Placeholder="Optional: --param1 param1Value"/>
+                </DockPanel>
+                <DockPanel HorizontalAlignment="Stretch" Height="25">
+                    <Button  HorizontalAlignment="Left" Content="Minfold" Width="72" Margin="5,0,0,0" Click="Button_Click"/>
+                </DockPanel>
+            </StackPanel>
+            <DockPanel VerticalAlignment="Stretch" HorizontalAlignment="Stretch" Margin="5,15,5,10" Dock="Bottom">
+                <ScrollViewer Name="ioScroll" IsTabStop="True" ScrollViewer.HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+                    <TextBlock Name="ioText" TextWrapping="Wrap" Text="{Binding MinfoldText, UpdateSourceTrigger=PropertyChanged, RelativeSource={RelativeSource AncestorType=UserControl}}"  />
+                </ScrollViewer>
             </DockPanel>
         </StackPanel>
     </Grid>
