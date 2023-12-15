@@ -10,6 +10,9 @@
              d:DesignHeight="300" d:DesignWidth="300"
              Name="MyToolWindow"
              >
+    <UserControl.Resources>
+        <ResourceDictionary Source="Styles.xaml"/>
+    </UserControl.Resources>
     <Grid>
         <StackPanel>
             <DockPanel HorizontalAlignment="Stretch" Height="30">

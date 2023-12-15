@@ -6,12 +6,13 @@
              xmlns:local="clr-namespace:MinfoldVs"
              mc:Ignorable="d" 
              d:DesignHeight="49" d:DesignWidth="314" MinHeight="49" MaxHeight="49"
+             xmlns:shell="clr-namespace:Microsoft.VisualStudio.Shell;assembly=Microsoft.VisualStudio.Shell.15.0"
+             xmlns:vs_shell="clr-namespace:Microsoft.VisualStudio.PlatformUI;assembly=Microsoft.VisualStudio.Shell.15.0"
              >
-    
     <Grid>
         <StackPanel>
             <DockPanel HorizontalAlignment="Stretch">
-                <Label HorizontalAlignment="Left" VerticalAlignment="Top" Width="135" Content="{Binding Label, UpdateSourceTrigger=PropertyChanged}"></Label>
+                <Label HorizontalAlignment="Left" VerticalAlignment="Top" Width="135" Content="{Binding Label, UpdateSourceTrigger=PropertyChanged, RelativeSource={RelativeSource AncestorType=UserControl}}" />
                 <TextBox HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" VerticalAlignment="Center">MyText</TextBox>
             </DockPanel>
         </StackPanel>

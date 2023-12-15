@@ -25,8 +25,8 @@ namespace MinfoldVs
 			InitializeComponent();
 		}
 
-		public static readonly DependencyProperty LabelDependency = DependencyProperty.Register("Label", typeof(string), typeof(LabelTextBox), new UIPropertyMetadata(null));
-		public static readonly DependencyProperty PlaceholderDependeny = DependencyProperty.Register("Placeholder", typeof(string), typeof(LabelTextBox), new UIPropertyMetadata(null));
+		public static readonly DependencyProperty LabelDependency = DependencyProperty.Register(nameof(Label), typeof(string), typeof(LabelTextBox), new UIPropertyMetadata(null));
+		public static readonly DependencyProperty PlaceholderDependeny = DependencyProperty.Register(nameof(Placeholder), typeof(string), typeof(LabelTextBox), new UIPropertyMetadata(null));
 
 
 		public string Label
