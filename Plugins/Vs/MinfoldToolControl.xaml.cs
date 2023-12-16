@@ -89,7 +89,7 @@ namespace MinfoldVs
 			ioText.InvalidateVisual();
 		}
 
-		void RenderData(StdOutErr data)
+		bool RenderData(StdOutErr data)
 		{
 			ioText.Inlines.Clear();
 
@@ -126,6 +126,7 @@ namespace MinfoldVs
 			}
 
 			ioText.InvalidateVisual();
+			return !anyErr;
 		}
 
 		private async void Button_Click(object sender, RoutedEventArgs e)

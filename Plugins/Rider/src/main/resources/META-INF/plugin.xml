@@ -1,6 +1,6 @@
 <idea-plugin>
     <id>com.github.lofcz.minfold</id>
-    <name>MinfoldRider</name>
+    <name>Minfold</name>
     <version>1.0</version>
     <description>Official Minfold intergration for Rider.</description>
     <vendor email="stagl@wattlescript.org">Matěj "lofcz" Štágl</vendor>
