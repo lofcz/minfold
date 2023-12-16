@@ -51,6 +51,7 @@
     <Compile Include="LabelTextBox.xaml.cs">
       <DependentUpon>LabelTextBox.xaml</DependentUpon>
     </Compile>
+    <Compile Include="MinfoldSaveData.cs" />
     <Compile Include="MinfoldTool.cs" />
     <Compile Include="MinfoldToolCommand.cs" />
     <Compile Include="MinfoldToolControl.xaml.cs">

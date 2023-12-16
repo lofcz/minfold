@@ -12,6 +12,11 @@ using Microsoft.VisualStudio.Threading;
 using System.Collections.Generic;
 using static Microsoft.VisualStudio.Threading.AsyncReaderWriterLock;
 using System.Windows.Markup;
+using System.Runtime.InteropServices;
+using System.IO;
+using Newtonsoft.Json;
+using Microsoft.VisualStudio.Shell;
+using EnvDTE;
 
 namespace MinfoldVs
 {
@@ -228,7 +233,51 @@ namespace MinfoldVs
 				return;
 			}
 
-			RenderData(data.Data);
+			bool runOk = RenderData(data.Data);
+
+			if (runOk)
+			{
+				if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+				{
+					string folder = "C:\\ProgramData\\Minfold";
+
+					Directory.CreateDirectory(folder);
+					MinfoldSaveData save = new MinfoldSaveData();
+
+					if (File.Exists($"{folder}\\data.json"))
+					{
+						string saveData = File.ReadAllText($"{folder}\\data.json");
+						
+						if (saveData.Length > 0)
+						{
+							try
+							{
+								save = JsonConvert.DeserializeObject<MinfoldSaveData>(saveData);
+							}
+							catch (Exception)
+							{
+
+							}
+						}
+					}
+
+					await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+					DTE dte = ServiceProvider.GlobalProvider.GetService(typeof(DTE)) as DTE;
+
+					Array? projects = dte.ActiveSolutionProjects as Array;
+
+					if (projects?.Length > 0)
+					{
+						Project prj = projects.GetValue(0) as Project;
+
+
+					}
+
+					save.saves.Add(new MinfoldSaveDataEntry());
+					File.WriteAllText($"{folder}\\data.json", JsonConvert.SerializeObject(save));
+				}
+			} 
+
 			busy = false;
 		}
 
