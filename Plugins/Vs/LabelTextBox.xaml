@@ -14,13 +14,13 @@
             <DockPanel HorizontalAlignment="Stretch">
                 <Label HorizontalAlignment="Left" VerticalAlignment="Top" Width="135" Content="{Binding Label, UpdateSourceTrigger=PropertyChanged, RelativeSource={RelativeSource AncestorType=UserControl}}" />
                 <Grid>
-                    <local:TextBoxExt ProtectContent="{Binding ProtectContent, UpdateSourceTrigger=PropertyChanged, RelativeSource={RelativeSource AncestorType=UserControl}}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" VerticalAlignment="Center" x:Name="SearchTermTextBox" />
+                    <local:TextBoxExt x:Name="Input" ProtectContent="{Binding ProtectContent, UpdateSourceTrigger=PropertyChanged, RelativeSource={RelativeSource AncestorType=UserControl}}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" VerticalAlignment="Center" />
                     <TextBlock IsHitTestVisible="False" Text="{Binding Placeholder, UpdateSourceTrigger=PropertyChanged, RelativeSource={RelativeSource AncestorType=UserControl}}" VerticalAlignment="Center" HorizontalAlignment="Left" Margin="4,0,0,0" Foreground="DarkGray">
                         <TextBlock.Style>
                             <Style TargetType="{x:Type TextBlock}">
                                 <Setter Property="Visibility" Value="Collapsed"/>
                                 <Style.Triggers>
-                                    <DataTrigger Binding="{Binding Text, ElementName=SearchTermTextBox}" Value="">
+                                    <DataTrigger Binding="{Binding Text, ElementName=Input}" Value="">
                                         <Setter Property="Visibility" Value="Visible"/>
                                     </DataTrigger>
                                 </Style.Triggers>

@@ -44,10 +44,10 @@ namespace MinfoldVs
 
 		void OnFocusLost(object sender, EventArgs e)
 		{
+			RealText = Text;
+
 			if (ProtectContent)
 			{
-				RealText = Text;
-
 				if (Text.Length > 0)
 				{
 					Text = "**************************";

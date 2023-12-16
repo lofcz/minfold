@@ -13,7 +13,7 @@ namespace MinfoldVs
 	{
 		public static async Task<DataOrException<bool>> Available(string cmd)
 		{
-			DataOrException<List<string>> data = await Run(RuntimeInformation.IsOSPlatform(OSPlatform.Linux) ? "which" : "where", cmd);
+			DataOrException<StdOutErr> data = await Run(RuntimeInformation.IsOSPlatform(OSPlatform.Linux) ? "which" : "where", cmd);
 
 			if (data.Exception is not null)
 			{
@@ -25,7 +25,7 @@ namespace MinfoldVs
 				return new DataOrException<bool>(false);
 			}
 
-			foreach (string x in data.Data)
+			foreach (string x in data.Data.StdOut)
 			{
 				if (x.Trim().Replace("\n", string.Empty).Replace("\r", "").Length > 0)
 				{
@@ -36,15 +36,17 @@ namespace MinfoldVs
 			return new DataOrException<bool>(false);
 		}
 
-		public static async Task<DataOrException<List<string>>> Run(string command, string args)
+		public static async Task<DataOrException<StdOutErr>> Run(string command, string args)
 		{
 			List<string> outputLines = [];
+			List<string> errorLines = [];
 
 			ProcessStartInfo processStartInfo = new ProcessStartInfo
 			{
 				CreateNoWindow = true,
 				RedirectStandardOutput = true,
 				RedirectStandardInput = true,
+				RedirectStandardError = true,
 				UseShellExecute = false,
 				Arguments = args,
 				FileName = command
@@ -54,25 +56,29 @@ namespace MinfoldVs
 			process.StartInfo = processStartInfo;
 			process.EnableRaisingEvents = true;
 
-			process.OutputDataReceived += new DataReceivedEventHandler
-			(
-				delegate (object pSender, DataReceivedEventArgs pE)
-				{
-					outputLines.Add($"{pE.Data}\n");
-				}
-			);
+			process.OutputDataReceived += (object pSender, DataReceivedEventArgs pE) =>
+			{
+				outputLines.Add($"{pE.Data}\n");
+			};
+
+			process.ErrorDataReceived += (object pSender, DataReceivedEventArgs pE) =>
+			{
+				errorLines.Add($"{pE.Data}\n");
+			};
 
 			try
 			{
 				process.Start();
 				process.BeginOutputReadLine();
+				process.BeginErrorReadLine();
 				await process.WaitForExitAsync();
 				process.CancelOutputRead();
-				return new DataOrException<List<string>>(outputLines);
+				process.CancelErrorRead();
+				return new DataOrException<StdOutErr>(new StdOutErr { StdErr = errorLines, StdOut = outputLines });
 			}
 			catch (Exception processException)
 			{
-				return new DataOrException<List<string>>(processException);
+				return new DataOrException<StdOutErr>(processException);
 			}
 		}
 	}

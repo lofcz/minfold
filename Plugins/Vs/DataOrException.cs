@@ -21,4 +21,10 @@ namespace MinfoldVs
 			Exception = exception;
 		}
 	}
+
+	internal class StdOutErr
+	{
+		public List<string> StdOut { get; set; }
+		public List<string> StdErr { get; set; }
+	}
 }

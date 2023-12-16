@@ -19,16 +19,16 @@
         <StackPanel>
             <StackPanel Name="inputPanel">
                 <DockPanel HorizontalAlignment="Stretch" Height="30">
-                    <minfoldvs:LabelTextBox Label="Database:" Placeholder="MyDatabase" />
+                    <minfoldvs:LabelTextBox x:Name="inputDb" Label="Database:" Placeholder="MyDatabase" />
                 </DockPanel>
                 <DockPanel HorizontalAlignment="Stretch" Height="30">
-                    <minfoldvs:LabelTextBox ProtectContent="true" Label="Connection String:" Placeholder="DataSource=SERVER:PORT;Initial Catalog=DATABASE..."/>
+                    <minfoldvs:LabelTextBox x:Name="inputConn" ProtectContent="true" Label="Connection String:" Placeholder="DataSource=SERVER:PORT;Initial Catalog=DATABASE..."/>
                 </DockPanel>
                 <DockPanel HorizontalAlignment="Stretch" Height="30">
-                    <minfoldvs:LabelTextBox Label="Code Path:" Placeholder="Path to the folder with a .csproj project"/>
+                    <minfoldvs:LabelTextBox x:Name="inputPath" Label="Code Path:" Placeholder="Path to the folder with a .csproj project"/>
                 </DockPanel>
                 <DockPanel HorizontalAlignment="Stretch" Height="30">
-                    <minfoldvs:LabelTextBox Label="Additional parameters:" Placeholder="Optional: --param1 param1Value"/>
+                    <minfoldvs:LabelTextBox x:Name="inputArgs" Label="Additional parameters:" Placeholder="Optional: --param1 param1Value"/>
                 </DockPanel>
                 <DockPanel HorizontalAlignment="Stretch" Height="25">
                     <Button  HorizontalAlignment="Left" Content="Minfold" Width="72" Margin="5,0,0,0" Click="Button_Click"/>

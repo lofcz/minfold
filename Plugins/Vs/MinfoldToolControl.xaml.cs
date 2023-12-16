@@ -89,16 +89,40 @@ namespace MinfoldVs
 			ioText.InvalidateVisual();
 		}
 
-		void RenderData(IEnumerable<string>? lines)
+		void RenderData(StdOutErr data)
 		{
 			ioText.Inlines.Clear();
 
-			if (lines is not null) 
+			bool outTrimTop = true;
+			bool errTrimTop = true;
+			bool anyErr = false;
+
+			foreach (var x in data.StdErr)
 			{
-				foreach (var x in lines)
+				if (errTrimTop && x.Trim().Replace("\n", string.Empty).Replace("\r", string.Empty).Length is 0)
 				{
-					ioText.Inlines.Add(new Run($"{x}"));
+					outTrimTop = false;
+					continue;
 				}
+
+				ioText.Inlines.Add(new Run($"{x}") { Foreground = errorBrush });
+				anyErr = true;
+			}
+
+			if (anyErr)
+			{
+				ioText.Inlines.Add(new Run($"{Environment.NewLine}"));
+			}
+
+			foreach (var x in data.StdOut)
+			{
+				if (outTrimTop && x.Trim().Replace("\n", string.Empty).Replace("\r", string.Empty).Length is 0)
+				{
+					outTrimTop = false;
+					continue;
+				}
+
+				ioText.Inlines.Add(new Run($"{x}"));
 			}
 
 			ioText.InvalidateVisual();
@@ -138,7 +162,7 @@ namespace MinfoldVs
 						return;
 					}
 
-					DataOrException<List<string>> installResult = await ProcessDispatcher.Run("dotnet", "tool install Minfold.Cli --global");
+					DataOrException<StdOutErr> installResult = await ProcessDispatcher.Run("dotnet", "tool install Minfold.Cli --global");
 
 					if (installResult.Exception is not null)
 					{
@@ -162,7 +186,39 @@ namespace MinfoldVs
 				return;
 			}
 
-			DataOrException<List<string>> data = await ProcessDispatcher.Run("minfold", "--help");
+			List<string> argsBuilder = new List<string>();
+
+			string db = inputDb.Input.RealText.Trim();
+			string conn = inputConn.Input.RealText.Trim();
+			string path = inputPath.Input.RealText.Trim();
+			string args = inputArgs.Input.RealText.Trim();
+
+			if (db.Length > 0)
+			{
+				argsBuilder.Add($"--database \"{db}\"");
+			}
+
+            if (conn.Length > 0)
+            {
+				argsBuilder.Add($"--connection \"{conn}\"");
+			}
+
+			if (path.Length > 0)
+			{
+				argsBuilder.Add($"--codePath \"{path}\"");
+			}
+
+			if (args.Length > 0)
+			{
+				argsBuilder.Add(args);
+			}
+
+			if (argsBuilder.Count is 0)
+			{
+				argsBuilder.Add("--help");
+			}
+
+			DataOrException<StdOutErr> data = await ProcessDispatcher.Run("minfold", string.Join(" ", argsBuilder));
 
 			if (data.Exception is not null)
 			{
@@ -173,8 +229,6 @@ namespace MinfoldVs
 
 			RenderData(data.Data);
 			busy = false;
-			//ioText.Inlines.Add(new Run("muij string 2\n") { Foreground = Brushes.Blue });
-			//ioText.Inlines.Add(new Bold(new Run("muij string 2\n") { Foreground = Brushes.Blue }));
 		}
 
 		private void UserControl_SizeChanged(object sender, SizeChangedEventArgs e)
