@@ -22,11 +22,11 @@ Strongly opinionated EF Core, database-first Scaffolder. Minfold implements the 
 
 ### Rider
 
-Download the plugin from [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/23315-minfold?noRedirect=true) or from [here]().
+Download the plugin from [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/23315-minfold?noRedirect=true) or from [here](https://github.com/lofcz/minfold/tree/master/Plugins/Rider/dist).
 
 ### Visual Studio
 
-Download the plugin from [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=lofcz.minfold) or from [here]().
+Download the plugin from [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=lofcz.minfold) or from [here](https://github.com/lofcz/minfold/tree/master/Plugins/Vs/dist).
 
 ### CLI
 
