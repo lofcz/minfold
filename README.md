@@ -20,6 +20,16 @@ Strongly opinionated EF Core, database-first Scaffolder. Minfold implements the 
 
 ## Getting Started
 
+### Rider
+
+Download the plugin from [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/23315-minfold?noRedirect=true) or from [here]().
+
+### Visual Studio
+
+Download the plugin from [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=lofcz.minfold) or from [here]().
+
+### CLI
+
 ```bash
 dotnet tool install Minfold.Cli --global
 ```
@@ -29,17 +39,10 @@ To invoke:
 minfold --help
 ```
 
-To use:
+Usage:
 ```
 minfold --database DATABASE --connection "CONNECTION_STRING" --codePath "C:\.."
 ```
-
-## Integrations
-
-A plugin for Rider is available.
-
-![minfold_tool2](https://github.com/lofcz/minfold/assets/10260230/9baa544a-a9dd-4ff4-8cb8-4fd892bc3558)
-
 
 ## Limitations
 
