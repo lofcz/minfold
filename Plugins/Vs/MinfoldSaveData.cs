@@ -13,12 +13,12 @@ namespace MinfoldVs
 
 	internal class MinfoldSaveDataEntry
 	{
-		string connString { get; set; }
-		string database { get; set; }
-		string location { get; set; }
-		string optional { get; set; }
-		string projectPath { get; set; }
-		string projectName { get; set; }
+		public string connString { get; set; }
+		public string database { get; set; }
+		public string location { get; set; }
+		public string optional { get; set; }
+		public string projectPath { get; set; }
+		public string projectName { get; set; }
 
 		public MinfoldSaveDataEntry()
 		{

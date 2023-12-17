@@ -56,5 +56,9 @@ namespace MinfoldVs
 			}
 		}
 
+		public void SetText(string text)
+		{
+			Input.SetText(text);
+		}
 	}
 }

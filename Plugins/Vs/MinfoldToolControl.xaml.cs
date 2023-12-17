@@ -17,19 +17,22 @@ using System.IO;
 using Newtonsoft.Json;
 using Microsoft.VisualStudio.Shell;
 using EnvDTE;
+using System.Linq;
+using IAsyncDisposable = System.IAsyncDisposable;
 
 namespace MinfoldVs
 {
 	/// <summary>
 	/// Interaction logic for MinfoldToolControl.
 	/// </summary>
-	public partial class MinfoldToolControl : UserControl
+	public partial class MinfoldToolControl : UserControl, IAsyncDisposable
 	{
 		public static readonly DependencyProperty TextDependency = DependencyProperty.Register(nameof(MinfoldText), typeof(string), typeof(MinfoldToolControl), new UIPropertyMetadata(null));
 		private bool? minfoldAvailable = null;
 		private static readonly SolidColorBrush errorBrush = new SolidColorBrush(Color.FromArgb(255, 255, 65, 54));
 		private static readonly SolidColorBrush warningBrush = new SolidColorBrush(Color.FromArgb(255, 255, 133, 27));
 		private bool busy;
+		private static bool eventsHooked;
 
 		public string MinfoldText
 		{
@@ -47,6 +50,74 @@ namespace MinfoldVs
 		{
 			this.InitializeComponent();
 			MinfoldText = string.Empty;
+
+			LoadConfig();
+
+			if (!eventsHooked)
+			{
+				eventsHooked = true;
+
+				if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+				{
+					Task.Run(async () =>
+					{
+						await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+						DTE dte = ServiceProvider.GlobalProvider.GetService(typeof(DTE)) as DTE;
+						dte.Events.SolutionEvents.Opened += LoadConfig;
+					}).ConfigureAwait(false);
+				}
+			}
+		}
+
+		private void LoadConfig()
+		{
+			string folder = "C:\\ProgramData\\Minfold";
+
+			if (File.Exists($"{folder}\\data.json"))
+			{
+				string saveData = File.ReadAllText($"{folder}\\data.json");
+				MinfoldSaveData save = new MinfoldSaveData();
+
+				if (saveData.Length > 0)
+				{
+					try
+					{
+						save = JsonConvert.DeserializeObject<MinfoldSaveData>(saveData);
+					}
+					catch (Exception)
+					{
+
+					}
+				}
+
+				Task.Run(async () =>
+				{
+					await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+					DTE dte = ServiceProvider.GlobalProvider.GetService(typeof(DTE)) as DTE;
+
+					Array? projects = dte.ActiveSolutionProjects as Array;
+
+					if (projects?.Length > 0)
+					{
+						Project? prj = projects.GetValue(0) as Project;
+
+						if (prj is not null)
+						{
+							string prjPath = new FileInfo(prj.FullName).DirectoryName;
+							MinfoldSaveDataEntry? selectedSave = save.saves.FirstOrDefault(x => x.projectPath == prjPath && x.projectName == prj.Name);
+
+							if (selectedSave is not null)
+							{
+								inputDb.SetText(selectedSave.database);
+								inputConn.SetText(selectedSave.connString);
+								inputPath.SetText(selectedSave.location);
+								inputArgs.SetText(selectedSave.optional);
+							}
+						}
+					}
+				}).ConfigureAwait(false);
+
+			}
 		}
 
 		private void TextBox_TextChanged(object sender, TextChangedEventArgs e)
@@ -268,13 +339,28 @@ namespace MinfoldVs
 
 					if (projects?.Length > 0)
 					{
-						Project prj = projects.GetValue(0) as Project;
+						Project? prj = projects.GetValue(0) as Project;
 
+						if (prj is not null)
+						{
+							string prjPath = new FileInfo(prj.FullName).DirectoryName;
+							MinfoldSaveDataEntry? selectedSave = save.saves.FirstOrDefault(x => x.projectPath == prjPath && x.projectName == prj.Name);
 
+							if (selectedSave is null)
+							{
+								save.saves.Add(new MinfoldSaveDataEntry(conn, db, path, args, prjPath, prj.Name));
+							}
+							else
+							{
+								selectedSave.location = path;
+								selectedSave.database = db;
+								selectedSave.optional = args;
+								selectedSave.connString = conn;
+							}
+
+							File.WriteAllText($"{folder}\\data.json", JsonConvert.SerializeObject(save));
+						}
 					}
-
-					save.saves.Add(new MinfoldSaveDataEntry());
-					File.WriteAllText($"{folder}\\data.json", JsonConvert.SerializeObject(save));
 				}
 			} 
 
@@ -284,6 +370,13 @@ namespace MinfoldVs
 		private void UserControl_SizeChanged(object sender, SizeChangedEventArgs e)
 		{
 			SetIoSize();
+		}
+
+		public async ValueTask DisposeAsync()
+		{
+			await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+			DTE dte = ServiceProvider.GlobalProvider.GetService(typeof(DTE)) as DTE;
+			dte.Events.SolutionEvents.Opened -= LoadConfig;
 		}
 	}
 }

@@ -42,10 +42,8 @@ namespace MinfoldVs
 			LostFocus += OnFocusLost;
 		}
 
-		void OnFocusLost(object sender, EventArgs e)
+		void MaskText()
 		{
-			RealText = Text;
-
 			if (ProtectContent)
 			{
 				if (Text.Length > 0)
@@ -53,6 +51,12 @@ namespace MinfoldVs
 					Text = "**************************";
 				}
 			}
+		}
+
+		void OnFocusLost(object sender, EventArgs e)
+		{
+			RealText = Text;
+			MaskText();
 		}
 
 		void OnFocus(object sender, EventArgs e)
@@ -70,6 +74,13 @@ namespace MinfoldVs
 		{
 			GotFocus -= OnFocus;
 			LostFocus -= OnFocusLost;
+		}
+
+		public void SetText(string text)
+		{
+			Text = text;
+			RealText = text;
+			MaskText();
 		}
 	}
 }
