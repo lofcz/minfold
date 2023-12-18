@@ -8,6 +8,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MinFold.Test", "MinFold.Tes
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Minfold.Annotations", "Minfold.Annotations\Minfold.Annotations.csproj", "{DA616EB2-6F0C-42CE-9E9D-655EA35EA497}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Minfold.Migrations", "Minfold.Migrations\Minfold.Migrations.csproj", "{646E274E-3684-41B4-A6BE-CA3F3DE0D515}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Minfold.Migrations.Cli", "Minfold.Migrations.Cli\Minfold.Migrations.Cli.csproj", "{0612C46E-EE98-4445-97B4-3D3247526F41}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -30,5 +34,13 @@ Global
 		{DA616EB2-6F0C-42CE-9E9D-655EA35EA497}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{DA616EB2-6F0C-42CE-9E9D-655EA35EA497}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{DA616EB2-6F0C-42CE-9E9D-655EA35EA497}.Release|Any CPU.Build.0 = Release|Any CPU
+		{646E274E-3684-41B4-A6BE-CA3F3DE0D515}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{646E274E-3684-41B4-A6BE-CA3F3DE0D515}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{646E274E-3684-41B4-A6BE-CA3F3DE0D515}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{646E274E-3684-41B4-A6BE-CA3F3DE0D515}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0612C46E-EE98-4445-97B4-3D3247526F41}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0612C46E-EE98-4445-97B4-3D3247526F41}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0612C46E-EE98-4445-97B4-3D3247526F41}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0612C46E-EE98-4445-97B4-3D3247526F41}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
