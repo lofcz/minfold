@@ -1,0 +1,16 @@
+public class Model0
+{
+    public int ColumnA { get; set; }
+    public int? B { get; set; }
+    public string? C { get; set; }
+    public Json<List<Model1>?>? NoColumnName0 { get; set; }
+    public int NoColumnName1 { get; set; }
+    public bool NoColumnName2 { get; set; }
+}
+
+[SqlJson]
+public class Model1
+{
+    public int? A { get; set; }
+    public int? B { get; set; }
+}

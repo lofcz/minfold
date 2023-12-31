@@ -1,0 +1,1 @@
+select a as columnA, b, c, ( select b.a, b.b from bar b left join foo f on f.a = b.a for json path), 10, cast(1 as bit) from foo

@@ -64,7 +64,14 @@ public class MinfoldTests
         string output = await File.ReadAllTextAsync(outputPath);
 
         MinfoldSqlResult result = await MinfoldSql.Map(connSettings.Connection, connSettings.Database, input);
+
+        string? genCode = result.GeneratedCode?.Trim();
+
+        if (!string.Equals(genCode, output.Trim()))
+        {
+            // breakpoint placeholder
+        }
         
-        Assert.That(output.Trim(), Is.EqualTo(result.GeneratedCode?.Trim()));
+        Assert.That(output.Trim(), Is.EqualTo(genCode));
     }
 }

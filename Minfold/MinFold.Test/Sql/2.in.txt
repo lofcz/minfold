@@ -1,0 +1,10 @@
+select a, b, c, ( 
+	select b.a, b.b, (
+	    select 1 as c1, 2 as c2, 3 as c3
+	    for json path
+	) as t
+	from bar b 
+	inner join foo f on f.a = b.a 
+	for json path
+) as jsonCol, 10 as intLiteral, cast(1 as bit) as castBit 
+from foo
