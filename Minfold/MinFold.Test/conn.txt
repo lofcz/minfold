@@ -1,4 +1,0 @@
-{
-    "connection": "data source=DESKTOP-OLQ7TVU\\SQLSERVERA;initial catalog=MinfoldTest;TrustServerCertificate=True;Integrated Security=SSPI;",
-    "database": "MinfoldTest"
-}
