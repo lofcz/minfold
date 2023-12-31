@@ -73,6 +73,17 @@ class SelectColumn
     public string? ColumnName { get; set; }
     public string? ColumnSource { get; set; }
     public Scope? Scope { get; set; }
+    public TSqlFragment? Fragment { get; set; }
+    
+    public SelectColumn(SelectColumnTypes type, string? alias, string? columnName, string? columnSource, TSqlFragment fragment, Scope scope)
+    {
+        Type = type;
+        Alias = alias;
+        ColumnName = columnName;
+        ColumnSource = columnSource;
+        Fragment = fragment;
+        Scope = scope;
+    }
     
     public SelectColumn(SelectColumnTypes type, string? alias, string? columnName, string? columnSource)
     {
@@ -98,7 +109,8 @@ public enum SelectColumnTypes
     Number,
     String,
     Query,
-    Bool
+    Bool,
+    StarDelayed
 }
 
 public static class Extensions
@@ -128,6 +140,7 @@ class Scope
     public QuerySpecification? Select { get; set; }
     public List<SelectColumn> SelectColumns { get; set; } = [];
     public JsonForClauseOptions JsonOptions { get; set; }
+    public bool DependenciesGathered { get; set; }
 
     public ScopeIdentifier? GetIdentifier(string ident)
     {
@@ -142,6 +155,8 @@ class Scope
 
     public HashSet<string> GatherDependencies()
     {
+        DependenciesGathered = true;
+        
         if (Identifiers.Count is 0 && SelectColumns.Count is 0)
         {
             return [];
@@ -151,12 +166,25 @@ class Scope
 
         foreach (ScopeIdentifier ident in Identifiers)
         {
-            deps.Add(ident.Ident);
+            if (ident.Table is not null)
+            {
+                deps.Add(ident.Table);   
+            }
+
+            if (ident.Scope is not null)
+            {
+                HashSet<string> childDeps = ident.Scope.GatherDependencies();
+
+                foreach (string dep in childDeps)
+                {
+                    deps.Add(dep);
+                }
+            }
         }
 
         foreach (SelectColumn column in SelectColumns)
         {
-            if (column.Scope is not null)
+            if (!column.Scope?.DependenciesGathered ?? false)
             {
                 HashSet<string> childDeps = column.Scope.GatherDependencies();
 
@@ -186,17 +214,25 @@ class Scope
             unkIndex++;
             return str;
         }
+        
+        MappedModelProperty AddPropertyRaw(MappedModelProperty property)
+        {
+            model.Properties.Add(property);
+            return property;
+        }
 
-        void AddProperty(SqlDbTypeExt type, bool nullable, string? name, MappedModelPropertyTypeFlags flags)
+        MappedModelProperty AddProperty(SqlDbTypeExt type, bool nullable, string? name, MappedModelPropertyTypeFlags flags)
         {
             MappedModelProperty property = new MappedModelProperty(type, nullable, name?.FirstCharToUpper() ?? GetUnkIdent(), flags);
             model.Properties.Add(property);
+            return property;
         }
         
-        void AddPropertyWithModel(SqlDbTypeExt type, bool nullable, string? name, MappedModel mdl, MappedModelPropertyTypeFlags flags)
+        MappedModelProperty AddPropertyWithModel(SqlDbTypeExt type, bool nullable, string? name, MappedModel mdl, MappedModelPropertyTypeFlags flags)
         {
             MappedModelProperty property = new MappedModelProperty(type, nullable, name?.FirstCharToUpper() ?? GetUnkIdent(), mdl, flags);
             model.Properties.Add(property);
+            return property;
         }
 
         int GetModelIndex()
@@ -281,6 +317,34 @@ class Scope
             else if (column.OutputType is SelectColumnTypes.Number)
             {
                 AddProperty(SqlDbTypeExt.Float, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.None);
+            }
+            else if (column.OutputType is SelectColumnTypes.StarDelayed)
+            {
+                if (column.Scope is not null)
+                {
+                    foreach (ScopeIdentifier ident in column.Scope.Identifiers)
+                    {
+                        if (ident.Scope is not null)
+                        {
+                            MappedModel fromModel = ident.Scope.Compile(schema, modelIndex);
+
+                            foreach (MappedModelProperty prop in fromModel.Properties)
+                            {
+                                AddPropertyRaw(prop);
+                            }
+                        }
+                        else if (ident.Table is not null)
+                        {
+                            if (schema.TryGetValue(ident.Table, out SqlTable? sqlTable))
+                            {
+                                foreach (KeyValuePair<string, SqlTableColumn> col in sqlTable.Columns)
+                                {
+                                    AddProperty(col.Value.SqlType, col.Value.IsNullable, col.Value.Name, MappedModelPropertyTypeFlags.None);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         
@@ -553,11 +617,17 @@ class MyVisitor : TSqlFragmentVisitor
             switch (selCol)
             {
                 case SelectStarExpression selStar:
-                    break;
+                {
+                    return new SelectColumn(SelectColumnTypes.StarDelayed, null, null, null, selStar, localScope);
+                }
                 case ScalarExpression scalarExpression:
+                {
                     return SolveSelectScalarCol(scalarExpression, null);
+                }
                 case SelectScalarExpression selScalar:
+                {
                     return SolveSelectScalarCol(selScalar.Expression, selScalar);
+                }
             }
 
             return null;
