@@ -1,0 +1,7 @@
+select iq1.b as c
+from (
+    select a as b
+    from (
+        select 2 as a
+    ) iq2
+) iq1

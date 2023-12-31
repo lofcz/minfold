@@ -1,0 +1,6 @@
+copy me as conn.txt and replace my content with the following JSON:
+
+{
+    "connection": "data source=...",
+    "database": "database_name"
+} 

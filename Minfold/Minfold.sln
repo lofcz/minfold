@@ -12,6 +12,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Minfold.Migrations", "Minfo
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Minfold.Migrations.Cli", "Minfold.Migrations.Cli\Minfold.Migrations.Cli.csproj", "{0612C46E-EE98-4445-97B4-3D3247526F41}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Minfold.SqlJson", "Minfold.SqlJson\Minfold.SqlJson.csproj", "{BFA00C87-C6DD-405A-ADF3-97B58D0584A8}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Minfold.SqlJsonCli", "Minfold.SqlJsonCli\Minfold.SqlJsonCli.csproj", "{EA9337D7-B581-42B1-B795-22445338BC7A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -42,5 +46,13 @@ Global
 		{0612C46E-EE98-4445-97B4-3D3247526F41}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{0612C46E-EE98-4445-97B4-3D3247526F41}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{0612C46E-EE98-4445-97B4-3D3247526F41}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BFA00C87-C6DD-405A-ADF3-97B58D0584A8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BFA00C87-C6DD-405A-ADF3-97B58D0584A8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BFA00C87-C6DD-405A-ADF3-97B58D0584A8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BFA00C87-C6DD-405A-ADF3-97B58D0584A8}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EA9337D7-B581-42B1-B795-22445338BC7A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EA9337D7-B581-42B1-B795-22445338BC7A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EA9337D7-B581-42B1-B795-22445338BC7A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EA9337D7-B581-42B1-B795-22445338BC7A}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

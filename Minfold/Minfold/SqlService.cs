@@ -1,10 +1,11 @@
 ﻿using System.Data;
+using System.Text;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.Data.SqlClient;
 namespace Minfold;
 
-internal class SqlService
+public class SqlService
 {
     private string connString;
 
@@ -19,7 +20,70 @@ internal class SqlService
         return conn.Exception;
     }
 
-    public async Task<ResultOrException<Dictionary<string, SqlTable>>> GetSchema(string dbName)
+    static string SqlSchema(string dbName, List<string>? tables)
+    {
+        StringBuilder? sb = null;
+
+        if (tables is not null)
+        {
+            sb = new StringBuilder();
+
+            for (int i = 0; i < tables.Count; i++)
+            {
+                if (i == tables.Count - 1)
+                {
+                    sb.Append($"@t{i}");
+                    continue;
+                }
+                
+                sb.Append($"@t{i}, ");
+            }
+        }
+        
+        return $$"""
+         use {{dbName}}
+         select col.TABLE_NAME, col.COLUMN_NAME, col.ORDINAL_POSITION, col.IS_NULLABLE, col.DATA_TYPE,
+                 columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'IsIdentity') as IS_IDENTITY,
+                 columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'IsComputed') as IS_COMPUTED,
+                isnull(j.pk, cast(0 as bit)) as IS_PRIMARY,
+                 cc.definition as COMPUTED_DEFINITION
+         from information_schema.COLUMNS col
+         left join sys.computed_columns cc on cc.object_id = object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME) and cc.column_id = columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'ColumnId')
+         left join (select k.COLUMN_NAME, k.TABLE_NAME, iif(k.CONSTRAINT_NAME is null, 0, 1) as pk
+                    from information_schema.TABLE_CONSTRAINTS AS c
+                    join information_schema.KEY_COLUMN_USAGE AS k on c.TABLE_NAME = k.TABLE_NAME
+                 		and c.CONSTRAINT_CATALOG = k.CONSTRAINT_CATALOG
+                 		and c.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA
+                 		and c.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+                    where c.CONSTRAINT_TYPE = 'PRIMARY KEY'
+                   ) j on col.COLUMN_NAME = j.COLUMN_NAME and j.TABLE_NAME = col.TABLE_NAME
+         where TABLE_SCHEMA = 'dbo' {{(tables is null ? string.Empty : $"and col.TABLE_NAME in ({sb})")}}
+         order by col.TABLE_NAME, col.COLUMN_NAME
+         """;
+    }
+
+    public async Task<ResultOrException<int>> Execute(string sql)
+    {
+        await using SqlConnectionResult conn = await Connect();
+
+        if (conn.Exception is not null)
+        {
+            return new ResultOrException<int>(0, conn.Exception);
+        }
+
+        try
+        {
+            SqlCommand command = new(sql, conn.Connection);
+            await using SqlDataReader reader = await command.ExecuteReaderAsync();
+            return new ResultOrException<int>(1, null);
+        }
+        catch (Exception e)
+        {
+            return new ResultOrException<int>(0, e);
+        }
+    } 
+
+    public async Task<ResultOrException<Dictionary<string, SqlTable>>> GetSchema(string dbName, List<string>? selectTables = null)
     {
         await using SqlConnectionResult conn = await Connect();
 
@@ -28,26 +92,16 @@ internal class SqlService
             return new ResultOrException<Dictionary<string, SqlTable>>(null, conn.Exception);
         }
 
-        SqlCommand command = new($$"""
-        use {{dbName}}
-        select col.TABLE_NAME, col.COLUMN_NAME, col.ORDINAL_POSITION, col.IS_NULLABLE, col.DATA_TYPE,
-                columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'IsIdentity') as IS_IDENTITY,
-                columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'IsComputed') as IS_COMPUTED,
-        		isnull(j.pk, cast(0 as bit)) as IS_PRIMARY,
-                cc.definition as COMPUTED_DEFINITION
-        from information_schema.COLUMNS col
-        left join sys.computed_columns cc on cc.object_id = object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME) and cc.column_id = columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'ColumnId')
-        left join (select k.COLUMN_NAME, k.TABLE_NAME, iif(k.CONSTRAINT_NAME is null, 0, 1) as pk
-                   from information_schema.TABLE_CONSTRAINTS AS c
-                   join information_schema.KEY_COLUMN_USAGE AS k on c.TABLE_NAME = k.TABLE_NAME 
-        				and c.CONSTRAINT_CATALOG = k.CONSTRAINT_CATALOG 
-        				and c.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA 
-        				and c.CONSTRAINT_NAME = k.CONSTRAINT_NAME
-                   where c.CONSTRAINT_TYPE = 'PRIMARY KEY'
-                  ) j on col.COLUMN_NAME = j.COLUMN_NAME and j.TABLE_NAME = col.TABLE_NAME
-        where TABLE_SCHEMA = 'dbo' 
-        order by col.TABLE_NAME, col.COLUMN_NAME
-        """, conn.Connection);
+        SqlCommand command = new(SqlSchema(dbName, selectTables), conn.Connection);
+
+        if (selectTables is not null)
+        {
+            for (int i = 0; i < selectTables.Count; i++)
+            {
+                command.Parameters.AddWithValue($"t{i}", selectTables[i]);
+            }
+        }
+        
         await using SqlDataReader reader = await command.ExecuteReaderAsync();
 
         Dictionary<string, SqlTable> tables = new();
