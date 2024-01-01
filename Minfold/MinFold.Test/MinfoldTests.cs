@@ -60,18 +60,41 @@ public class MinfoldTests
             Assert.Fail("Test case expected output not found");
         }
 
+        string? Normalize(string? str)
+        {
+            return str?.Trim().Replace("\r\n", "\n");
+        }
+        
         string input = await File.ReadAllTextAsync(testSrc);
         string output = await File.ReadAllTextAsync(outputPath);
-
+        string expected;
+        
         MinfoldSqlResult result = await MinfoldSql.Map(connSettings.Connection, connSettings.Database, input);
 
-        string? genCode = result.GeneratedCode?.Trim();
+        if (testSrc.Contains("ResultAmbiguity"))
+        {
+            Assert.That(result.ResultType, Is.EqualTo(MinfoldSqlResultTypes.MappingAmbiguities));
 
-        if (!string.Equals(output.Trim(), genCode))
+            string? errors = Normalize(result.MappingAmbiguities?.DumpConcat(ErrorDumpModes.Serializable));
+            expected = Normalize(output) ?? string.Empty;
+            
+            if (!string.Equals(expected, errors))
+            {
+                string? readableErrors = result.MappingAmbiguities?.DumpConcat(ErrorDumpModes.HumanReadable);
+            }
+            
+            Assert.That(expected, Is.EqualTo(errors));
+            return;
+        }
+
+        string? genCode = Normalize(result.GeneratedCode);
+        expected = Normalize(output) ?? string.Empty;
+        
+        if (!string.Equals(expected, genCode))
         {
             // breakpoint placeholder
         }
         
-        Assert.That(output.Trim(), Is.EqualTo(genCode));
+        Assert.That(expected, Is.EqualTo(genCode));
     }
 }

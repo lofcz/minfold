@@ -5,14 +5,14 @@ public class Model0
     public string? C { get; set; }
     public Json<List<Model1>?>? JsonCol { get; set; }
     public int IntLiteral { get; set; }
-    public bool NoColumnName0 { get; set; }
+    public bool CastBit { get; set; }
 }
 
 [SqlJson]
 public class Model1
 {
-    public int A { get; set; }
-    public int? B { get; set; }
+    public int? A { get; set; }
+    public double? B { get; set; }
     public List<Model2>? T { get; set; }
 }
 

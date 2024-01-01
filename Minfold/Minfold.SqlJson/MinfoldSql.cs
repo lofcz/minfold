@@ -7,10 +7,23 @@ using System.Threading.Tasks;
 using Microsoft.SqlServer.TransactSql.ScriptDom;
 namespace Minfold.SqlJson;
 
+public class MinfoldSqlOptions
+{
+    public static readonly MinfoldSqlOptions Default = new MinfoldSqlOptions();
+    
+    /// <summary>
+    /// If true, models with members with the same already declared will be produced without an error, e.g:
+    /// select 1 as c1, 2 as c1 would produce a model with two integer columns named C1
+    /// </summary>
+    public bool IgnoreAmbiguities { get; set; }
+}
+
 public static class MinfoldSql
 {
-    public static async Task<MinfoldSqlResult> Map(string connString, string database, string sqlQuery)
+    public static async Task<MinfoldSqlResult> Map(string connString, string database, string sqlQuery, MinfoldSqlOptions? options = null)
     {
+        options ??= MinfoldSqlOptions.Default;
+        
         using StringReader rdr = new StringReader(sqlQuery);
         TSql160Parser parser = new TSql160Parser(true, SqlEngineType.All);
         TSqlFragment tree = parser.Parse(rdr, out IList<ParseError>? errors);
@@ -34,6 +47,23 @@ public static class MinfoldSql
         }
 
         MappedModel model = checker.Root.Compile(test.Result, 0);
+
+        if (!options.IgnoreAmbiguities)
+        {
+            List<MappedModelAmbiguities> ambiguities = model.GetMappingAmbiguities();
+       
+            if (ambiguities.Count > 0)
+            {
+                MappedModelAmbiguitiesAccumulator accu = new MappedModelAmbiguitiesAccumulator
+                {
+                    Ambiguities = ambiguities,
+                    Input = sqlQuery
+                };
+                
+                return new MinfoldSqlResult { ResultType = MinfoldSqlResultTypes.MappingAmbiguities, MappingAmbiguities = accu };
+            }
+        }
+        
         DumpedModel dump = model.Dump();
         string genCode = dump.Flatten();
 
@@ -43,19 +73,19 @@ public static class MinfoldSql
 
 class ScopeIdentifier
 {
-    public string Ident { get; set; }
+    public string? Ident { get; set; }
     public string? Table { get; set; }
     public Scope? Scope { get; set; }
     public bool Nullable { get; set; }
 
-    public ScopeIdentifier(string ident, string table, bool nullable)
+    public ScopeIdentifier(string? ident, string table, bool nullable)
     {
         Ident = ident;
         Table = table;
         Nullable = nullable;
     }
     
-    public ScopeIdentifier(string ident, Scope scope, bool nullable)
+    public ScopeIdentifier(string? ident, Scope scope, bool nullable)
     {
         Ident = ident;
         Scope = scope;
@@ -214,24 +244,35 @@ class Scope
             unkIndex++;
             return str;
         }
+
+        void CheckDupeName(SelectColumn column, MappedModelProperty prop)
+        {
+            if (!model.PropertyNames.Add(prop.Name))
+            {
+                model.Ambiguities.Add(new MappedModelAmbiguity(column, prop));
+            }
+        }
         
-        MappedModelProperty AddPropertyRaw(MappedModelProperty property)
+        MappedModelProperty AddPropertyRaw(SelectColumn column, MappedModelProperty property)
         {
             property.Name = property.Name.FirstCharToUpper() ?? string.Empty;
+            CheckDupeName(column, property);
             model.Properties.Add(property);
             return property;
         }
 
-        MappedModelProperty AddProperty(SqlDbTypeExt type, bool nullable, string? name, MappedModelPropertyTypeFlags flags)
+        MappedModelProperty AddProperty(SelectColumn column, SqlDbTypeExt type, bool nullable, string? name, MappedModelPropertyTypeFlags flags, SqlTable? sourceTable)
         {
-            MappedModelProperty property = new MappedModelProperty(type, nullable, name?.FirstCharToUpper() ?? GetUnkIdent(), flags);
+            MappedModelProperty property = new MappedModelProperty(type, nullable, name?.FirstCharToUpper() ?? GetUnkIdent(), flags, sourceTable);
+            CheckDupeName(column, property);
             model.Properties.Add(property);
             return property;
         }
         
-        MappedModelProperty AddPropertyWithModel(SqlDbTypeExt type, bool nullable, string? name, MappedModel mdl, MappedModelPropertyTypeFlags flags)
+        MappedModelProperty AddPropertyWithModel(SelectColumn column, SqlDbTypeExt type, bool nullable, string? name, MappedModel mdl, MappedModelPropertyTypeFlags flags)
         {
-            MappedModelProperty property = new MappedModelProperty(type, nullable, name?.FirstCharToUpper() ?? GetUnkIdent(), mdl, flags);
+            MappedModelProperty property = new MappedModelProperty(type, nullable, name?.FirstCharToUpper() ?? GetUnkIdent(), mdl, flags, null);
+            CheckDupeName(column, property);
             model.Properties.Add(property);
             return property;
         }
@@ -270,7 +311,7 @@ class Scope
                             flags |= MappedModelPropertyTypeFlags.Json;
                         }
                         
-                        AddPropertyWithModel(SqlDbTypeExt.CsIdentifier, true, column.ColumnOutputName, subModel, flags);
+                        AddPropertyWithModel(column, SqlDbTypeExt.CsIdentifier, true, column.ColumnOutputName, subModel, flags);
                     }
                     else
                     {
@@ -285,7 +326,7 @@ class Scope
                                 firstProp.Nullable = true;
                             }
                             
-                            AddPropertyRaw(firstProp);
+                            AddPropertyRaw(column, firstProp);
                         }
                     }
                 }
@@ -296,14 +337,14 @@ class Scope
 
                 if (column.ColumnSource is not null)
                 {
-                    identifier = identifier is not null ? GetSource(identifier.Ident) : null;
+                    identifier = identifier?.Ident is not null ? GetSource(identifier.Ident) : null;
                 }
                 
                 if (identifier?.Table is not null && schema.TryGetValue(identifier.Table, out SqlTable? sqlTable))
                 {
                     if (column.ColumnName is not null && sqlTable.Columns.TryGetValue(column.ColumnName, out SqlTableColumn? colDef))
                     {
-                        AddProperty(colDef.SqlType, colDef.IsNullable || identifier.Nullable, column.ColumnOutputName, MappedModelPropertyTypeFlags.None);
+                        AddProperty(column, colDef.SqlType, colDef.IsNullable || identifier.Nullable, column.ColumnOutputName, MappedModelPropertyTypeFlags.None, sqlTable);
                     }
                 }
                 else if (identifier?.Scope is not null)
@@ -313,7 +354,7 @@ class Scope
 
                     if (fromProp is not null)
                     {
-                        AddProperty(fromProp.Type, fromProp.Nullable, column.ColumnOutputName, fromProp.Flags);
+                        AddProperty(column, fromProp.Type, fromProp.Nullable, column.ColumnOutputName, fromProp.Flags, fromProp.SourceTable);
                     }
                     
                     int z = 0;
@@ -321,19 +362,19 @@ class Scope
             }
             else if (column.OutputType is SelectColumnTypes.Integer)
             {
-                AddProperty(SqlDbTypeExt.Int, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.LiteralValue);
+                AddProperty(column, SqlDbTypeExt.Int, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.LiteralValue, null);
             }
             else if (column.OutputType is SelectColumnTypes.String)
             {
-                AddProperty(SqlDbTypeExt.NVarChar, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.LiteralValue);
+                AddProperty(column, SqlDbTypeExt.NVarChar, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.LiteralValue, null);
             }
             else if (column.OutputType is SelectColumnTypes.Bool)
             {
-                AddProperty(SqlDbTypeExt.Bit, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.LiteralValue);
+                AddProperty(column, SqlDbTypeExt.Bit, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.LiteralValue, null);
             }
             else if (column.OutputType is SelectColumnTypes.Number)
             {
-                AddProperty(SqlDbTypeExt.Float, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.None);
+                AddProperty(column, SqlDbTypeExt.Float, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.None, null);
             }
             else if (column.OutputType is SelectColumnTypes.StarDelayed)
             {
@@ -347,7 +388,7 @@ class Scope
 
                             foreach (MappedModelProperty prop in fromModel.Properties)
                             {
-                                AddPropertyRaw(prop);
+                                AddPropertyRaw(column, prop);
                             }
                         }
                         else if (ident.Table is not null)
@@ -356,7 +397,7 @@ class Scope
                             {
                                 foreach (KeyValuePair<string, SqlTableColumn> col in sqlTable.Columns)
                                 {
-                                    AddProperty(col.Value.SqlType, col.Value.IsNullable, col.Value.Name, MappedModelPropertyTypeFlags.None);
+                                    AddProperty(column, col.Value.SqlType, col.Value.IsNullable, col.Value.Name, MappedModelPropertyTypeFlags.None, sqlTable);
                                 }
                             }
                         }
@@ -386,22 +427,25 @@ internal class MappedModelProperty
     public string Name { get; set; }
     public MappedModelPropertyTypeFlags Flags { get; set; }
     public MappedModel? Model { get; set; }
+    public SqlTable? SourceTable { get; set; }
 
-    public MappedModelProperty(SqlDbTypeExt type, bool nullable, string name, MappedModelPropertyTypeFlags flags)
+    public MappedModelProperty(SqlDbTypeExt type, bool nullable, string name, MappedModelPropertyTypeFlags flags, SqlTable? sourceTable)
     {
         Type = type;
         Nullable = nullable;
         Name = name;
         Flags = flags;
+        SourceTable = sourceTable;
     }
     
-    public MappedModelProperty(SqlDbTypeExt type, bool nullable, string name, MappedModel model, MappedModelPropertyTypeFlags flags)
+    public MappedModelProperty(SqlDbTypeExt type, bool nullable, string name, MappedModel model, MappedModelPropertyTypeFlags flags, SqlTable? sourceTable)
     {
         Type = type;
         Model = model;
         Nullable = nullable;
         Name = name;
         Flags = flags;
+        SourceTable = sourceTable;
     }
 }
 
@@ -436,11 +480,108 @@ class DumpedModel
     }
 }
 
+public enum ErrorDumpModes
+{
+    HumanReadable,
+    Serializable
+}
+
+public class MappedModelAmbiguitiesAccumulator
+{
+    public List<MappedModelAmbiguities> Ambiguities { get; set; } = [];
+    public string Input { get; set; }
+
+    public string DumpConcat(ErrorDumpModes mode = ErrorDumpModes.HumanReadable, int snippetMaxLen = 100)
+    {
+        return string.Join(mode is ErrorDumpModes.HumanReadable ? "\n\n" : "\n", Dump(mode, snippetMaxLen));
+    }
+    
+    public List<string> Dump(ErrorDumpModes mode = ErrorDumpModes.HumanReadable, int snippetMaxLen = 100)
+    {
+        if (Ambiguities.Count is 0)
+        {
+            return [];
+        }
+
+        List<string> errors = [];
+
+        foreach (MappedModelAmbiguities modelAmbiguities in Ambiguities)
+        {
+            foreach (MappedModelAmbiguity ambiguity in modelAmbiguities.Ambiguities)
+            {
+                if (ambiguity.Column.Fragment is not null)
+                {
+                    int errorStartOffset = ambiguity.Column.Fragment.ScriptTokenStream[ambiguity.Column.Fragment.FirstTokenIndex].Offset;
+                    int errorEndOffset = ambiguity.Column.Fragment.ScriptTokenStream[ambiguity.Column.Fragment.LastTokenIndex].Offset;
+                    string errorSnippet = Input.Substring(errorStartOffset, Math.Max(1, errorEndOffset - errorStartOffset));
+
+                    if (mode is ErrorDumpModes.Serializable)
+                    {
+                        errors.Add($"c:\"{ambiguity.Prop.Name}\", m:\"{modelAmbiguities.Model.Name}\", t:\"{ambiguity.Prop.SourceTable?.Name}\", o: {errorStartOffset}");
+                        continue;
+                    }
+                    
+                    int remLenPerSide = Math.Max(0, snippetMaxLen - errorSnippet.Length) / 2;
+                    errorSnippet = $"--> {errorSnippet} <--";
+
+                    int offsetBeforeLen = Math.Max(0, errorStartOffset - remLenPerSide);
+                    int offsetAfterLen = Math.Min(Input.Length, errorEndOffset + remLenPerSide);
+                    string errorWithContextSnippet = $"{Input.Substring(offsetBeforeLen, errorStartOffset)}{errorSnippet}{Input.Substring(errorEndOffset + 1, offsetAfterLen - errorEndOffset - 1)}";
+
+                    StringBuilder sb = new StringBuilder();
+                    sb.Append($"Error {errors.Count + 1}: column \"{ambiguity.Prop.Name}\", model {modelAmbiguities.Model.Name}");
+
+                    if (ambiguity.Prop.SourceTable is not null)
+                    {
+                        sb.Append($", table \"{ambiguity.Prop.SourceTable.Name}\"");
+                    }
+
+                    sb.Append(", near:\n");
+                    sb.Append(errorWithContextSnippet);
+                    
+                    errors.Add(sb.ToString());   
+                    continue;
+                }
+                
+                if (mode is ErrorDumpModes.Serializable)
+                {
+                    errors.Add($"c:\"{ambiguity.Prop.Name}\", m:\"{modelAmbiguities.Model.Name}\", t:\"{ambiguity.Prop.SourceTable?.Name}\", o: -1");
+                    continue;
+                }
+                
+                errors.Add($"Error {errors.Count + 1}: column \"{ambiguity.Prop.Name}\", model {modelAmbiguities.Model.Name}: unknown source location");
+            }
+        }
+
+        return errors;
+    }
+}
+
+public class MappedModelAmbiguities
+{
+    internal MappedModel Model { get; set; }
+    internal List<MappedModelAmbiguity> Ambiguities { get; set; } = [];
+}
+
+class MappedModelAmbiguity
+{
+    public SelectColumn Column { get; set; }
+    public MappedModelProperty Prop { get; set; }
+
+    public MappedModelAmbiguity(SelectColumn column, MappedModelProperty prop)
+    {
+        Column = column;
+        Prop = prop;
+    }
+}
+
 class MappedModel
 {
     public string Name { get; set; }
     public List<MappedModelProperty> Properties { get; set; } = [];
     public JsonForClauseOptions JsonOptions { get; set; }
+    public HashSet<string> PropertyNames { get; set; } = [];
+    public List<MappedModelAmbiguity> Ambiguities { get; set; } = [];
 
     public MappedModel(string name, JsonForClauseOptions jsonOptions)
     {
@@ -462,6 +603,26 @@ class MappedModel
         }
 
         return sb.ToString();
+    }
+
+    public List<MappedModelAmbiguities> GetMappingAmbiguities()
+    {
+        List<MappedModelAmbiguities> accu = [];
+
+        if (Ambiguities.Count > 0)
+        {
+            accu.Add(new MappedModelAmbiguities { Model = this, Ambiguities = Ambiguities });
+        }
+
+        foreach (MappedModelProperty prop in Properties)
+        {
+            if (prop.Model is not null)
+            {
+                accu.AddRange(prop.Model.GetMappingAmbiguities());
+            }
+        }
+
+        return accu;
     }
 
     public DumpedModel Dump(bool decorateForJson = false)
@@ -570,7 +731,7 @@ class MyVisitor : TSqlFragmentVisitor
                         break;
                     case QueryDerivedTable queryDerivedTable:
                     {
-                        alias = queryDerivedTable.Alias?.Value ?? string.Empty;
+                        alias = queryDerivedTable.Alias?.Value;
 
                         if (queryDerivedTable.QueryExpression is QuerySpecification fromQs)
                         {
@@ -582,11 +743,17 @@ class MyVisitor : TSqlFragmentVisitor
                     case QualifiedJoin qualifiedJoin:
                     {
                         bool nullable = qualifiedJoin.QualifiedJoinType is QualifiedJoinType.LeftOuter or QualifiedJoinType.FullOuter;
-                
-                        if (qualifiedJoin.SecondTableReference is NamedTableReference namedJoin)
+
+                        if (qualifiedJoin.FirstTableReference is NamedTableReference namedJoin1)
                         {
-                            alias = namedJoin.Alias.Value ?? string.Empty;   
-                            localScope.Identifiers.Add(new ScopeIdentifier(alias, namedJoin.SchemaObject.BaseIdentifier.Value, nullable));
+                            alias = namedJoin1.Alias?.Value;
+                            localScope.Identifiers.Add(new ScopeIdentifier(alias, namedJoin1.SchemaObject.BaseIdentifier.Value, nullable));
+                        }
+                        
+                        if (qualifiedJoin.SecondTableReference is NamedTableReference namedJoin2)
+                        {
+                            alias = namedJoin2.Alias?.Value;
+                            localScope.Identifiers.Add(new ScopeIdentifier(alias, namedJoin2.SchemaObject.BaseIdentifier.Value, nullable));
                         }
 
                         break;
@@ -621,8 +788,10 @@ class MyVisitor : TSqlFragmentVisitor
                         {
                             castQuery.TransformedType = dataTypeReference.SqlDataTypeOption.ToCsType();
                         }
+
+                        castQuery.Alias = selScalar?.ColumnName?.Value;
                     }
-                
+                    
                     return castQuery;
                 }
                 default:

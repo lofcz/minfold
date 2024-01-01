@@ -1,0 +1,3 @@
+c:"A", m:"Model0", t:"Bar", o: 7
+c:"B", m:"Model0", t:"Bar", o: 7
+c:"C", m:"Model0", t:"Bar", o: 7

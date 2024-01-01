@@ -9,7 +9,8 @@ public enum MinfoldSqlResultTypes
     Unknown,
     Ok,
     SqlSyntaxInvalid,
-    DatabaseConnectionFailed
+    DatabaseConnectionFailed,
+    MappingAmbiguities
 }
 
 public class MinfoldSqlResult
@@ -18,4 +19,5 @@ public class MinfoldSqlResult
     public string? GeneratedCode { get; set; }
     public MinfoldSqlResultTypes ResultType { get; set; }
     public Exception? Exception { get; set; }
+    public MappedModelAmbiguitiesAccumulator? MappingAmbiguities { get; set; }
 }

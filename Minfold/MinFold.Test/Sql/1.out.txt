@@ -12,5 +12,5 @@ public class Model0
 public class Model1
 {
     public int? A { get; set; }
-    public int? B { get; set; }
+    public double? B { get; set; }
 }
