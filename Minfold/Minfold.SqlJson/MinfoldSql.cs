@@ -393,9 +393,9 @@ class Scope
                         }
                         else if (ident.Table is not null)
                         {
-                            if (schema.TryGetValue(ident.Table, out SqlTable? sqlTable))
+                            if (schema.TryGetValue(ident.Table.ToLowerInvariant(), out SqlTable? sqlTable))
                             {
-                                foreach (KeyValuePair<string, SqlTableColumn> col in sqlTable.Columns)
+                                foreach (KeyValuePair<string, SqlTableColumn> col in sqlTable.Columns.OrderBy(x => x.Value.OrdinalPosition))
                                 {
                                     AddProperty(column, col.Value.SqlType, col.Value.IsNullable, col.Value.Name, MappedModelPropertyTypeFlags.None, sqlTable);
                                 }

@@ -24,6 +24,8 @@ public class MinfoldTests
         ResultOrException<int> schemaResult = await SqlService.Execute("""
            drop table if exists Foo
            drop table if exists Bar
+           drop table if exists Table1
+           drop table if exists Table2
            create table Foo (
                a integer not null,
                b integer,
@@ -35,6 +37,16 @@ public class MinfoldTests
                c bit,
                d datetime2(7)
            )
+           create table Table1 (
+               int1 integer primary key,
+               dt1 datetime2(7),
+               name nvarchar(max) not null
+           )
+           create table Table2 (
+                int2 integer primary key,
+                dt2 datetime2(7),
+                name nvarchar(max) not null
+            )
         """);
 
         if (schemaResult.Exception is not null)
