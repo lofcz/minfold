@@ -67,7 +67,7 @@ public class MinfoldTests
 
         string? genCode = result.GeneratedCode?.Trim();
 
-        if (!string.Equals(genCode, output.Trim()))
+        if (!string.Equals(output.Trim(), genCode))
         {
             // breakpoint placeholder
         }

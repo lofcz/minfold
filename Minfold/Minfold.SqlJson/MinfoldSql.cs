@@ -217,6 +217,7 @@ class Scope
         
         MappedModelProperty AddPropertyRaw(MappedModelProperty property)
         {
+            property.Name = property.Name.FirstCharToUpper() ?? string.Empty;
             model.Properties.Add(property);
             return property;
         }
@@ -252,14 +253,14 @@ class Scope
                     bool mapAsList = !subModel.JsonOptions.HasFlag(JsonForClauseOptions.WithoutArrayWrapper);
 
                     MappedModelPropertyTypeFlags flags = MappedModelPropertyTypeFlags.None;
-                    
-                    if (mapAsList)
-                    {
-                        flags |= MappedModelPropertyTypeFlags.List;
-                    }
 
                     if (mapAsJson)
                     {
+                        if (mapAsList)
+                        {
+                            flags |= MappedModelPropertyTypeFlags.List;
+                        }
+                        
                         if (JsonOptions.HasFlag(JsonForClauseOptions.Path) || JsonOptions.HasFlag(JsonForClauseOptions.Auto))
                         {
                             flags |= MappedModelPropertyTypeFlags.NestedJson;
@@ -267,10 +268,26 @@ class Scope
                         else
                         {
                             flags |= MappedModelPropertyTypeFlags.Json;
-                        }   
+                        }
+                        
+                        AddPropertyWithModel(SqlDbTypeExt.CsIdentifier, true, column.ColumnOutputName, subModel, flags);
                     }
-                    
-                    AddPropertyWithModel(SqlDbTypeExt.CsIdentifier, true, column.ColumnOutputName, subModel, flags);
+                    else
+                    {
+                        MappedModelProperty? firstProp = subModel.Properties.FirstOrDefault();
+
+                        if (firstProp is not null)
+                        {
+                            firstProp.Name = column.ColumnOutputName ?? firstProp.Name;
+
+                            if (!firstProp.Flags.HasFlag(MappedModelPropertyTypeFlags.LiteralValue))
+                            {
+                                firstProp.Nullable = true;
+                            }
+                            
+                            AddPropertyRaw(firstProp);
+                        }
+                    }
                 }
             }
             else if (column.OutputType is SelectColumnTypes.TableColumn)
@@ -304,15 +321,15 @@ class Scope
             }
             else if (column.OutputType is SelectColumnTypes.Integer)
             {
-                AddProperty(SqlDbTypeExt.Int, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.None);
+                AddProperty(SqlDbTypeExt.Int, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.LiteralValue);
             }
             else if (column.OutputType is SelectColumnTypes.String)
             {
-                AddProperty(SqlDbTypeExt.NVarChar, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.None);
+                AddProperty(SqlDbTypeExt.NVarChar, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.LiteralValue);
             }
             else if (column.OutputType is SelectColumnTypes.Bool)
             {
-                AddProperty(SqlDbTypeExt.Bit, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.None);
+                AddProperty(SqlDbTypeExt.Bit, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.LiteralValue);
             }
             else if (column.OutputType is SelectColumnTypes.Number)
             {
@@ -353,15 +370,16 @@ class Scope
 }
 
 [Flags]
-enum MappedModelPropertyTypeFlags
+internal enum MappedModelPropertyTypeFlags
 {
     None = 1 << 0,
     List = 1 << 1,
     Json = 1 << 2,
-    NestedJson = 1 << 3
+    NestedJson = 1 << 3,
+    LiteralValue = 1 << 4
 }
 
-class MappedModelProperty
+internal class MappedModelProperty
 {
     public SqlDbTypeExt Type { get; set; }
     public bool Nullable { get; set; }

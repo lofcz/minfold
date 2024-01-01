@@ -1,0 +1,10 @@
+select *
+from (
+	select 1 as i1, 'test' as s1, (
+		select *
+		from (
+			select a
+			from foo
+		) iq2
+	) as fooA
+) iq1
