@@ -1,5 +1,44 @@
 namespace Minfold;
 
+public static class SqlDbTypeExtHelpers
+{
+    /// <summary>
+    /// From highest to lowest
+    /// </summary>
+    public static Dictionary<SqlDbTypeExt, int> SqlDbTypeExtPrecedence = new Dictionary<SqlDbTypeExt, int>()
+    {
+        {SqlDbTypeExt.Udt, 28},
+        {SqlDbTypeExt.Xml, 27},
+        {SqlDbTypeExt.DateTimeOffset, 26},
+        {SqlDbTypeExt.DateTime2, 25},
+        {SqlDbTypeExt.DateTime, 24},
+        {SqlDbTypeExt.SmallDateTime, 23},
+        {SqlDbTypeExt.Date, 22},
+        {SqlDbTypeExt.Time, 21},
+        {SqlDbTypeExt.Float, 20},
+        {SqlDbTypeExt.Real, 19},
+        {SqlDbTypeExt.Decimal, 18},
+        {SqlDbTypeExt.Money, 17},
+        {SqlDbTypeExt.SmallMoney, 16},
+        {SqlDbTypeExt.BigInt, 15},
+        {SqlDbTypeExt.Int, 14},
+        {SqlDbTypeExt.SmallInt, 13},
+        {SqlDbTypeExt.TinyInt, 12},
+        {SqlDbTypeExt.Bit, 11},
+        {SqlDbTypeExt.NText, 10},
+        {SqlDbTypeExt.Text, 9},
+        {SqlDbTypeExt.Image, 8},
+        {SqlDbTypeExt.Timestamp, 7},
+        {SqlDbTypeExt.UniqueIdentifier, 6},
+        {SqlDbTypeExt.NVarChar, 5},
+        {SqlDbTypeExt.NChar, 4},
+        {SqlDbTypeExt.VarChar, 3},
+        {SqlDbTypeExt.Char, 2},
+        {SqlDbTypeExt.VarBinary, 1},
+        { SqlDbTypeExt.Binary, 0 }
+    };   
+}
+
 public enum SqlDbTypeExt
 {
     /// <summary>

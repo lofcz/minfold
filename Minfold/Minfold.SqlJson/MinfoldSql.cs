@@ -110,6 +110,7 @@ class SelectColumn
     public SqlDbTypeExt? LiteralType { get; set; }
     public SqlDbTypeExt? OutputLiteralType => TransformedLiteralType ?? LiteralType;
     public List<SelectColumn>? OneOfColumns { get; set; }
+    public bool Nullable { get; set; }
     
     public SelectColumn(SelectColumnTypes type, string? alias, string? columnName, string? columnSource, TSqlFragment fragment, Scope scope)
     {
@@ -439,7 +440,7 @@ class Scope
                 }
                 case SelectColumnTypes.LiteralValue:
                 {
-                    AddProperty(column, column.OutputLiteralType ?? SqlDbTypeExt.Unknown, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.LiteralValue, null);
+                    AddProperty(column, column.OutputLiteralType ?? SqlDbTypeExt.Unknown, column.Nullable, column.ColumnOutputName, MappedModelPropertyTypeFlags.LiteralValue, null);
                     break;
                 }
                 case SelectColumnTypes.StarDelayed:
@@ -504,7 +505,8 @@ internal enum MappedModelPropertyTypeFlags
     List = 1 << 1,
     Json = 1 << 2,
     NestedJson = 1 << 3,
-    LiteralValue = 1 << 4
+    LiteralValue = 1 << 4,
+    BinaryExpr = 1 << 5
 }
 
 internal class MappedModelProperty
@@ -987,6 +989,31 @@ class MyVisitor : TSqlFragmentVisitor
                     }
                     
                     return null;
+                }
+                case BinaryExpression binExpr:
+                {
+                    SelectColumn? lhs = SolveSelectCol(binExpr.FirstExpression);
+                    SelectColumn? rhs = SolveSelectCol(binExpr.SecondExpression);
+
+                    if (lhs?.Type is SelectColumnTypes.LiteralValue && rhs?.Type is SelectColumnTypes.LiteralValue && lhs.LiteralType is not null && rhs.LiteralType is not null)
+                    {
+                        int lhsP = lhs.LiteralType.Value.ImplicitConversionPriority();
+                        int rhsP = rhs.LiteralType.Value.ImplicitConversionPriority();
+
+                        return new SelectColumn(SelectColumnTypes.LiteralValue, alias, null, null, null, binExpr)
+                        {
+                            LiteralType = lhsP > rhsP ? lhs.LiteralType.Value : rhs.LiteralType.Value,
+                            Nullable = lhs.LiteralType is SqlDbTypeExt.Null || rhs.LiteralType is SqlDbTypeExt.Null
+                        };
+                    }
+                    
+                    int z = 0;
+                    
+                    return null;
+                }
+                case ParenthesisExpression parentExpr:
+                {
+                    return SolveSelectCol(parentExpr.Expression);
                 }
                 default:
                     return null;

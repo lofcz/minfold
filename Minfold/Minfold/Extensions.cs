@@ -120,6 +120,10 @@ public static class Extensions
         };
     }
 
+    public static int ImplicitConversionPriority(this SqlDbTypeExt type)
+    {
+        return SqlDbTypeExtHelpers.SqlDbTypeExtPrecedence.GetValueOrDefault(type, 0);
+    }
     
     public static string? FirstCharToLower(this string? str)
     {
