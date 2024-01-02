@@ -101,6 +101,13 @@ public class MinfoldTests
 
         string? genCode = Normalize(result.GeneratedCode);
         expected = Normalize(output) ?? string.Empty;
+
+        if (string.IsNullOrWhiteSpace(expected))
+        {
+            Assert.Warn("Test expected result is empty - generated suggested result");
+            await File.WriteAllTextAsync(outputPath, genCode);
+            return;
+        }
         
         if (!string.Equals(expected, genCode))
         {

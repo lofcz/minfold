@@ -1,0 +1,5 @@
+select case
+	when 1 = 1 then 1
+	when 2 = 1 then 2
+	when 3 = 1 then 3
+	else null end as caseCol1

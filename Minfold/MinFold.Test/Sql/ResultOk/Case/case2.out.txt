@@ -1,0 +1,4 @@
+public class Model0
+{
+    public int CaseCol1 { get; set; }
+}
