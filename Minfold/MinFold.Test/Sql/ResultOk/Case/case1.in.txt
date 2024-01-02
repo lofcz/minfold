@@ -1,0 +1,7 @@
+select case
+	when 0 = 1 then (
+		select *
+		from Bar
+		for json path
+	)
+	else null end as caseCol

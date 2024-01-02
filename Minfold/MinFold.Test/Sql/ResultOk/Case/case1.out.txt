@@ -1,0 +1,13 @@
+public class Model0
+{
+    public Json<List<Model1>?>? CaseCol { get; set; }
+}
+
+[SqlJson]
+public class Model1
+{
+    public int? A { get; set; }
+    public double? B { get; set; }
+    public bool? C { get; set; }
+    public DateTime? D { get; set; }
+}

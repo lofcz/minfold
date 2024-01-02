@@ -95,7 +95,7 @@ public class MinfoldTests
                 string? readableErrors = result.MappingAmbiguities?.DumpConcat(ErrorDumpModes.HumanReadable);
             }
             
-            Assert.That(expected, Is.EqualTo(errors));
+            Assert.That(errors, Is.EqualTo(expected));
             return;
         }
 
@@ -107,6 +107,6 @@ public class MinfoldTests
             // breakpoint placeholder
         }
         
-        Assert.That(expected, Is.EqualTo(genCode));
+        Assert.That(genCode, Is.EqualTo(expected));
     }
 }

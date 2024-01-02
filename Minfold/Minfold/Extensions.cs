@@ -88,13 +88,14 @@ public static class Extensions
         { SqlDbTypeExt.DateTimeOffset, "DateTimeOffset" },
         { SqlDbTypeExt.NVarChar, "string" },
         { SqlDbTypeExt.SmallDateTime, "DateTime" },
-        { SqlDbTypeExt.Xml, "string" }
+        { SqlDbTypeExt.Xml, "string" },
+        { SqlDbTypeExt.Unknown, "object" }
     };
     
     public static TypeSyntax ToTypeSyntax(this SqlDbTypeExt type, bool nullable)
     {
         char? n = nullable ? '?' : null;
-        return SqlTypes.TryGetValue(type, out string? strType) ? $"{strType}{n}".ToTypeSyntax() : "string".ToTypeSyntax();
+        return SqlTypes.TryGetValue(type, out string? strType) ? $"{strType}{n}".ToTypeSyntax() : "object".ToTypeSyntax();
     }
     
     public static SqlDbTypeExt ToSqlType(this string type)

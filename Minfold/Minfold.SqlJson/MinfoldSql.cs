@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -103,7 +104,12 @@ class SelectColumn
     public string? ColumnName { get; set; }
     public string? ColumnSource { get; set; }
     public Scope? Scope { get; set; }
-    public TSqlFragment? Fragment { get; set; }
+    public TSqlFragment Fragment { get; set; }
+    public string? Value { get; set; }
+    public SqlDbTypeExt? TransformedLiteralType { get; set; }
+    public SqlDbTypeExt? LiteralType { get; set; }
+    public SqlDbTypeExt? OutputLiteralType => TransformedLiteralType ?? LiteralType;
+    public List<SelectColumn>? OneOfColumns { get; set; }
     
     public SelectColumn(SelectColumnTypes type, string? alias, string? columnName, string? columnSource, TSqlFragment fragment, Scope scope)
     {
@@ -115,19 +121,30 @@ class SelectColumn
         Scope = scope;
     }
     
-    public SelectColumn(SelectColumnTypes type, string? alias, string? columnName, string? columnSource)
+    public SelectColumn(SelectColumnTypes type, string? alias, string? columnName, string? columnSource, string? value, TSqlFragment fragment)
     {
         Type = type;
         Alias = alias;
         ColumnName = columnName;
         ColumnSource = columnSource;
+        Value = value;
+        Fragment = fragment;
     }
 
-    public SelectColumn(Scope scope, string? alias)
+    public SelectColumn(SelectColumnTypes type, Scope scope, string? alias, TSqlFragment fragment)
     {
-        Type = SelectColumnTypes.Query;
+        Type = type;
         Scope = scope;
         Alias = alias;
+        Fragment = fragment;
+    }
+    
+    public SelectColumn(SelectColumnTypes type, string? alias, TSqlFragment fragment, List<SelectColumn> oneOfColumns)
+    {
+        Type = type;
+        Alias = alias;
+        Fragment = fragment;
+        OneOfColumns = oneOfColumns;
     }
 }
 
@@ -135,30 +152,71 @@ public enum SelectColumnTypes
 {
     Unknown,
     TableColumn,
-    Integer,
-    Number,
-    String,
+    LiteralValue,
     Query,
-    Bool,
-    StarDelayed
+    StarDelayed,
+    OneOf
 }
 
 public static class Extensions
 {
-    public static SelectColumnTypes ToCsType(this SqlDataTypeReference dataType)
+    public static SqlDbTypeExt ToCsType(this Literal literal)
     {
-        return dataType.SqlDataTypeOption.ToCsType();
+        return literal switch
+        {
+            BinaryLiteral binaryLiteral => SqlDbTypeExt.Binary,
+            DefaultLiteral defaultLiteral => SqlDbTypeExt.Null,
+            IdentifierLiteral identifierLiteral => SqlDbTypeExt.CsIdentifier,
+            IntegerLiteral integerLiteral => SqlDbTypeExt.Int,
+            MaxLiteral maxLiteral => SqlDbTypeExt.Max,
+            MoneyLiteral moneyLiteral => SqlDbTypeExt.Money,
+            NullLiteral nullLiteral => SqlDbTypeExt.Null,
+            NumericLiteral numericLiteral => SqlDbTypeExt.Real,
+            OdbcLiteral odbcLiteral => SqlDbTypeExt.Unknown,
+            RealLiteral realLiteral => SqlDbTypeExt.Real,
+            StringLiteral => SqlDbTypeExt.NVarChar,
+            _ => SqlDbTypeExt.Unknown
+        };
     }
-
-    public static SelectColumnTypes ToCsType(this SqlDataTypeOption type)
+    
+    public static SqlDbTypeExt ToCsType(this SqlDataTypeOption type)
     {
         return type switch
         {
-            SqlDataTypeOption.Bit => SelectColumnTypes.Bool,
-            SqlDataTypeOption.NVarChar or SqlDataTypeOption.VarChar => SelectColumnTypes.String,
-            SqlDataTypeOption.Float => SelectColumnTypes.Number,
-            SqlDataTypeOption.Int => SelectColumnTypes.Integer,
-            _ => SelectColumnTypes.Unknown
+            SqlDataTypeOption.None => SqlDbTypeExt.Unknown,
+            SqlDataTypeOption.BigInt => SqlDbTypeExt.BigInt,
+            SqlDataTypeOption.Int => SqlDbTypeExt.Int,
+            SqlDataTypeOption.SmallInt => SqlDbTypeExt.SmallInt,
+            SqlDataTypeOption.TinyInt => SqlDbTypeExt.TinyInt,
+            SqlDataTypeOption.Bit => SqlDbTypeExt.Bit,
+            SqlDataTypeOption.Decimal => SqlDbTypeExt.Decimal,
+            SqlDataTypeOption.Numeric => SqlDbTypeExt.Decimal,
+            SqlDataTypeOption.Money => SqlDbTypeExt.Money,
+            SqlDataTypeOption.SmallMoney => SqlDbTypeExt.SmallMoney,
+            SqlDataTypeOption.Float => SqlDbTypeExt.Float,
+            SqlDataTypeOption.Real => SqlDbTypeExt.Real,
+            SqlDataTypeOption.DateTime => SqlDbTypeExt.DateTime,
+            SqlDataTypeOption.SmallDateTime => SqlDbTypeExt.SmallDateTime,
+            SqlDataTypeOption.Char => SqlDbTypeExt.Char,
+            SqlDataTypeOption.VarChar => SqlDbTypeExt.VarChar,
+            SqlDataTypeOption.Text => SqlDbTypeExt.Text,
+            SqlDataTypeOption.NChar => SqlDbTypeExt.NChar,
+            SqlDataTypeOption.NVarChar => SqlDbTypeExt.NVarChar,
+            SqlDataTypeOption.NText => SqlDbTypeExt.NText,
+            SqlDataTypeOption.Binary => SqlDbTypeExt.Binary,
+            SqlDataTypeOption.VarBinary => SqlDbTypeExt.VarBinary,
+            SqlDataTypeOption.Image => SqlDbTypeExt.Image,
+            SqlDataTypeOption.Cursor => SqlDbTypeExt.Unknown,
+            SqlDataTypeOption.Sql_Variant => SqlDbTypeExt.Variant,
+            SqlDataTypeOption.Table => SqlDbTypeExt.Unknown,
+            SqlDataTypeOption.Timestamp => SqlDbTypeExt.Timestamp,
+            SqlDataTypeOption.UniqueIdentifier => SqlDbTypeExt.UniqueIdentifier,
+            SqlDataTypeOption.Date => SqlDbTypeExt.Date,
+            SqlDataTypeOption.Time => SqlDbTypeExt.Time,
+            SqlDataTypeOption.DateTime2 => SqlDbTypeExt.DateTime2,
+            SqlDataTypeOption.DateTimeOffset => SqlDbTypeExt.DateTimeOffset,
+            SqlDataTypeOption.Rowversion => SqlDbTypeExt.Unknown,
+            _ => SqlDbTypeExt.Unknown
         };
     }
 }
@@ -212,7 +270,7 @@ class Scope
             }
         }
 
-        foreach (SelectColumn column in SelectColumns)
+        void GatherColDeps(SelectColumn column)
         {
             if (!column.Scope?.DependenciesGathered ?? false)
             {
@@ -223,6 +281,19 @@ class Scope
                     deps.Add(dep);
                 }
             }
+            
+            if (column.OneOfColumns is not null)
+            {
+                foreach (SelectColumn oneOfCol in column.OneOfColumns)
+                {
+                    GatherColDeps(oneOfCol);
+                }   
+            }
+        }
+
+        foreach (SelectColumn column in SelectColumns)
+        {
+            GatherColDeps(column);
         }
 
         return deps;
@@ -233,7 +304,7 @@ class Scope
         return Identifiers.FirstOrDefault(x => string.Equals(x.Ident, ident, StringComparison.InvariantCultureIgnoreCase)) ?? Parent?.GetSource(ident);
     }
 
-    public MappedModel Compile(Dictionary<string, SqlTable> schema, int modelIndex)
+    public MappedModel Compile(Dictionary<string, SqlTable> schema, int modelIndex, List<SelectColumn>? columns = null)
     {
         int unkIndex = 0;
         MappedModel model = new MappedModel($"Model{modelIndex}", JsonOptions);
@@ -283,125 +354,141 @@ class Scope
             return modelIndex;
         }
 
-        foreach (SelectColumn column in SelectColumns)
+        foreach (SelectColumn column in columns ?? SelectColumns)
         {
-            if (column.OutputType is SelectColumnTypes.Query)
+            switch (column.OutputType)
             {
-                if (column.Scope is not null)
+                case SelectColumnTypes.Query:
                 {
-                    MappedModel subModel = column.Scope.Compile(schema, GetModelIndex());
-                    bool mapAsJson = subModel.JsonOptions.HasFlag(JsonForClauseOptions.Path) || subModel.JsonOptions.HasFlag(JsonForClauseOptions.Auto);
-                    bool mapAsList = !subModel.JsonOptions.HasFlag(JsonForClauseOptions.WithoutArrayWrapper);
-
-                    MappedModelPropertyTypeFlags flags = MappedModelPropertyTypeFlags.None;
-
-                    if (mapAsJson)
+                    if (column.Scope is not null)
                     {
-                        if (mapAsList)
+                        MappedModel subModel = column.Scope.Compile(schema, GetModelIndex());
+                        bool mapAsJson = subModel.JsonOptions.HasFlag(JsonForClauseOptions.Path) || subModel.JsonOptions.HasFlag(JsonForClauseOptions.Auto);
+                        bool mapAsList = !subModel.JsonOptions.HasFlag(JsonForClauseOptions.WithoutArrayWrapper);
+
+                        MappedModelPropertyTypeFlags flags = MappedModelPropertyTypeFlags.None;
+
+                        if (mapAsJson)
                         {
-                            flags |= MappedModelPropertyTypeFlags.List;
-                        }
+                            if (mapAsList)
+                            {
+                                flags |= MappedModelPropertyTypeFlags.List;
+                            }
                         
-                        if (JsonOptions.HasFlag(JsonForClauseOptions.Path) || JsonOptions.HasFlag(JsonForClauseOptions.Auto))
-                        {
-                            flags |= MappedModelPropertyTypeFlags.NestedJson;
+                            if (JsonOptions.HasFlag(JsonForClauseOptions.Path) || JsonOptions.HasFlag(JsonForClauseOptions.Auto))
+                            {
+                                flags |= MappedModelPropertyTypeFlags.NestedJson;
+                            }
+                            else
+                            {
+                                flags |= MappedModelPropertyTypeFlags.Json;
+                            }
+                        
+                            AddPropertyWithModel(column, SqlDbTypeExt.CsIdentifier, true, column.ColumnOutputName, subModel, flags);
                         }
                         else
                         {
-                            flags |= MappedModelPropertyTypeFlags.Json;
-                        }
-                        
-                        AddPropertyWithModel(column, SqlDbTypeExt.CsIdentifier, true, column.ColumnOutputName, subModel, flags);
-                    }
-                    else
-                    {
-                        MappedModelProperty? firstProp = subModel.Properties.FirstOrDefault();
+                            MappedModelProperty? firstProp = subModel.Properties.FirstOrDefault();
 
-                        if (firstProp is not null)
-                        {
-                            firstProp.Name = column.ColumnOutputName ?? firstProp.Name;
-
-                            if (!firstProp.Flags.HasFlag(MappedModelPropertyTypeFlags.LiteralValue))
+                            if (firstProp is not null)
                             {
-                                firstProp.Nullable = true;
-                            }
-                            
-                            AddPropertyRaw(column, firstProp);
-                        }
-                    }
-                }
-            }
-            else if (column.OutputType is SelectColumnTypes.TableColumn)
-            {
-                ScopeIdentifier? identifier = Identifiers.Count > 0 ? Identifiers[0] : null;
+                                firstProp.Name = column.ColumnOutputName ?? firstProp.Name;
 
-                if (column.ColumnSource is not null)
-                {
-                    identifier = identifier?.Ident is not null ? GetSource(identifier.Ident) : null;
-                }
-                
-                if (identifier?.Table is not null && schema.TryGetValue(identifier.Table, out SqlTable? sqlTable))
-                {
-                    if (column.ColumnName is not null && sqlTable.Columns.TryGetValue(column.ColumnName, out SqlTableColumn? colDef))
-                    {
-                        AddProperty(column, colDef.SqlType, colDef.IsNullable || identifier.Nullable, column.ColumnOutputName, MappedModelPropertyTypeFlags.None, sqlTable);
-                    }
-                }
-                else if (identifier?.Scope is not null)
-                {
-                    MappedModel fromModel = identifier.Scope.Compile(schema, modelIndex);
-                    MappedModelProperty? fromProp = fromModel.Properties.FirstOrDefault(x => string.Equals(x.Name, column.ColumnName, StringComparison.InvariantCultureIgnoreCase));
-
-                    if (fromProp is not null)
-                    {
-                        AddProperty(column, fromProp.Type, fromProp.Nullable, column.ColumnOutputName, fromProp.Flags, fromProp.SourceTable);
-                    }
-                    
-                    int z = 0;
-                }
-            }
-            else if (column.OutputType is SelectColumnTypes.Integer)
-            {
-                AddProperty(column, SqlDbTypeExt.Int, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.LiteralValue, null);
-            }
-            else if (column.OutputType is SelectColumnTypes.String)
-            {
-                AddProperty(column, SqlDbTypeExt.NVarChar, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.LiteralValue, null);
-            }
-            else if (column.OutputType is SelectColumnTypes.Bool)
-            {
-                AddProperty(column, SqlDbTypeExt.Bit, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.LiteralValue, null);
-            }
-            else if (column.OutputType is SelectColumnTypes.Number)
-            {
-                AddProperty(column, SqlDbTypeExt.Float, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.None, null);
-            }
-            else if (column.OutputType is SelectColumnTypes.StarDelayed)
-            {
-                if (column.Scope is not null)
-                {
-                    foreach (ScopeIdentifier ident in column.Scope.Identifiers)
-                    {
-                        if (ident.Scope is not null)
-                        {
-                            MappedModel fromModel = ident.Scope.Compile(schema, modelIndex);
-
-                            foreach (MappedModelProperty prop in fromModel.Properties)
-                            {
-                                AddPropertyRaw(column, prop);
-                            }
-                        }
-                        else if (ident.Table is not null)
-                        {
-                            if (schema.TryGetValue(ident.Table.ToLowerInvariant(), out SqlTable? sqlTable))
-                            {
-                                foreach (KeyValuePair<string, SqlTableColumn> col in sqlTable.Columns.OrderBy(x => x.Value.OrdinalPosition))
+                                if (!firstProp.Flags.HasFlag(MappedModelPropertyTypeFlags.LiteralValue))
                                 {
-                                    AddProperty(column, col.Value.SqlType, col.Value.IsNullable, col.Value.Name, MappedModelPropertyTypeFlags.None, sqlTable);
+                                    firstProp.Nullable = true;
+                                }
+                            
+                                AddPropertyRaw(column, firstProp);
+                            }
+                        }
+                    }
+
+                    break;
+                }
+                case SelectColumnTypes.TableColumn:
+                {
+                    ScopeIdentifier? identifier = Identifiers.Count > 0 ? Identifiers[0] : null;
+
+                    if (column.ColumnSource is not null)
+                    {
+                        identifier = identifier?.Ident is not null ? GetSource(identifier.Ident) : null;
+                    }
+                
+                    if (identifier?.Table is not null && schema.TryGetValue(identifier.Table, out SqlTable? sqlTable))
+                    {
+                        if (column.ColumnName is not null && sqlTable.Columns.TryGetValue(column.ColumnName, out SqlTableColumn? colDef))
+                        {
+                            AddProperty(column, colDef.SqlType, colDef.IsNullable || identifier.Nullable, column.ColumnOutputName, MappedModelPropertyTypeFlags.None, sqlTable);
+                        }
+                    }
+                    else if (identifier?.Scope is not null)
+                    {
+                        MappedModel fromModel = identifier.Scope.Compile(schema, modelIndex);
+                        MappedModelProperty? fromProp = fromModel.Properties.FirstOrDefault(x => string.Equals(x.Name, column.ColumnName, StringComparison.InvariantCultureIgnoreCase));
+
+                        if (fromProp is not null)
+                        {
+                            AddProperty(column, fromProp.Type, fromProp.Nullable, column.ColumnOutputName, fromProp.Flags, fromProp.SourceTable);
+                        }
+                    
+                        int z = 0;
+                    }
+
+                    break;
+                }
+                case SelectColumnTypes.LiteralValue:
+                {
+                    AddProperty(column, column.OutputLiteralType ?? SqlDbTypeExt.Unknown, false, column.ColumnOutputName, MappedModelPropertyTypeFlags.LiteralValue, null);
+                    break;
+                }
+                case SelectColumnTypes.StarDelayed:
+                {
+                    if (column.Scope is not null)
+                    {
+                        foreach (ScopeIdentifier ident in column.Scope.Identifiers)
+                        {
+                            if (ident.Scope is not null)
+                            {
+                                MappedModel fromModel = ident.Scope.Compile(schema, modelIndex);
+
+                                foreach (MappedModelProperty prop in fromModel.Properties)
+                                {
+                                    AddPropertyRaw(column, prop);
+                                }
+                            }
+                            else if (ident.Table is not null)
+                            {
+                                if (schema.TryGetValue(ident.Table.ToLowerInvariant(), out SqlTable? sqlTable))
+                                {
+                                    foreach (KeyValuePair<string, SqlTableColumn> col in sqlTable.Columns.OrderBy(x => x.Value.OrdinalPosition))
+                                    {
+                                        AddProperty(column, col.Value.SqlType, col.Value.IsNullable, col.Value.Name, MappedModelPropertyTypeFlags.None, sqlTable);
+                                    }
                                 }
                             }
                         }
                     }
+
+                    break;
+                }
+                case SelectColumnTypes.OneOf:
+                {
+                    if (column.OneOfColumns is not null)
+                    {
+                        MappedModel oneOfModel = Compile(schema, modelIndex, column.OneOfColumns);
+                        ResultOrException<MappedModel> mergedModel = oneOfModel.Merge();
+
+                        if (mergedModel.Exception is null && mergedModel.Result?.Properties.Count is 1)
+                        {
+                            mergedModel.Result.Properties[0].Name = column.ColumnOutputName ?? mergedModel.Result.Properties[0].Name;
+                            AddPropertyRaw(column, mergedModel.Result.Properties[0]);
+                        }
+                        
+                        int z = 0;
+                    }
+                    
+                    break;
                 }
             }
         }
@@ -446,6 +533,46 @@ internal class MappedModelProperty
         Name = name;
         Flags = flags;
         SourceTable = sourceTable;
+    }
+
+    public ResultOrException<bool> Merge(MappedModelProperty prop)
+    {
+        bool TypesMatch(SqlDbTypeExt a, SqlDbTypeExt b)
+        {
+            return (prop.Type == a && Type == b) || (prop.Type == b && Type == a);
+        }
+
+        bool GetOne(SqlDbTypeExt type, [NotNullWhen(true)] out MappedModelProperty? p)
+        {
+            if (Type == type)
+            {
+                p = this;
+                return true;
+            }
+
+            if (prop.Type == type)
+            {
+                p = prop;
+                return true;
+            }
+
+            p = null;
+            return false;
+        }
+
+        if (TypesMatch(SqlDbTypeExt.CsIdentifier, SqlDbTypeExt.Null))
+        {
+            if (GetOne(SqlDbTypeExt.CsIdentifier, out MappedModelProperty? target))
+            {
+                target.Nullable = true;
+            }
+        }
+        else if (TypesMatch(SqlDbTypeExt.CsIdentifier, SqlDbTypeExt.CsIdentifier))
+        {
+            
+        }
+        
+        return new ResultOrException<bool>(true, null);
     }
 }
 
@@ -603,6 +730,32 @@ class MappedModel
         }
 
         return sb.ToString();
+    }
+
+    public ResultOrException<MappedModel> Merge()
+    {
+        MappedModel model = new MappedModel(Name, JsonOptions)
+        {
+            Ambiguities = [..Ambiguities]
+        };
+
+        foreach (MappedModelProperty property in Properties)
+        {
+            if (model.Properties.Count is 0)
+            {
+                model.Properties.Add(property);
+                continue;
+            }
+
+            ResultOrException<bool> propMergeResult = model.Properties[0].Merge(property);
+
+            if (propMergeResult.Exception is not null)
+            {
+                return new ResultOrException<MappedModel>(null, propMergeResult.Exception);
+            }
+        }
+        
+        return new ResultOrException<MappedModel>(model, null);
     }
 
     public List<MappedModelAmbiguities> GetMappingAmbiguities()
@@ -764,20 +917,29 @@ class MyVisitor : TSqlFragmentVisitor
         
         SelectColumn? SolveSelectScalarCol(ScalarExpression scalarExpression, SelectScalarExpression? selScalar)
         {
+            string? alias = selScalar?.ColumnName?.Value;
+            
             switch (scalarExpression)
             {
                 case ColumnReferenceExpression colRef when colRef.MultiPartIdentifier.Identifiers.Count is 1:
-                    return new SelectColumn(SelectColumnTypes.TableColumn, selScalar?.ColumnName?.Value, colRef.MultiPartIdentifier.Identifiers[0].Value, null);
+                {
+                    return new SelectColumn(SelectColumnTypes.TableColumn, alias, colRef.MultiPartIdentifier.Identifiers[0].Value, null, null, colRef);
+                }
                 case ColumnReferenceExpression colRef when colRef.MultiPartIdentifier.Identifiers.Count is 2:
-                    return new SelectColumn(SelectColumnTypes.TableColumn, selScalar?.ColumnName?.Value, colRef.MultiPartIdentifier.Identifiers[1].Value, colRef.MultiPartIdentifier.Identifiers[0].Value);
+                {
+                    return new SelectColumn(SelectColumnTypes.TableColumn, alias, colRef.MultiPartIdentifier.Identifiers[1].Value, colRef.MultiPartIdentifier.Identifiers[0].Value, null, colRef);
+                }
                 case ScalarSubquery { QueryExpression: QuerySpecification subquerySpec }:
-                    return new SelectColumn(SolveSelect(subquerySpec, localScope), selScalar?.ColumnName?.Value);
-                case IntegerLiteral integerLiteral:
-                    return new SelectColumn(SelectColumnTypes.Integer, selScalar?.ColumnName?.Value, null, null);
-                case StringLiteral stringLiteral:
-                    return new SelectColumn(SelectColumnTypes.String, selScalar?.ColumnName?.Value, null, null);
-                case NumericLiteral numericLiteral:
-                    return new SelectColumn(SelectColumnTypes.Number, selScalar?.ColumnName?.Value, null, null);
+                {
+                    return new SelectColumn(SelectColumnTypes.Query, SolveSelect(subquerySpec, localScope), alias, scalarExpression);
+                }
+                case Literal literal:
+                {
+                    return new SelectColumn(SelectColumnTypes.LiteralValue, alias, null, null, literal.Value, literal)
+                    {
+                        LiteralType = literal.ToCsType()
+                    };
+                }
                 case CastCall castCall:
                 {
                     SelectColumn? castQuery = SolveSelectCol(castCall.Parameter);
@@ -786,13 +948,45 @@ class MyVisitor : TSqlFragmentVisitor
                     {
                         if (castCall.DataType is SqlDataTypeReference dataTypeReference)
                         {
-                            castQuery.TransformedType = dataTypeReference.SqlDataTypeOption.ToCsType();
+                            castQuery.TransformedType = SelectColumnTypes.LiteralValue;
+                            castQuery.TransformedLiteralType = dataTypeReference.SqlDataTypeOption.ToCsType();
                         }
 
-                        castQuery.Alias = selScalar?.ColumnName?.Value;
+                        castQuery.Alias = alias;
                     }
                     
                     return castQuery;
+                }
+                case SearchedCaseExpression searchedCaseExpression:
+                {
+                    List<SelectColumn> accu = [];
+                    
+                    foreach (SearchedWhenClause whenClause in searchedCaseExpression.WhenClauses)
+                    {
+                        SelectColumn? branchSelect = SolveSelectScalarCol(whenClause.ThenExpression, null);
+
+                        if (branchSelect is not null)
+                        {
+                            accu.Add(branchSelect);
+                        }
+                    }
+
+                    SelectColumn? elseSelect = SolveSelectScalarCol(searchedCaseExpression.ElseExpression, null);
+                    
+                    if (elseSelect is not null)
+                    {
+                        accu.Add(elseSelect);
+                    }
+
+                    foreach (SelectColumn x in accu)
+                    {
+                        if (x.Type is not SelectColumnTypes.LiteralValue)
+                        {
+                            return new SelectColumn(SelectColumnTypes.OneOf, alias, searchedCaseExpression, accu);
+                        }
+                    }
+                    
+                    return null;
                 }
                 default:
                     return null;
