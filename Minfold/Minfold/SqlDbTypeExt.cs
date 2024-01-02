@@ -131,5 +131,9 @@ public enum SqlDbTypeExt
     Unknown,
     Null,
     Max,
-    ArgMixed
+    ArgMixed,
+    HierarchyId,
+    Geometry,
+    Geography,
+    Sysname
 }

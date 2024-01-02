@@ -1,5 +1,6 @@
 
 using System.Data;
+using System.Diagnostics.CodeAnalysis;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -59,6 +60,59 @@ public static class Extensions
 
         return false;
     }
+
+    public static SqlDbTypeExt ToSqlDbType(this string str)
+    {
+        int index = str.IndexOf('(');
+
+        if (index is -1)
+        {
+            if (SqlSysTypes.TryGetValue(str.ToLowerInvariant(), out SqlDbTypeExt val))
+            {
+                return val;
+            }
+        }
+        
+        return SqlSysTypes.GetValueOrDefault(str.ToLowerInvariant()[..index], SqlDbTypeExt.Unknown);
+    }
+    
+    private static Dictionary<string, SqlDbTypeExt> SqlSysTypes = new Dictionary<string, SqlDbTypeExt>
+    {
+        { "image", SqlDbTypeExt.Image },
+        { "text", SqlDbTypeExt.Text },
+        { "uniqueidentifier", SqlDbTypeExt.UniqueIdentifier },
+        { "date", SqlDbTypeExt.Date },
+        { "time", SqlDbTypeExt.Time },
+        { "datetime2", SqlDbTypeExt.DateTime2 },
+        { "datetimeoffset", SqlDbTypeExt.DateTimeOffset },
+        { "tinyint", SqlDbTypeExt.TinyInt },
+        { "smallint", SqlDbTypeExt.SmallInt },
+        { "int", SqlDbTypeExt.Int },
+        { "smalldatetime", SqlDbTypeExt.SmallDateTime },
+        { "real", SqlDbTypeExt.Real },
+        { "money", SqlDbTypeExt.Money },
+        { "datetime", SqlDbTypeExt.DateTime },
+        { "float", SqlDbTypeExt.Float },
+        { "sql_variant", SqlDbTypeExt.Variant },
+        { "ntext", SqlDbTypeExt.NText },
+        { "bit", SqlDbTypeExt.Bit },
+        { "decimal", SqlDbTypeExt.Decimal },
+        { "numeric", SqlDbTypeExt.Real },
+        { "smallmoney", SqlDbTypeExt.SmallMoney },
+        { "bigint", SqlDbTypeExt.BigInt },
+        { "hierarchyid", SqlDbTypeExt.HierarchyId },
+        { "geometry", SqlDbTypeExt.Geometry },
+        { "geography", SqlDbTypeExt.Geography },
+        { "varbinary", SqlDbTypeExt.VarBinary },
+        { "varchar", SqlDbTypeExt.VarChar },
+        { "binary", SqlDbTypeExt.Binary },
+        { "char", SqlDbTypeExt.Char },
+        { "timestamp", SqlDbTypeExt.Timestamp },
+        { "nvarchar", SqlDbTypeExt.NVarChar },
+        { "nchar", SqlDbTypeExt.NChar },
+        { "xml", SqlDbTypeExt.Xml },
+        { "sysname", SqlDbTypeExt.Sysname }
+    };
 
     private static Dictionary<SqlDbTypeExt, string> SqlTypes = new Dictionary<SqlDbTypeExt, string>
     {
@@ -135,6 +189,7 @@ public static class Extensions
         return str;
     }
     
+    [return: NotNullIfNotNull(nameof(str))]
     public static string? FirstCharToUpper(this string? str)
     {
         if (!string.IsNullOrEmpty(str) && char.IsLower(str[0]))

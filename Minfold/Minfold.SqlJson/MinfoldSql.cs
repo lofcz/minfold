@@ -36,39 +36,77 @@ public static class MinfoldSql
         
         MyVisitor checker = new MyVisitor();
         tree.Accept(checker);
-
-        HashSet<string> deps = checker.Root.GatherDependencies();
-        SqlService service = new SqlService(connString);
         
-        ResultOrException<Dictionary<string, SqlTable>> test = deps.Count > 0 ? await service.GetSchema(database, deps.ToList()) : new ResultOrException<Dictionary<string, SqlTable>>(new Dictionary<string, SqlTable>(), null);
+        SqlService service = new SqlService(connString);
 
-        if (test.Exception is not null || test.Result is null)
+        async Task MapQuery(Query qry)
         {
-            return new MinfoldSqlResult { ResultType = MinfoldSqlResultTypes.DatabaseConnectionFailed, Exception = test.Exception };
-        }
+            ResultOrException<List<SqlResultSetColumn>> selectResult = await service.DescribeSelect(database, qry.TransformedSql ?? qry.RawSql);
 
-        MappedModel model = checker.Root.Compile(test.Result, 0);
-
-        if (!options.IgnoreAmbiguities)
-        {
-            List<MappedModelAmbiguities> ambiguities = model.GetMappingAmbiguities();
-       
-            if (ambiguities.Count > 0)
+            if (selectResult.Exception is null)
             {
-                MappedModelAmbiguitiesAccumulator accu = new MappedModelAmbiguitiesAccumulator
-                {
-                    Ambiguities = ambiguities,
-                    Input = sqlQuery
-                };
-                
-                return new MinfoldSqlResult { ResultType = MinfoldSqlResultTypes.MappingAmbiguities, MappingAmbiguities = accu };
+                qry.SelectColumns = selectResult.Result;
+            }
+
+            foreach (Query child in qry.Childs)
+            {
+                await MapQuery(child);
             }
         }
         
-        DumpedModel dump = model.Dump();
-        string genCode = dump.Flatten();
+        foreach (Query qry in checker.Query.Childs)
+        {
+            await MapQuery(qry);
+        }
+        
+        DumpedQuery dumpedQuery = checker.Query.Dump();
+        
+        if (!options.IgnoreAmbiguities)
+        {
+            List<string> ambiguities = dumpedQuery.FlattenAmbiguities();
+       
+            if (ambiguities.Count > 0)
+            {
+                return await RunStaticAnalysis();
+            }
+        }
+        
+        string describeCode = dumpedQuery.Flatten();
+        return new MinfoldSqlResult { ResultType = MinfoldSqlResultTypes.Ok, GeneratedCode = describeCode };
 
-        return new MinfoldSqlResult { ResultType = MinfoldSqlResultTypes.Ok, GeneratedCode = genCode };
+        async Task<MinfoldSqlResult> RunStaticAnalysis()
+        {
+            HashSet<string> deps = checker.Root.GatherDependencies();
+            ResultOrException<Dictionary<string, SqlTable>> test = deps.Count > 0 ? await service.GetSchema(database, deps.ToList()) : new ResultOrException<Dictionary<string, SqlTable>>(new Dictionary<string, SqlTable>(), null);
+
+            if (test.Exception is not null || test.Result is null)
+            {
+                return new MinfoldSqlResult { ResultType = MinfoldSqlResultTypes.DatabaseConnectionFailed, Exception = test.Exception };
+            }
+
+            MappedModel model = checker.Root.Compile(test.Result, 0);
+
+            if (!options.IgnoreAmbiguities)
+            {
+                List<MappedModelAmbiguities> ambiguities = model.GetMappingAmbiguities();
+       
+                if (ambiguities.Count > 0)
+                {
+                    MappedModelAmbiguitiesAccumulator accu = new MappedModelAmbiguitiesAccumulator
+                    {
+                        Ambiguities = ambiguities,
+                        Input = sqlQuery
+                    };
+                
+                    return new MinfoldSqlResult { ResultType = MinfoldSqlResultTypes.MappingAmbiguities, MappingAmbiguities = accu };
+                }
+            }
+        
+            DumpedModel dump = model.Dump();
+            string genCode = dump.Flatten();
+
+            return new MinfoldSqlResult { ResultType = MinfoldSqlResultTypes.Ok, GeneratedCode = genCode };   
+        }
     }
 }
 
@@ -219,6 +257,126 @@ public static class Extensions
             SqlDataTypeOption.Rowversion => SqlDbTypeExt.Unknown,
             _ => SqlDbTypeExt.Unknown
         };
+    }
+}
+
+class DumpedQuery
+{
+    public List<DumpedQuery> DumpedQueries { get; set; } = [];
+    public string? Model { get; set; }
+    public HashSet<string> PropertyNames { get; set; } = [];
+    public List<string> Ambiguities { get; set; } = [];
+
+    public string Flatten()
+    {
+        StringBuilder sb = new StringBuilder();
+
+        if (Model is not null)
+        {
+            sb.AppendLine(Model);   
+        }
+
+        foreach (DumpedQuery child in DumpedQueries)
+        {
+            sb.AppendLine(child.Flatten());   
+        }
+        
+        return sb.ToString().Trim();
+    }
+
+    public List<string> FlattenAmbiguities(List<string>? accu = null)
+    {
+        accu ??= [];
+        accu.AddRange(Ambiguities);
+
+        foreach (DumpedQuery child in DumpedQueries)
+        {
+            accu.AddRange(child.FlattenAmbiguities());
+        }
+
+        return accu;
+    }
+}
+
+class Query
+{
+    public List<Query> Childs { get; set; } = [];
+    public JsonForClauseOptions JsonOptions { get; set; }
+    public string RawSql { get; set; }
+    public string? TransformedSql { get; set; }
+    public QuerySpecification QuerySpecification { get; set; }
+    public int ColumnIndex { get; set; }
+    public List<SqlResultSetColumn>? SelectColumns { get; set; }
+
+    public DumpedQuery Dump(int modelIndex = 0, int jsonDepth = 0)
+    {
+        StringBuilder sb = new StringBuilder();
+
+        DumpedQuery dumpedQuery = new DumpedQuery();
+        
+        int unkIndex = 0;
+
+        string GetColName(SqlResultSetColumn col)
+        {
+            string res;
+            
+            if (col.Name is not null)
+            {
+                res = col.Name.FirstCharToUpper();
+            }
+            else
+            {
+                res = $"NoColumnName{unkIndex}";
+                unkIndex++;
+            }
+
+            if (!dumpedQuery.PropertyNames.Add(res))
+            {
+                dumpedQuery.Ambiguities.Add(res);
+            }
+            
+            return res;
+        } 
+
+        if (SelectColumns is not null)
+        {
+            if (jsonDepth is 1)
+            {
+                sb.AppendLine("[SqlJson]");
+            }
+            
+            sb.AppendLine($"public class Model{modelIndex}");
+            sb.AppendLine("{");
+            
+            foreach (SqlResultSetColumn col in SelectColumns)
+            {
+                Query? child = Childs.FirstOrDefault(x => x.ColumnIndex == col.Position);
+
+                if (child is not null)
+                {
+                    sb.AppendLine($"public {(jsonDepth is 0 ? "Json<" : "")}List<Model{modelIndex + 1}>?{(jsonDepth is 0 ? ">?" : "")} {GetColName(col)} {{ get; set; }}".Indent());
+
+                    DumpedQuery childQuery = child.Dump(modelIndex + 1, jsonDepth + 1);
+                    dumpedQuery.DumpedQueries.Add(childQuery);
+                }
+                else
+                {
+                    sb.AppendLine($"public {col.Type.ToTypeSyntax(col.Nullable).ToFullString()} {GetColName(col)} {{ get; set; }}".Indent());   
+                }
+            }
+            
+            sb.AppendLine("}");
+        }
+        else
+        {
+            foreach (Query child in Childs)
+            {
+                dumpedQuery.DumpedQueries.Add(child.Dump());
+            }
+        }
+
+        dumpedQuery.Model = sb.ToString();
+        return dumpedQuery;
     }
 }
 
@@ -857,7 +1015,92 @@ class MappedModel
 class MyVisitor : TSqlFragmentVisitor
 {
     public Scope Root { get; set; }
+    public Query Query { get; set; }
 
+    void SolveQuery(QuerySpecification qs, Query parent, int columnIndex)
+    {
+        Query query = new Query()
+        {
+            QuerySpecification = qs,
+            ColumnIndex = columnIndex
+        };
+
+        StringBuilder sb = new StringBuilder();
+        
+        if (qs.ForClause is JsonForClause jsonForClause)
+        {
+            int start = qs.ForClause.LastTokenIndex - qs.ForClause.FragmentLength;
+            int len = qs.ForClause.FragmentLength;
+
+            for (int i = qs.FirstTokenIndex; i < qs.LastTokenIndex; i++)
+            {
+                if (i >= start && i <= start + len)
+                {
+                    continue;
+                }
+
+                sb.Append(qs.ScriptTokenStream[i].Text);
+            }
+
+            query.TransformedSql = sb.ToString();
+            
+            foreach (JsonForClauseOption option in jsonForClause.Options)
+            {
+                query.JsonOptions |= option.OptionKind;
+            }
+        }
+
+        sb.Clear();
+        
+        for (int i = qs.FirstTokenIndex; i <= qs.LastTokenIndex; i++)
+        {
+            sb.Append(qs.ScriptTokenStream[i].Text);
+        }
+        
+        query.RawSql = sb.ToString();
+
+        void SolveSelectScalarCol(ScalarExpression scalarExpression, SelectScalarExpression? selScalar, int columnIndex)
+        {
+            switch (scalarExpression)
+            {
+                case ScalarSubquery { QueryExpression: QuerySpecification subquerySpec }:
+                {
+                    SolveQuery(subquerySpec, query, columnIndex);
+                    break;
+                }      
+                case ParenthesisExpression parentExpr:
+                {
+                    SolveSelectScalarCol(parentExpr.Expression, null, columnIndex);
+                    break;
+                }
+                case SearchedCaseExpression searchedCaseExpression:
+                {
+                    foreach (SearchedWhenClause whenBranch in searchedCaseExpression.WhenClauses)
+                    {
+                        SolveSelectScalarCol(whenBranch.ThenExpression, null, columnIndex);
+                    }
+
+                    SolveSelectScalarCol(searchedCaseExpression.ElseExpression, null, columnIndex);
+                    break;
+                }
+            }
+        }
+
+        for (int i = 0; i < qs.SelectElements.Count; i++)
+        {
+            switch (qs.SelectElements[i])
+            {
+                case SelectScalarExpression selScalar:
+                {
+                    SolveSelectScalarCol(selScalar.Expression, selScalar, i);
+                    break;
+                }
+            }
+        }
+
+        parent.Childs.Add(query);
+    }
+    
     Scope SolveSelect(QuerySpecification qs, Scope parent)
     {
         Scope localScope = new Scope(parent, qs);
@@ -952,6 +1195,7 @@ class MyVisitor : TSqlFragmentVisitor
                         {
                             castQuery.TransformedType = SelectColumnTypes.LiteralValue;
                             castQuery.TransformedLiteralType = dataTypeReference.SqlDataTypeOption.ToCsType();
+                            castQuery.Nullable = true;
                         }
 
                         castQuery.Alias = alias;
@@ -1075,13 +1319,16 @@ class MyVisitor : TSqlFragmentVisitor
         if (node is SelectStatement select)
         {
             Scope root = new Scope(null, null);
+            Query rootQuery = new Query();
             
             if (select.QueryExpression is QuerySpecification qs)
             {
+                SolveQuery(qs, rootQuery, 0);
                 root = SolveSelect(qs, root);
             }
             
             Root = root;
+            Query = rootQuery;
             
             int z = 0;
         }

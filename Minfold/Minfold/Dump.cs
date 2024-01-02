@@ -30,6 +30,7 @@ public record MinfoldCfg(bool UniformPk);
 public record ResultOrException<T>(T? Result, Exception? Exception);
 public record MinfoldError(MinfoldSteps Step, string Messsage, Exception Exception);
 public record MinfoldResult(MinfoldError? Error);
+public record SqlResultSetColumn(int Position, string? Name, bool Nullable, SqlDbTypeExt Type);
 
 public record SqlConnectionResult(SqlConnection? Connection, Exception? Exception) : IDisposable, IAsyncDisposable
 {

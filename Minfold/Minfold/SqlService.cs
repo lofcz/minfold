@@ -81,7 +81,41 @@ public class SqlService
         {
             return new ResultOrException<int>(0, e);
         }
-    } 
+    }
+
+    public async Task<ResultOrException<List<SqlResultSetColumn>>> DescribeSelect(string database, string selectQuery)
+    {
+        await using SqlConnectionResult conn = await Connect();
+
+        if (conn.Exception is not null)
+        {
+            return new ResultOrException<List<SqlResultSetColumn>>(null, conn.Exception);
+        }
+        
+        SqlCommand command = new("exec sp_describe_first_result_set @tsql = @sql", conn.Connection);
+        command.Parameters.AddWithValue("@sql", selectQuery);
+        
+        await using SqlDataReader reader = await command.ExecuteReaderAsync();
+        List<SqlResultSetColumn> cols = [];
+
+        int colPos = 0;
+        
+        while (reader.Read())
+        {
+            bool isHidden = reader.GetBoolean(0);
+            string? name = reader.GetValue(2) as string;
+            bool isNullable = reader.GetBoolean(3);
+            string typeName = reader.GetString(5);
+
+            if (!isHidden)
+            {
+                cols.Add(new SqlResultSetColumn(colPos, name, isNullable, typeName.ToSqlDbType()));
+                colPos++;
+            }
+        }
+
+        return new ResultOrException<List<SqlResultSetColumn>>(cols, null);
+    }
 
     public async Task<ResultOrException<Dictionary<string, SqlTable>>> GetSchema(string dbName, List<string>? selectTables = null)
     {

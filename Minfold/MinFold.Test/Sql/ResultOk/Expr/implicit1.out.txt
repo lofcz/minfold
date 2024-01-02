@@ -1,4 +1,4 @@
 public class Model0
 {
-    public int NoColumnName0 { get; set; }
+    public int? NoColumnName0 { get; set; }
 }

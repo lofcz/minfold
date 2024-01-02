@@ -1,5 +1,5 @@
 select case
-	when 0 = 1 then (
+	when 1 = 0 then (
 		select *
 		from Bar
 		for json path
