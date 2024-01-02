@@ -1,0 +1,4 @@
+public class Model0
+{
+    public DateTime NoColumnName0 { get; set; }
+}

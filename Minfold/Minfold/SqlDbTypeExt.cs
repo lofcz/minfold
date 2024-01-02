@@ -130,5 +130,6 @@ public enum SqlDbTypeExt
     CsIdentifier,
     Unknown,
     Null,
-    Max
+    Max,
+    ArgMixed
 }

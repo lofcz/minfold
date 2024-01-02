@@ -1003,7 +1003,7 @@ class MyVisitor : TSqlFragmentVisitor
                         return new SelectColumn(SelectColumnTypes.LiteralValue, alias, null, null, null, binExpr)
                         {
                             LiteralType = lhsP > rhsP ? lhs.LiteralType.Value : rhs.LiteralType.Value,
-                            Nullable = lhs.LiteralType is SqlDbTypeExt.Null || rhs.LiteralType is SqlDbTypeExt.Null
+                            Nullable = lhs.LiteralType is SqlDbTypeExt.Null || rhs.LiteralType is SqlDbTypeExt.Null || lhs.Nullable || rhs.Nullable
                         };
                     }
                     
@@ -1014,6 +1014,22 @@ class MyVisitor : TSqlFragmentVisitor
                 case ParenthesisExpression parentExpr:
                 {
                     return SolveSelectCol(parentExpr.Expression);
+                }
+                case FunctionCall functionCall:
+                {
+                    if (BuiltInFunctions.Common.TryGetValue(functionCall.FunctionName.Value, out Nullable<SqlDbTypeExt>? builtInType))
+                    {
+                        if (builtInType.Value is not (SqlDbTypeExt.ArgMixed or SqlDbTypeExt.Unknown or SqlDbTypeExt.CsIdentifier))
+                        {
+                            return new SelectColumn(SelectColumnTypes.LiteralValue, alias, null, null, null, functionCall)
+                            {
+                                LiteralType = builtInType.Value,
+                                Nullable = builtInType.CanBeNull
+                            };   
+                        }
+                    }
+                    
+                    return null;
                 }
                 default:
                     return null;
