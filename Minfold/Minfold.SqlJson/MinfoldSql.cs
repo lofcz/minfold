@@ -307,6 +307,7 @@ class Query
     public QuerySpecification QuerySpecification { get; set; }
     public int ColumnIndex { get; set; }
     public List<SqlResultSetColumn>? SelectColumns { get; set; }
+    public Dictionary<string, int> StarsOffset { get; set; } = [];
 
     public DumpedQuery Dump(int modelIndex = 0, int jsonDepth = 0)
     {
@@ -348,7 +349,7 @@ class Query
             sb.AppendLine($"public class Model{modelIndex}");
             sb.AppendLine("{");
             
-            foreach (SqlResultSetColumn col in SelectColumns)
+            foreach (SqlResultSetColumn col in SelectColumns.OrderBy(x => x.Position))
             {
                 Query? child = Childs.FirstOrDefault(x => x.ColumnIndex == col.Position);
 
@@ -1017,12 +1018,13 @@ class MyVisitor : TSqlFragmentVisitor
     public Scope Root { get; set; }
     public Query Query { get; set; }
 
-    void SolveQuery(QuerySpecification qs, Query parent, int columnIndex)
+    void SolveQuery(Scope scope, QuerySpecification qs, Query parent, int columnIndex, Dictionary<string, int> starsOffset)
     {
         Query query = new Query()
         {
             QuerySpecification = qs,
-            ColumnIndex = columnIndex
+            ColumnIndex = columnIndex,
+            StarsOffset = starsOffset
         };
 
         StringBuilder sb = new StringBuilder();
@@ -1059,40 +1061,104 @@ class MyVisitor : TSqlFragmentVisitor
         
         query.RawSql = sb.ToString();
 
-        void SolveSelectScalarCol(ScalarExpression scalarExpression, SelectScalarExpression? selScalar, int columnIndex)
+        void SolveSelectScalarCol(ScalarExpression scalarExpression, SelectScalarExpression? selScalar, int cIndex, Dictionary<string, int> starsOffset)
         {
             switch (scalarExpression)
             {
                 case ScalarSubquery { QueryExpression: QuerySpecification subquerySpec }:
                 {
-                    SolveQuery(subquerySpec, query, columnIndex);
+                    SolveQuery(subquerySpec, query, cIndex, starsOffset);
                     break;
                 }      
                 case ParenthesisExpression parentExpr:
                 {
-                    SolveSelectScalarCol(parentExpr.Expression, null, columnIndex);
+                    SolveSelectScalarCol(parentExpr.Expression, null, cIndex, starsOffset);
                     break;
                 }
                 case SearchedCaseExpression searchedCaseExpression:
                 {
                     foreach (SearchedWhenClause whenBranch in searchedCaseExpression.WhenClauses)
                     {
-                        SolveSelectScalarCol(whenBranch.ThenExpression, null, columnIndex);
+                        SolveSelectScalarCol(whenBranch.ThenExpression, null, cIndex, starsOffset);
                     }
 
-                    SolveSelectScalarCol(searchedCaseExpression.ElseExpression, null, columnIndex);
+                    SolveSelectScalarCol(searchedCaseExpression.ElseExpression, null, cIndex, starsOffset);
                     break;
                 }
             }
         }
 
+        Dictionary<string, int> so = [];
+        Scope localScope = new Scope(null, qs);
+
+        if (qs.FromClause?.TableReferences is not null)
+        {
+            foreach (TableReference source in qs.FromClause.TableReferences)
+            {
+                string? tbl, alias;
+
+                switch (source)
+                {
+                    case NamedTableReference namedFrom:
+                        tbl = namedFrom.SchemaObject.BaseIdentifier.Value;
+                        alias = namedFrom.Alias?.Value;
+
+                        localScope.Identifiers.Add(new ScopeIdentifier(alias ?? tbl, tbl, false));
+                        break;
+                    case QueryDerivedTable queryDerivedTable:
+                    {
+                        alias = queryDerivedTable.Alias?.Value;
+
+                        if (queryDerivedTable.QueryExpression is QuerySpecification fromQs)
+                        {
+                            localScope.Identifiers.Add(new ScopeIdentifier(alias, SolveSelect(fromQs, scope), false));
+                        }
+
+                        break;
+                    }
+                    case QualifiedJoin qualifiedJoin:
+                    {
+                        bool nullable = qualifiedJoin.QualifiedJoinType is QualifiedJoinType.LeftOuter or QualifiedJoinType.FullOuter;
+
+                        if (qualifiedJoin.FirstTableReference is NamedTableReference namedJoin1)
+                        {
+                            alias = namedJoin1.Alias?.Value;
+                            localScope.Identifiers.Add(new ScopeIdentifier(alias, namedJoin1.SchemaObject.BaseIdentifier.Value, nullable));
+                        }
+                        
+                        if (qualifiedJoin.SecondTableReference is NamedTableReference namedJoin2)
+                        {
+                            alias = namedJoin2.Alias?.Value;
+                            localScope.Identifiers.Add(new ScopeIdentifier(alias, namedJoin2.SchemaObject.BaseIdentifier.Value, nullable));
+                        }
+
+                        break;
+                    }
+                }
+            }   
+        }
+        
         for (int i = 0; i < qs.SelectElements.Count; i++)
         {
             switch (qs.SelectElements[i])
             {
+                case SelectStarExpression selStar:
+                {
+                    if (selStar.Qualifier is null || selStar.Qualifier.Identifiers.Count is 1 && selStar.Qualifier.Identifiers[0].Value is "*")
+                    {
+                        
+                    }
+                    else
+                    {
+                        
+                    }
+                    
+                    break;
+                }
                 case SelectScalarExpression selScalar:
                 {
-                    SolveSelectScalarCol(selScalar.Expression, selScalar, i);
+                    SolveSelectScalarCol(selScalar.Expression, selScalar, i, []);
+                    so.Clear();
                     break;
                 }
             }
@@ -1323,7 +1389,7 @@ class MyVisitor : TSqlFragmentVisitor
             
             if (select.QueryExpression is QuerySpecification qs)
             {
-                SolveQuery(qs, rootQuery, 0);
+                SolveQuery(qs, rootQuery, 0, []);
                 root = SolveSelect(qs, root);
             }
             

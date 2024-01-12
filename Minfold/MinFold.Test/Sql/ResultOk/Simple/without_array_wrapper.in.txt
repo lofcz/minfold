@@ -1,0 +1,6 @@
+select *, (
+	select *
+	from Foo
+	for json path, without_array_wrapper
+)
+from Bar

@@ -817,7 +817,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
         return node;
     }
 
-    private void ScanNamespace(ClassDeclarationSyntax node)
+    private void ScanNamespace(SyntaxNode node)
     {
         while (node.Parent is not null)
         {
@@ -828,6 +828,8 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
                 Namespace = namespaceDecl.Name.ToFullString();
                 break;
             }
+
+            node = node.Parent;
         }
     }
     

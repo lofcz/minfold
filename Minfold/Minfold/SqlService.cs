@@ -98,23 +98,27 @@ public class SqlService
         await using SqlDataReader reader = await command.ExecuteReaderAsync();
         List<SqlResultSetColumn> cols = [];
 
-        int colPos = 0;
+        int colPosShrink = 0;
         
         while (reader.Read())
         {
             bool isHidden = reader.GetBoolean(0);
+            int colPosition = reader.GetInt32(1) - 1;
             string? name = reader.GetValue(2) as string;
             bool isNullable = reader.GetBoolean(3);
             string typeName = reader.GetString(5);
 
             if (!isHidden)
             {
-                cols.Add(new SqlResultSetColumn(colPos, name, isNullable, typeName.ToSqlDbType()));
-                colPos++;
+                cols.Add(new SqlResultSetColumn(colPosition - colPosShrink, name, isNullable, typeName.ToSqlDbType()));
+            }
+            else
+            {
+                colPosShrink++;
             }
         }
 
-        return new ResultOrException<List<SqlResultSetColumn>>(cols, null);
+        return new ResultOrException<List<SqlResultSetColumn>>(cols.OrderBy(x => x.Position).ToList(), null);
     }
 
     public async Task<ResultOrException<Dictionary<string, SqlTable>>> GetSchema(string dbName, List<string>? selectTables = null)
