@@ -13,8 +13,8 @@
         <Description>Minfold a strongly opinionated EF Core scaffolder</Description>
         <Copyright>MIT</Copyright>
         <RepositoryUrl>https://github.com/lofcz/minfold</RepositoryUrl>
-        <Version>1.0.3</Version>
-        <PackageReleaseNotes>added --stdDecorate</PackageReleaseNotes>
+        <Version>1.0.4</Version>
+        <PackageReleaseNotes>fixed loop that could get stuck under cerain circumstances</PackageReleaseNotes>
     </PropertyGroup>
 
     <ItemGroup>
