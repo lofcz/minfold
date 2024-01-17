@@ -5,7 +5,7 @@ public static class SqlDbTypeExtHelpers
     /// <summary>
     /// From highest to lowest
     /// </summary>
-    public static Dictionary<SqlDbTypeExt, int> SqlDbTypeExtPrecedence = new Dictionary<SqlDbTypeExt, int>()
+    public static readonly Dictionary<SqlDbTypeExt, int> SqlDbTypeExtPrecedence = new Dictionary<SqlDbTypeExt, int>()
     {
         {SqlDbTypeExt.Udt, 28},
         {SqlDbTypeExt.Xml, 27},

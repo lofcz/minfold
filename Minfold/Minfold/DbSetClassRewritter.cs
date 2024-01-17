@@ -12,7 +12,7 @@ public class DbSetClassRewritter : CSharpSyntaxRewriter
     public string NewCode { get; set; }
     public bool ClassRewritten { get; set; }
     
-    private string expectedClassName;
+    private readonly string expectedClassName;
     private readonly List<CsDbSetDecl> sets;
     private readonly Dictionary<string, SqlTable> modelsToTablesMap;
     private readonly ConcurrentDictionary<string, CsPropertiesInfo> modelProperties;

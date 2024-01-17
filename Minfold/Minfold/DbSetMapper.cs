@@ -10,7 +10,7 @@ public class DbSetMapper : CSharpSyntaxRewriter
     public string NewCode { get; set; }
     public bool ClassRewritten { get; set; }
     
-    private string expectedClassName;
+    private readonly string expectedClassName;
     private readonly Dictionary<string, CsDbSetDecl> dbSetMap;
     
     /// <summary>

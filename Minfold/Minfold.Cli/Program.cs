@@ -11,7 +11,6 @@ using System.CommandLine;
 
 class Program
 {
-
     public static async Task<int> Main(string[] args)
     {
         string? database = null;

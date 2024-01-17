@@ -75,6 +75,11 @@ public static class Extensions
         
         return SqlSysTypes.GetValueOrDefault(str.ToLowerInvariant()[..index], SqlDbTypeExt.Unknown);
     }
+
+    public static string ToSqlDbType(this SqlDbTypeExt str)
+    {
+        return SqlSysTypesInversed.GetValueOrDefault(str, string.Empty);
+    }
     
     private static Dictionary<string, SqlDbTypeExt> SqlSysTypes = new Dictionary<string, SqlDbTypeExt>
     {
@@ -97,7 +102,6 @@ public static class Extensions
         { "ntext", SqlDbTypeExt.NText },
         { "bit", SqlDbTypeExt.Bit },
         { "decimal", SqlDbTypeExt.Decimal },
-        { "numeric", SqlDbTypeExt.Real },
         { "smallmoney", SqlDbTypeExt.SmallMoney },
         { "bigint", SqlDbTypeExt.BigInt },
         { "hierarchyid", SqlDbTypeExt.HierarchyId },
@@ -114,6 +118,16 @@ public static class Extensions
         { "sysname", SqlDbTypeExt.Sysname }
     };
 
+    private static Dictionary<SqlDbTypeExt, string> SqlSysTypesInversed = new Dictionary<SqlDbTypeExt, string>();
+
+    static Extensions()
+    {
+        foreach (KeyValuePair<string, SqlDbTypeExt> entry in SqlSysTypes)
+        {
+            SqlSysTypesInversed.Add(entry.Value, entry.Key);
+        }
+    }
+    
     private static Dictionary<SqlDbTypeExt, string> SqlTypes = new Dictionary<SqlDbTypeExt, string>
     {
         { SqlDbTypeExt.Binary, "byte[]" },

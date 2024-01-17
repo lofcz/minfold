@@ -10,14 +10,14 @@ public class DaoClassRewriter : CSharpSyntaxRewriter
     public string NewCode { get; set; }
     public bool ClassRewritten { get; set; }
  
-    private SqlTable table;
-    private string expectedClassName, modelName;
+    private readonly SqlTable table;
+    private readonly string expectedClassName, modelName;
     private readonly Dictionary<string, CsModelSource> tablesMap;
     private readonly CsModelSource modelSource;
-    private string dbSetMappedTableName;
-    private string? identityColumnId, identityColumnType;
-    private bool generateGetWhereId;
-    private Dictionary<string, string>? customUsings;
+    private readonly string dbSetMappedTableName;
+    private readonly string? identityColumnId, identityColumnType;
+    private readonly bool generateGetWhereId;
+    private readonly Dictionary<string, string>? customUsings;
     
     /// <summary>
     /// Updates a dao

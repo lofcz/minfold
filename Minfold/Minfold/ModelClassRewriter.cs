@@ -13,11 +13,11 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
     public string? Namespace { get; set; }
     public CsPropertiesInfo? PropertiesMap { get; set; }
  
-    private SqlTable table;
-    private string expectedClassName;
+    private readonly SqlTable table;
+    private readonly string expectedClassName;
     private readonly Dictionary<string, CsModelSource> tablesMap;
     private readonly CsModelSource modelSource;
-    private bool scanNamespace;
+    private readonly bool scanNamespace;
     private readonly CompilationUnitSyntax rootNode;
     
     /// <summary>

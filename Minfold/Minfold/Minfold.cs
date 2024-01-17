@@ -9,6 +9,7 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.MSBuild;
 using Microsoft.CodeAnalysis.Rename;
 using Microsoft.CodeAnalysis.Text;
+using Microsoft.SqlServer.TransactSql.ScriptDom;
 
 namespace Minfold;
 
@@ -767,11 +768,11 @@ public class Minfold
                 return;
             }
 
-            string className = source.Value.Name.FirstCharToUpper() ?? string.Empty;
+            string className = source.Value.Name.FirstCharToUpper();
             
             if (tablesToModelsMap.TryGetValue(source.Value.Name.ToLowerInvariant(), out CsModelSource? tbl))
             {
-                className = tbl.Name.FirstCharToUpper() ?? string.Empty;
+                className = tbl.Name.FirstCharToUpper();
             }
             else
             {
@@ -843,6 +844,51 @@ public class Minfold
         });
 
         await UpdateDbSet();
+
+        string schemaPath = $"{Source.ProjectPath}\\Dao\\Schema";
+        
+        Directory.CreateDirectory(schemaPath);
+        string[] existingSchemaFiles = Directory.GetFiles(schemaPath, string.Empty, SearchOption.AllDirectories);
+
+        ConcurrentDictionary<string, bool> writtenFiles = new ConcurrentDictionary<string, bool>();
+        
+        Sql160ScriptGenerator generator = new Sql160ScriptGenerator(new SqlScriptGeneratorOptions {
+            KeywordCasing = KeywordCasing.Uppercase, 
+            IncludeSemicolons = true,
+            NewLineBeforeFromClause = true,
+            NewLineBeforeOrderByClause = true,
+            NewLineBeforeWhereClause = true,
+            AlignClauseBodies = false
+        });
+        
+        TSql160Parser parser = new TSql160Parser(true, SqlEngineType.All);
+        
+        await Parallel.ForEachAsync(modelsToTablesMap, async (pair, token) =>
+        {
+            ResultOrException<string> tableScript = await new SqlService(sqlConn).SqlTableCreateScript($"dbo.{pair.Value.Name}");
+
+            if (tableScript.Result is not null)
+            {
+                using StringReader rdr = new StringReader(tableScript.Result);
+                TSqlFragment tree = parser.Parse(rdr, out IList<ParseError>? errors);
+                
+                generator.GenerateScript(tree, out string formattedQuery);
+                
+                await File.WriteAllTextAsync($"{schemaPath}\\{pair.Value.Name}.sql", formattedQuery, token);
+                writtenFiles.TryAdd($"{schemaPath}\\{pair.Value.Name}.sql", true);
+            }
+        });
+
+        foreach (string existingFilePath in existingSchemaFiles)
+        {
+            if (!writtenFiles.TryGetValue(existingFilePath, out bool _))
+            {
+                File.Delete(existingFilePath);
+            }
+        }
+        
+        int z = 0;
+        
         return new MinfoldResult(null);
     }
 

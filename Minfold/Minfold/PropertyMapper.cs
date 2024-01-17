@@ -6,7 +6,7 @@ namespace Minfold;
 
 public class PropertyMapper : CSharpSyntaxRewriter
 {
-    private string expectedClassName;
+    private readonly string expectedClassName;
     private readonly CsModelSource modelSource;
     
     /// <summary>
