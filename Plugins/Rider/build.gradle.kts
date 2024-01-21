@@ -14,6 +14,7 @@ plugins {
 
 group = properties("pluginGroup").get()
 version = properties("pluginVersion").get()
+val sinceBuildVersion = properties("pluginSinceBuild")
 
 // Configure project's dependencies
 repositories {
@@ -39,6 +40,7 @@ intellij {
     type.set("RD")
     version.set(riderSdkVersion)
     downloadSources.set(false)
+    updateSinceUntilBuild.set(false)
     plugins.set(listOf("com.intellij.javafx:1.0.3"))
 }
 
@@ -66,5 +68,10 @@ tasks {
         // Specify pre-release label to publish the plugin in a custom Release Channel automatically. Read more:
         // https://plugins.jetbrains.com/docs/intellij/deployment.html#specifying-a-release-channel
         channels = properties("pluginVersion").map { listOf(it.split('-').getOrElse(1) { "default" }.split('.').first()) }
+    }
+
+    patchPluginXml {
+        version.set("${project.version}")
+        sinceBuild.set(sinceBuildVersion)
     }
 }

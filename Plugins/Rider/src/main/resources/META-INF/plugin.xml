@@ -1,12 +1,13 @@
 <idea-plugin>
     <id>com.github.lofcz.minfold</id>
     <name>Minfold</name>
-    <version>1.0.2</version>
+    <version>1.0.3</version>
     <description>Official Minfold intergration for Rider.</description>
     <vendor email="stagl@wattlescript.org">Matěj "lofcz" Štágl</vendor>
 
     <depends>com.intellij.modules.rider</depends>
     <depends>com.intellij.javafx</depends>
+    <idea-version since-build="233" until-build="243.*" />
 
     <extensions defaultExtensionNs="com.intellij">
         <toolWindow id="Minfold" secondary="true" icon="AllIcons.Toolwindows.WebToolWindow" anchor="right" factoryClass="com.lofcz.minfold.MinfoldToolWindowFactory"/>
