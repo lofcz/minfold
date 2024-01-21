@@ -4,7 +4,6 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.github.pgreze.process.Redirect
 import com.github.pgreze.process.process
-import com.intellij.ide.DataManager
 import com.intellij.notification.Notification
 import com.intellij.notification.NotificationType
 import com.intellij.notification.Notifications
@@ -24,6 +23,7 @@ import com.jetbrains.rider.projectView.solutionDirectory
 import com.jetbrains.rider.projectView.solutionName
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.runInterruptible
 import net.miginfocom.swing.MigLayout
 import org.apache.commons.lang3.StringUtils
 import java.awt.BorderLayout
@@ -35,8 +35,10 @@ import java.nio.file.Files
 import java.nio.file.Paths
 import java.util.*
 import javax.swing.*
-import kotlin.math.min
-
+import java.net.URI
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
 
 @Service
 @State(name="test")
@@ -71,13 +73,14 @@ class MinfoldSaveData {
     var saves : MutableList<MinfoldSaveDataEntry> = mutableListOf()
 }
 
+class NugetVersionData {
+    var versions : MutableList<String> = mutableListOf()
+}
+
 class MinfoldToolWindowFactory : ToolWindowFactory, DumbAware {
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val toolWindowContent = MinfoldToolWindowFactory(toolWindow, project)
-
-        print("ahoj ahoj");
-
         val content = ContentFactory.getInstance().createContent(toolWindowContent.rootFrame, "", false)
         toolWindow.contentManager.addContent(content)
     }
@@ -114,6 +117,12 @@ class MinfoldToolWindowFactory : ToolWindowFactory, DumbAware {
         private var outputLines = Collections.synchronizedList(mutableListOf<String>())
         private var minfoldFailed = false
         private var mindoldRunning = false
+        private val minfoldBtn = JButton()
+        private val client = HttpClient.newBuilder().build()
+        private var minfoldUpstreamVersion = ""
+        private val minfoldUpdateBtn = JButton()
+        private val controlsPanel = JPanel()
+        private var minfoldUpdating = false
 
         val project: Project;
         var inputMap: MutableMap<String, com.intellij.ui.TextAccessor> = mutableMapOf()
@@ -140,27 +149,49 @@ class MinfoldToolWindowFactory : ToolWindowFactory, DumbAware {
         fun getVersion() : String {
             var version = ""
 
-            runBlocking {
-                val res = process(
+            try {
+                runBlocking {
+                    val res = process(
                         "minfold", "--version",
                         stdout = Redirect.Consume { flow ->
                             run {
                                 version = flow.toList().joinToString()
                             }
                         }
-                )
+                    )
+                }
+            }
+            catch (e : Exception) {
+
             }
 
-            return version
+            return version.substringBefore('+')
+        }
+
+        fun setOutText(text: String, immediate: Boolean = false) {
+            stdOutLabel.text = "<html><p style='margin-left: 10px; margin-right: 10px;'>${text}<br/></p></html>"
+            stdOutLabel.repaint()
+
+            if (immediate) {
+                stdOutLabel.paintImmediately(stdOutLabel.bounds)
+            }
         }
 
         init {
             this.project = project;
-
             rootFrame.layout = BorderLayout()
 
-            // versions: https://api.nuget.org/v3-flatcontainer/minfold.cli/index.json
-            //rootFrame.add(contentPanel)
+            val mapper = jacksonObjectMapper()
+
+            val request = HttpRequest.newBuilder()
+                .uri(URI.create("https://api.nuget.org/v3-flatcontainer/minfold.cli/index.json"))
+                .build()
+            val response = client.send(request, HttpResponse.BodyHandlers.ofString())
+
+            if (response.statusCode() == 200) {
+                val saveData: NugetVersionData = mapper.readValue(response.body())
+                minfoldUpstreamVersion = saveData.versions[saveData.versions.count() - 1]
+            }
 
             val cPanel = JPanel(MigLayout("fillx", "[fill, grow]"))
 
@@ -182,7 +213,6 @@ class MinfoldToolWindowFactory : ToolWindowFactory, DumbAware {
             }
 
             lateinit var minfoldData: MinfoldSaveData
-            val mapper = jacksonObjectMapper()
 
             try {
                 val saveData: MinfoldSaveData = mapper.readValue(Files.readString(Paths.get("C:\\ProgramData\\Minfold\\data.json")))
@@ -209,7 +239,7 @@ class MinfoldToolWindowFactory : ToolWindowFactory, DumbAware {
             AddRow("Code Path", "Path to the folder with a .csproj project", "path", false, data?.location)
             AddRow("Additional parameters", "Optional: --param1 param1Value", "pars", false, data?.optional)
 
-            migPanel.add(createControlsPanel(toolWindow), "left,wrap")
+            migPanel.add(createControlsPanel(toolWindow), "span,left,wrap")
 
             cPanel.add(migPanel, "span,left,wrap")
             cPanel.add(stdOutLabel, "span,left,wrap")
@@ -220,10 +250,26 @@ class MinfoldToolWindowFactory : ToolWindowFactory, DumbAware {
 
             try {
                 version = getVersion()
+
+                if (version != minfoldUpstreamVersion && minfoldUpstreamVersion != "") {
+                    minfoldUpdateBtn.isVisible = true
+
+                    if (version.isEmpty()) {
+                        minfoldUpdateBtn.text = "Install ${minfoldUpstreamVersion}"
+                    }
+                    else {
+                        minfoldUpdateBtn.text = "Update ${version} → ${minfoldUpstreamVersion}"
+                    }
+
+                    controlsPanel.repaint()
+
+                    minfoldUpdateBtn.addActionListener { e: ActionEvent? -> run {
+                        onMinfoldUpdateClick()
+                    } }
+                }
             }
             catch (e: Exception) {
-                stdOutLabel.text = "Minfold not detected, installing.."
-                stdOutLabel.repaint()
+                setOutText("Minfold not detected, installing..")
 
                 try {
                     runBlocking {
@@ -238,18 +284,15 @@ class MinfoldToolWindowFactory : ToolWindowFactory, DumbAware {
                     }
                 }
                 catch (e: Exception) {
-                    stdOutLabel.text = "dotnet not installed, please install .NET SDK"
-                    stdOutLabel.repaint()
+                    setOutText("dotnet not installed, please install .NET SDK")
                 }
 
                 try {
                     version = getVersion()
-                    stdOutLabel.text = "Minfold installed, version: $version"
-                    stdOutLabel.repaint()
+                    setOutText("Minfold installed, version: $version")
                 }
                 catch (e: Exception) {
-                    stdOutLabel.text = "Failed to install Minfold: ${e.message}"
-                    stdOutLabel.repaint()
+                    setOutText("Failed to install Minfold: ${e.message}")
                 }
             }
         }
@@ -316,18 +359,36 @@ class MinfoldToolWindowFactory : ToolWindowFactory, DumbAware {
             label.setIcon(ImageIcon(Objects.requireNonNull(javaClass.getResource(imagePath))))
         }
 
-        private fun onStdOut() {
+        private fun onStdOut(force: Boolean = false) {
 
             if (outputLines.isEmpty()) {
-                stdOutLabel.text = ""
-                stdOutLabel.repaint()
+                setOutText("")
+
+                if (force) {
+                    stdOutLabel.paintImmediately(stdOutLabel.bounds)
+                }
+                else {
+                    stdOutLabel.repaint()
+                    contentPanel.repaint()
+                }
                 return
             }
 
             val buff = StringBuilder()
             buff.append("<html><p style='margin-left: 10px; margin-right: 10px;'>")
 
+            var anyNonEmpty = false
+
             for (x in outputLines) {
+
+                val isEmpty = x.trim().isEmpty()
+
+                if (!anyNonEmpty && isEmpty) {
+                    continue
+                }
+                else if (!isEmpty) {
+                    anyNonEmpty = true
+                }
 
                 val match = decorateRegex.find(x)
 
@@ -360,8 +421,83 @@ class MinfoldToolWindowFactory : ToolWindowFactory, DumbAware {
             }
 
             buff.append("</p></html>")
-            stdOutLabel.text = buff.toString()
-            stdOutLabel.repaint()
+            setOutText(buff.toString())
+        }
+
+        private fun onMinfoldUpdateClick() {
+
+            if (minfoldUpdating) {
+                return
+            }
+
+            minfoldUpdating = true
+            val version = getVersion()
+
+            if (version.isEmpty()) {
+                setOutText("Installing ${minfoldUpstreamVersion}..", true)
+            }
+            else {
+                setOutText("Updating to ${minfoldUpstreamVersion}..", true)
+            }
+
+            try {
+
+                var uninstallResult = ""
+                var installResult = ""
+
+                var uninstallErr = ""
+                var installErr = ""
+
+                if (version != "") {
+                    runBlocking {
+                        val res = process(
+                            "dotnet", "tool", "uninstall", "Minfold.Cli", "--global",
+                            stdout = Redirect.Consume { flow ->
+                                run {
+                                    uninstallResult = flow.toList().joinToString()
+                                }
+                            },
+                            stderr = Redirect.Consume { flow ->
+                                run {
+                                    uninstallErr = flow.toList().joinToString()
+                                }
+                            }
+                        )
+                    }
+                }
+
+                runBlocking {
+                    val res = process(
+                        "dotnet", "tool", "install", "Minfold.Cli", "--global", "--version=$minfoldUpstreamVersion",
+                        stdout = Redirect.Consume { flow ->
+                            run {
+                                installResult = flow.toList().joinToString()
+                            }
+                        },
+                        stderr = Redirect.Consume { flow ->
+                            run {
+                                installErr = flow.toList().joinToString()
+                            }
+                        }
+                    )
+                }
+
+                if (uninstallErr != "") {
+                    setOutText("Failed to uninstall old Minfold: $uninstallErr")
+                }
+                else if (installErr != "") {
+                    setOutText("Failed to upgrade Minfold: $installErr")
+                }
+                else {
+                    minfoldUpdateBtn.isVisible = false
+                    setOutText("Minfold updated to $minfoldUpstreamVersion")
+                }
+            }
+            catch (e: Exception) {
+                setOutText("Failed to update Minfold: $e.message")
+            }
+
+            minfoldUpdating = false
         }
 
         private fun onMinfoldClick() {
@@ -377,11 +513,16 @@ class MinfoldToolWindowFactory : ToolWindowFactory, DumbAware {
                 return
             }
 
+            minfoldBtn.isEnabled = false
+            minfoldBtn.repaint()
+
             mindoldRunning = true
             outputLines.clear()
             errLines.clear()
 
-            onStdOut()
+            outputLines.add("Running, please wait..")
+
+            onStdOut(true)
 
             val db = inputMap["database"]!!.text
             val conn = pwMap["conn"]!!.getPassword().joinToString(separator = "")
@@ -434,12 +575,24 @@ class MinfoldToolWindowFactory : ToolWindowFactory, DumbAware {
 
             minfoldFailed = false
 
+            var firstOut = true
+
+            fun handleProcessIO() {
+                if (firstOut) {
+                    firstOut = false
+                    outputLines.clear()
+                    errLines.clear()
+                }
+            }
+
             try {
+
                 runBlocking {
+
                     val res = process(
                             "minfold", *argList.toTypedArray(),
-                            stdout = Redirect.Consume { flow -> flow.toList(outputLines); onStdOut() },
-                            stderr = Redirect.Consume { flow -> flow.toList(outputLines); onStdOut() }
+                            stdout = Redirect.Consume { flow -> handleProcessIO(); flow.toList(outputLines); onStdOut() },
+                            stderr = Redirect.Consume { flow -> handleProcessIO(); flow.toList(outputLines); onStdOut() }
                     )
                 }
 
@@ -483,24 +636,27 @@ class MinfoldToolWindowFactory : ToolWindowFactory, DumbAware {
                 }
             }
             catch (e: Exception) {
-                stdOutLabel.text = "Failed to execute Minfold: ${e.message}"
-                stdOutLabel.repaint()
+                setOutText("Failed to execute Minfold: ${e.message}")
             }
 
+            minfoldBtn.isEnabled = true
+            minfoldBtn.repaint()
             mindoldRunning = false
         }
 
         private fun createControlsPanel(toolWindow: ToolWindow): JPanel {
-            val controlsPanel = JPanel()
             val left = 0 //-8
             controlsPanel.setBorder(BorderFactory.createEmptyBorder(0, left, 0, 0))
 
-            val minfoldBtn = JButton("Minfold")
+            minfoldBtn.text = "Minfold"
             minfoldBtn.addActionListener { e: ActionEvent? -> run {
                 onMinfoldClick()
             } }
 
+            minfoldUpdateBtn.isVisible = false
+
             controlsPanel.add(minfoldBtn)
+            controlsPanel.add(minfoldUpdateBtn)
             return controlsPanel
         }
 

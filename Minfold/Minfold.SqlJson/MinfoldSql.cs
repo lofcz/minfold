@@ -1067,7 +1067,7 @@ class MyVisitor : TSqlFragmentVisitor
             {
                 case ScalarSubquery { QueryExpression: QuerySpecification subquerySpec }:
                 {
-                    SolveQuery(subquerySpec, query, cIndex, starsOffset);
+                    SolveQuery(scope, subquerySpec, query, cIndex, starsOffset);
                     break;
                 }      
                 case ParenthesisExpression parentExpr:
@@ -1389,7 +1389,7 @@ class MyVisitor : TSqlFragmentVisitor
             
             if (select.QueryExpression is QuerySpecification qs)
             {
-                SolveQuery(qs, rootQuery, 0, []);
+                SolveQuery(root, qs, rootQuery, 0, []);
                 root = SolveSelect(qs, root);
             }
             

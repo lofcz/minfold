@@ -85,6 +85,8 @@ class Program
         Minfold m = new Minfold();
         MinfoldResult synchronizeResult = await m.Synchronize(conn, database, codePath, options);
 
+        //string str = Synchronizer.Synchronize();
+        
         sw.Stop();
 
         void WriteError(string msg)

@@ -7,6 +7,7 @@
     </PropertyGroup>
 
     <ItemGroup>
+      <PackageReference Include="Lofcz.Forks.OpenDBDiff.SqlServer.Schema" Version="1.0.2" />
       <PackageReference Include="Microsoft.Build" Version="17.8.3" ExcludeAssets="runtime" />
       <PackageReference Include="Microsoft.Build.Framework" Version="17.8.3" ExcludeAssets="runtime" />
       <PackageReference Include="Microsoft.Build.Locator" Version="1.6.10" />
