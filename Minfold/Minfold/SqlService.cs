@@ -1,4 +1,5 @@
-﻿using System.Data;
+﻿using System.Collections.Concurrent;
+using System.Data;
 using System.Text;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -217,7 +218,7 @@ public class SqlService
         }
         
         return $$"""
-         use {{dbName}}
+         use [{{dbName}}]
          select col.TABLE_NAME, col.COLUMN_NAME, col.ORDINAL_POSITION, col.IS_NULLABLE, col.DATA_TYPE,
                  columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'IsIdentity') as IS_IDENTITY,
                  columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'IsComputed') as IS_COMPUTED,
@@ -301,17 +302,17 @@ public class SqlService
         return new ResultOrException<List<SqlResultSetColumn>>(cols.OrderBy(x => x.Position).ToList(), null);
     }
 
-    public async Task<ResultOrException<Dictionary<string, SqlTable>>> GetSchema(string dbName, List<string>? selectTables = null)
+    public async Task<ResultOrException<ConcurrentDictionary<string, SqlTable>>> GetSchema(string dbName, List<string>? selectTables = null)
     {
         await using SqlConnectionResult conn = await Connect();
 
         if (conn.Exception is not null)
         {
-            return new ResultOrException<Dictionary<string, SqlTable>>(null, conn.Exception);
+            return new ResultOrException<ConcurrentDictionary<string, SqlTable>>(null, conn.Exception);
         }
 
         SqlCommand command = new(SqlSchema(dbName, selectTables), conn.Connection);
-
+   
         if (selectTables is not null)
         {
             for (int i = 0; i < selectTables.Count; i++)
@@ -322,7 +323,7 @@ public class SqlService
         
         await using SqlDataReader reader = await command.ExecuteReaderAsync();
 
-        Dictionary<string, SqlTable> tables = new();
+        ConcurrentDictionary<string, SqlTable> tables = new();
         
         while (reader.Read())
         {
@@ -354,7 +355,7 @@ public class SqlService
             }
         }
 
-        return new ResultOrException<Dictionary<string, SqlTable>>(tables, null);
+        return new ResultOrException<ConcurrentDictionary<string, SqlTable>>(tables, null);
     }
     
     public async Task<ResultOrException<Dictionary<string, List<SqlForeignKey>>>> GetForeignKeys(IList<string> tables)

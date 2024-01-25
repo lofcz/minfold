@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
@@ -77,7 +78,7 @@ public static class MinfoldSql
         async Task<MinfoldSqlResult> RunStaticAnalysis()
         {
             HashSet<string> deps = checker.Root.GatherDependencies();
-            ResultOrException<Dictionary<string, SqlTable>> test = deps.Count > 0 ? await service.GetSchema(database, deps.ToList()) : new ResultOrException<Dictionary<string, SqlTable>>(new Dictionary<string, SqlTable>(), null);
+            ResultOrException<ConcurrentDictionary<string, SqlTable>> test = deps.Count > 0 ? await service.GetSchema(database, deps.ToList()) : new ResultOrException<ConcurrentDictionary<string, SqlTable>>(new ConcurrentDictionary<string, SqlTable>(), null);
 
             if (test.Exception is not null || test.Result is null)
             {
@@ -464,7 +465,7 @@ class Scope
         return Identifiers.FirstOrDefault(x => string.Equals(x.Ident, ident, StringComparison.InvariantCultureIgnoreCase)) ?? Parent?.GetSource(ident);
     }
 
-    public MappedModel Compile(Dictionary<string, SqlTable> schema, int modelIndex, List<SelectColumn>? columns = null)
+    public MappedModel Compile(ConcurrentDictionary<string, SqlTable> schema, int modelIndex, List<SelectColumn>? columns = null)
     {
         int unkIndex = 0;
         MappedModel model = new MappedModel($"Model{modelIndex}", JsonOptions);

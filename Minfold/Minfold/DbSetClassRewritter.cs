@@ -14,13 +14,13 @@ public class DbSetClassRewritter : CSharpSyntaxRewriter
     
     private readonly string expectedClassName;
     private readonly List<CsDbSetDecl> sets;
-    private readonly Dictionary<string, SqlTable> modelsToTablesMap;
+    private readonly ConcurrentDictionary<string, SqlTable> modelsToTablesMap;
     private readonly ConcurrentDictionary<string, CsPropertiesInfo> modelProperties;
     
     /// <summary>
     /// Updates database set class
     /// </summary>
-    public DbSetClassRewritter(string expectedClassName, List<CsDbSetDecl> sets, Dictionary<string, SqlTable> modelsToTablesMap, ConcurrentDictionary<string, CsPropertiesInfo> modelProperties)
+    public DbSetClassRewritter(string expectedClassName, List<CsDbSetDecl> sets, ConcurrentDictionary<string, SqlTable> modelsToTablesMap, ConcurrentDictionary<string, CsPropertiesInfo> modelProperties)
     {
         this.expectedClassName = expectedClassName;
         this.sets = sets;

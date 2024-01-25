@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -12,17 +13,17 @@ public class DaoClassRewriter : CSharpSyntaxRewriter
  
     private readonly SqlTable table;
     private readonly string expectedClassName, modelName;
-    private readonly Dictionary<string, CsModelSource> tablesMap;
+    private readonly ConcurrentDictionary<string, CsModelSource> tablesMap;
     private readonly CsModelSource modelSource;
     private readonly string dbSetMappedTableName;
     private readonly string? identityColumnId, identityColumnType;
     private readonly bool generateGetWhereId;
-    private readonly Dictionary<string, string>? customUsings;
+    private readonly ConcurrentDictionary<string, string>? customUsings;
     
     /// <summary>
     /// Updates a dao
     /// </summary>
-    public DaoClassRewriter(string expectedClassName, string modelName, SqlTable table, Dictionary<string, CsModelSource> tablesMap, CsModelSource modelSource, string dbSetMappedTableName, string? identityColumnId, string? identityColumnType, bool generateGetWhereId, Dictionary<string, string>? customUsings)
+    public DaoClassRewriter(string expectedClassName, string modelName, SqlTable table, ConcurrentDictionary<string, CsModelSource> tablesMap, CsModelSource modelSource, string dbSetMappedTableName, string? identityColumnId, string? identityColumnType, bool generateGetWhereId, ConcurrentDictionary<string, string>? customUsings)
     {
         this.table = table;
         this.expectedClassName = expectedClassName;

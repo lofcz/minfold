@@ -15,18 +15,18 @@ namespace Minfold;
 
 public class Minfold
 {
-    private Dictionary<string, SqlTable> SqlSchema = [];
+    private ConcurrentDictionary<string, SqlTable> SqlSchema = [];
     private CsSource Source = new CsSource(string.Empty, string.Empty, [], [], string.Empty, string.Empty, []);
-    private readonly Dictionary<string, CsModelSource> tablesToModelsMap = [];
-    private readonly Dictionary<string, SqlTable> modelsToTablesMap = [];
+    private readonly ConcurrentDictionary<string, CsModelSource> tablesToModelsMap = [];
+    private readonly ConcurrentDictionary<string, SqlTable> modelsToTablesMap = [];
     private readonly ConcurrentDictionary<string, string> daoPaths = new ConcurrentDictionary<string, string>();
     private MinfoldCfg cfg = new MinfoldCfg(false);
     private MinfoldOptions options = new MinfoldOptions();
     
-    public async Task<ResultOrException<Dictionary<string, SqlTable>>> AnalyzeSqlSchema(string sqlConn, string dbName)
+    public async Task<ResultOrException<ConcurrentDictionary<string, SqlTable>>> AnalyzeSqlSchema(string sqlConn, string dbName)
     {
         SqlService ss = new SqlService(sqlConn);
-        ResultOrException<Dictionary<string, SqlTable>> schema = await ss.GetSchema(dbName);
+        ResultOrException<ConcurrentDictionary<string, SqlTable>> schema = await ss.GetSchema(dbName);
 
         if (schema.Exception is not null || schema.Result is null)
         {
@@ -37,7 +37,7 @@ public class Minfold
         
         if (fks.Exception is not null || fks.Result is null)
         {
-            return new ResultOrException<Dictionary<string, SqlTable>>(null, fks.Exception);
+            return new ResultOrException<ConcurrentDictionary<string, SqlTable>>(null, fks.Exception);
         }
         
         foreach (KeyValuePair<string, List<SqlForeignKey>> foreignKeyList in fks.Result)
@@ -300,7 +300,7 @@ public class Minfold
         return null;
     }
 
-    public async Task<CsModelGenerateResult> GenerateModel(string className, SqlTable table, Dictionary<string, CsModelSource> tablesMap)
+    public async Task<CsModelGenerateResult> GenerateModel(string className, SqlTable table, ConcurrentDictionary<string, CsModelSource> tablesMap)
     {
         Dictionary<string, string> propertiesMap = [];
         CsPropertiesInfo properties = new CsPropertiesInfo();
@@ -417,7 +417,7 @@ public class Minfold
 
     private static readonly HashSet<string> defaultUsings = ["System.Collections", "System.Data", "System.Text", "Dapper", "System.Threading.Tasks", "Microsoft.EntityFrameworkCore", "Microsoft.Extensions.Primitives"];
     
-    string GenerateDaoCode(string daoName, string modelName, string modelNamespace, string dbSetMappedTableName, string? identityColumnId, string? identityColumnType, bool generateGetWhereId, Dictionary<string, string>? customUsings)
+    string GenerateDaoCode(string daoName, string modelName, string modelNamespace, string dbSetMappedTableName, string? identityColumnId, string? identityColumnType, bool generateGetWhereId, ConcurrentDictionary<string, string>? customUsings)
     {
         string usings = $"""
           using System.Collections;
@@ -473,7 +473,7 @@ public class Minfold
         """;
     }
 
-    public async Task<ClassRewriteResult> UpdateOrCreateDao(CsModelSource tree, SqlTable table, Dictionary<string, CsModelSource> tablesMap, CsPropertiesInfo? properties)
+    public async Task<ClassRewriteResult> UpdateOrCreateDao(CsModelSource tree, SqlTable table, ConcurrentDictionary<string, CsModelSource> tablesMap, CsPropertiesInfo? properties)
     {
         string daoName = $"{tree.Name}Dao";
         string modelName = tree.Name;
@@ -495,7 +495,7 @@ public class Minfold
         string? identColType = null;
             
         KeyValuePair<string, SqlTableColumn> pkCol = table.Columns.FirstOrDefault(x => x.Value.IsPrimaryKey);
-        Dictionary<string, string>? customUsings = null;
+        ConcurrentDictionary<string, string>? customUsings = null;
 
         if (pkCol.Value is not null)
         {
@@ -577,7 +577,7 @@ public class Minfold
         return new ClassRewriteResult(daoClassVisitor.ClassRewritten, newNode.NormalizeWhitespace().ToFullString());
     }
     
-    public async Task<ModelClassRewriteResult> UpdateModel(CsModelSource tree, SqlTable table, Dictionary<string, CsModelSource> tablesMap)
+    public async Task<ModelClassRewriteResult> UpdateModel(CsModelSource tree, SqlTable table, ConcurrentDictionary<string, CsModelSource> tablesMap)
     {
         string modelName = table.Name;
         
@@ -708,7 +708,7 @@ public class Minfold
             return new MinfoldResult(new MinfoldError(MinfoldSteps.ConnectDb, $"Failed to connect via connection string: {sqlConn}. Please fix your connection string.", e));
         }
         
-        ResultOrException<Dictionary<string, SqlTable>> sqlSchema = await AnalyzeSqlSchema(sqlConn, dbName);
+        ResultOrException<ConcurrentDictionary<string, SqlTable>> sqlSchema = await AnalyzeSqlSchema(sqlConn, dbName);
 
         if (sqlSchema.Exception is not null)
         {

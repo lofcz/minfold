@@ -24,7 +24,7 @@ public record ModelForeignKeysPatch(Dictionary<string, CsPropertyFkDecl> Propert
 public record CsPropertyFkDecl(string Name, List<SqlForeignKey> ForeignKeys);
 public record SemanticSolution(MSBuildWorkspace Workspace, Solution Solution);
 public record CsModelGenerateResult(string Name, string Code, string Namespace, Dictionary<string, string> Columns, CsPropertiesInfo PropertiesInfo);
-public record CsTypeAlias(string Symbol, Dictionary<string, string> Usings);
+public record CsTypeAlias(string Symbol, ConcurrentDictionary<string, string> Usings);
 public record CsDbSetDecl(string ModelName, string SetName, PropertyDeclarationSyntax? Decl);
 public record MinfoldCfg(bool UniformPk);
 public record ResultOrException<T>(T? Result, Exception? Exception);

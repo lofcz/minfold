@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Data;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -15,7 +16,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
  
     private readonly SqlTable table;
     private readonly string expectedClassName;
-    private readonly Dictionary<string, CsModelSource> tablesMap;
+    private readonly ConcurrentDictionary<string, CsModelSource> tablesMap;
     private readonly CsModelSource modelSource;
     private readonly bool scanNamespace;
     private readonly CompilationUnitSyntax rootNode;
@@ -23,7 +24,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
     /// <summary>
     /// Updates a model
     /// </summary>
-    public ModelClassRewriter(string expectedClassName, SqlTable table, Dictionary<string, CsModelSource> tablesMap, CsModelSource modelSource, bool scanNamespace, CompilationUnitSyntax rootNode)
+    public ModelClassRewriter(string expectedClassName, SqlTable table, ConcurrentDictionary<string, CsModelSource> tablesMap, CsModelSource modelSource, bool scanNamespace, CompilationUnitSyntax rootNode)
     {
         this.table = table;
         this.expectedClassName = expectedClassName;
@@ -174,7 +175,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
 
                     if (propDeclInfo.Type is SqlDbTypeExt.CsIdentifier && tableColumn.SqlType is not SqlDbTypeExt.CsIdentifier)
                     {
-                        Dictionary<string, string>? usings = GetUsings(rootNode);
+                        ConcurrentDictionary<string, string>? usings = GetUsings(rootNode);
                         alias = new CsTypeAlias(propDeclInfo.Token ?? string.Empty, usings);
                     }
                 }
@@ -238,7 +239,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
         return usings;
     }
 
-    private static Dictionary<string, string>? GetUsings(CompilationUnitSyntax node)
+    private static ConcurrentDictionary<string, string>? GetUsings(CompilationUnitSyntax node)
     {
         List<string> usings = GetUsingsInner(node);
 
@@ -247,7 +248,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
             return null;
         }
         
-        Dictionary<string, string> parsed = [];
+        ConcurrentDictionary<string, string> parsed = [];
 
         foreach (string str in usings)
         {
