@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -11,12 +12,12 @@ public class DbSetMapper : CSharpSyntaxRewriter
     public bool ClassRewritten { get; set; }
     
     private readonly string expectedClassName;
-    private readonly Dictionary<string, CsDbSetDecl> dbSetMap;
+    private readonly ConcurrentDictionary<string, CsDbSetDecl> dbSetMap;
     
     /// <summary>
     /// Updates a dao
     /// </summary>
-    public DbSetMapper(string expectedClassName, Dictionary<string, CsDbSetDecl> dbSetMap)
+    public DbSetMapper(string expectedClassName, ConcurrentDictionary<string, CsDbSetDecl> dbSetMap)
     {
         this.expectedClassName = expectedClassName;
         this.dbSetMap = dbSetMap;

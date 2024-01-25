@@ -302,7 +302,7 @@ public class Minfold
 
     public async Task<CsModelGenerateResult> GenerateModel(string className, SqlTable table, ConcurrentDictionary<string, CsModelSource> tablesMap)
     {
-        Dictionary<string, string> propertiesMap = [];
+        ConcurrentDictionary<string, string> propertiesMap = [];
         CsPropertiesInfo properties = new CsPropertiesInfo();
         
         if (tablesMap.TryGetValue(table.Name.ToLowerInvariant(), out CsModelSource? model))
@@ -401,7 +401,7 @@ public class Minfold
 
         modelsToTablesMap.TryAdd(className.ToLowerInvariant(), table);
         SyntaxTree tree = CSharpSyntaxTree.ParseText(str);
-        tablesToModelsMap.TryAdd(table.Name.ToLowerInvariant(), new CsModelSource(className, $"{Source.ProjectPath}\\Dao\\Models\\{className}.cs", null, str, null, tree, null, string.Empty, table, tree.GetRoot(), null, propertiesMap, new ModelInfo { Namespace = Source.ProjectNamespace }));
+        tablesToModelsMap.TryAdd(table.Name.ToLowerInvariant(), new CsModelSource(className, $"{Source.ProjectPath}\\Dao\\Models\\{className}.cs", null, str, null, tree, null, string.Empty, table, await tree.GetRootAsync(), null, propertiesMap, new ModelInfo { Namespace = Source.ProjectNamespace }));
         return new CsModelGenerateResult(className, str, Source.ProjectNamespace, propertiesMap, properties);
     }
 
