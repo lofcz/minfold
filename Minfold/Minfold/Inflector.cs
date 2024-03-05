@@ -98,6 +98,7 @@ public static class Inflector
         AddIrregular("zombie", "zombies");
         AddIrregular("personnel", "personnel");
         AddIrregular("cache", "caches");
+        AddIrregular("child", "children");
         AddIrregular("ex", "exes", false);
         AddIrregular("is", "are", false);
         AddIrregular("that", "those", false);
@@ -163,7 +164,7 @@ public static class Inflector
             splitIndex--;
         }
 
-        return new Tuple<string, string>(input[..splitIndex], input[splitIndex..]);
+        return !firstUpperFound ? new Tuple<string, string>(string.Empty, input) : new Tuple<string, string>(input[..splitIndex], input[splitIndex..]);
     }
 
     private class Rule(string pattern, string replacement)

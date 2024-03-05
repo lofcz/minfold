@@ -157,6 +157,7 @@ public static class Extensions
         { SqlDbTypeExt.NVarChar, "string" },
         { SqlDbTypeExt.SmallDateTime, "DateTime" },
         { SqlDbTypeExt.Xml, "string" },
+        { SqlDbTypeExt.BigInt, "long" },
         { SqlDbTypeExt.Unknown, "object" }
     };
     

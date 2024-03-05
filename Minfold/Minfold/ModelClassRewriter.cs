@@ -20,11 +20,12 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
     private readonly CsModelSource modelSource;
     private readonly bool scanNamespace;
     private readonly CompilationUnitSyntax rootNode;
+    private readonly MinfoldCfg cfg;
     
     /// <summary>
     /// Updates a model
     /// </summary>
-    public ModelClassRewriter(string expectedClassName, SqlTable table, ConcurrentDictionary<string, CsModelSource> tablesMap, CsModelSource modelSource, bool scanNamespace, CompilationUnitSyntax rootNode)
+    public ModelClassRewriter(string expectedClassName, SqlTable table, ConcurrentDictionary<string, CsModelSource> tablesMap, CsModelSource modelSource, bool scanNamespace, CompilationUnitSyntax rootNode, MinfoldCfg cfg)
     {
         this.table = table;
         this.expectedClassName = expectedClassName;
@@ -32,6 +33,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
         this.modelSource = modelSource;
         this.scanNamespace = scanNamespace;
         this.rootNode = rootNode;
+        this.cfg = cfg;
     }
     
     private static ClassDeclarationSyntax RemoveProperties(ClassDeclarationSyntax node, string[] properties)
@@ -57,7 +59,47 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
 
     private static HashSet<string> ForeignKeyAttributes = [ "ReferenceKey", "ReferenceKeyAttribute" ];
 
-    private static ClassDeclarationSyntax UpdateProperty(ClassDeclarationSyntax node, CsPropertyDecl property)
+    private static ClassDeclarationSyntax UpdatePropertyNullability(ClassDeclarationSyntax node, CsPropertyDecl property)
+    {
+        MemberDeclarationSyntax? existingProp = node.Members.FirstOrDefault(x => x is PropertyDeclarationSyntax propSyntax2 && propSyntax2.Identifier.ValueText == property.Name);
+
+        if (existingProp is not PropertyDeclarationSyntax propSyntax)
+        {
+            return node;
+        }
+
+        TypeSyntax type = $"{propSyntax.Type.ToFullString().Replace("?", string.Empty)}{(property.Nullable ? '?' : string.Empty)}".ToTypeSyntax();
+        propSyntax = propSyntax.WithType(type);
+
+        List<AttributeListSyntax> keptAttrLists = [];
+        
+        foreach (AttributeListSyntax aList in propSyntax.AttributeLists)
+        {
+            List<AttributeSyntax> keptAttrs = [];
+
+            foreach (AttributeSyntax attr in aList.Attributes)
+            {
+                if (attr.Name is IdentifierNameSyntax ident && ForeignKeyAttributes.Contains(ident.Identifier.ValueText))
+                {
+                    continue;
+                }
+
+                keptAttrs.Add(attr);
+            }
+
+            if (keptAttrs.Count > 0)
+            {
+                keptAttrLists.Add(aList.WithAttributes(SyntaxFactory.SeparatedList(keptAttrs)));   
+            }
+        }
+        
+        propSyntax = propSyntax.WithAttributeLists(SyntaxFactory.List(keptAttrLists));
+        
+        node = node.ReplaceNode(existingProp, propSyntax);
+        return node;
+    }
+    
+    private static ClassDeclarationSyntax UpdatePropertyType(ClassDeclarationSyntax node, CsPropertyDecl property)
     {
         MemberDeclarationSyntax? existingProp = node.Members.FirstOrDefault(x => x is PropertyDeclarationSyntax propSyntax2 && propSyntax2.Identifier.ValueText == property.Name);
 
@@ -214,7 +256,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
                     canSet = anySet;
                 }
                 
-                info.Properties.TryAdd(propDecl.Identifier.ValueText.ToLowerInvariant(), new CsPropertyInfo(propDecl.Identifier.ValueText, mapped, keys, Minfold.ColumnDefaultValue(propDecl.Identifier.ValueText.ToLowerInvariant(), tableColumn), propDecl.ToPropertyDecl(), alias, tableColumn, canSet));   
+                info.Properties.TryAdd(propDecl.Identifier.ValueText.ToLowerInvariant(), new CsPropertyInfo(propDecl.Identifier.ValueText, mapped, keys, Minfold.ColumnDefaultValue(propDecl.Identifier.ValueText.ToLowerInvariant(), tableColumn, propDecl.Identifier.ValueText.ToLowerInvariant()), propDecl.ToPropertyDecl(), alias, tableColumn, canSet));   
             }
         }
 
@@ -596,7 +638,32 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
         //node = ShrinkConstructor(node, propertiesArr);
         return node;
     }
+    
+    /// <summary>
+    /// Used only for enum mapped properties to update nullability
+    /// </summary>
+    /// <param name="node"></param>
+    /// <param name="properties"></param>
+    /// <returns></returns>
+    private ClassDeclarationSyntax ChangePropertiesNullabilityUpdateCtor(ClassDeclarationSyntax node, IEnumerable<CsPropertyDecl> properties)
+    {
+        CsPropertyDecl[] propertiesArr = properties.ToArray();
+        
+        if (propertiesArr.Length is 0)
+        {
+            return node;
+        }
+        
+        node = propertiesArr.Aggregate(node, UpdatePropertyNullability);
+        return node;
+    }
 
+    /// <summary>
+    /// Updates both type and nullability
+    /// </summary>
+    /// <param name="node"></param>
+    /// <param name="properties"></param>
+    /// <returns></returns>
     private ClassDeclarationSyntax ChangePropertiesTypeUpdateCtor(ClassDeclarationSyntax node, IEnumerable<CsPropertyDecl> properties)
     {
         CsPropertyDecl[] propertiesArr = properties.ToArray();
@@ -606,7 +673,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
             return node;
         }
         
-        node = propertiesArr.Aggregate(node, UpdateProperty);
+        node = propertiesArr.Aggregate(node, UpdatePropertyType);
         //node = propertiesArr.Aggregate(node, UpdateConstructorProperty);
         return node;
     }
@@ -672,7 +739,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
     private ModelPropertiesPatch ComputePatch(ClassDeclarationSyntax node, CsPropertiesInfo properties)
     {
         List<CsPropertyDeclPatch> decls = [];
-        ModelPropertiesPatch patch = new ModelPropertiesPatch([], [], [], properties);
+        ModelPropertiesPatch patch = new ModelPropertiesPatch([], [], [], properties, []);
         
         foreach (MemberDeclarationSyntax member in node.Members)
         {
@@ -702,11 +769,16 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
                 // skip enums (will trip on classes too as we are not using semantic model)
                 if (prop.Property.Type is SqlDbTypeExt.CsIdentifier && column.SqlType is SqlDbTypeExt.Int or SqlDbTypeExt.SmallInt or SqlDbTypeExt.TinyInt)
                 {
+                    if (prop.Property.Nullable != column.IsNullable)
+                    {
+                        patch.PropertiesNullabilityUpdate.Add(new CsPropertyDecl(prop.Property.Name, column.SqlType, column.IsNullable, column.ForeignKeys, null));
+                    }
+                    
                     prop.Solved = true;
                     continue;
                 }
                 
-                patch.PropertiesUpdate.Add(new CsPropertyDecl(prop.Property.Name, column.SqlType, column.IsNullable, column.ForeignKeys, null));
+                patch.PropertiesTypeUpdate.Add(new CsPropertyDecl(prop.Property.Name, column.SqlType, column.IsNullable, column.ForeignKeys, null));
                 prop.Solved = true;
                 continue;
             }
@@ -768,7 +840,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
             insertIndex = node.Members.Count;
         }
 
-        string? ctortext = Minfold.DumpCtor(node.Identifier.ValueText, table, properties);
+        string? ctortext = Minfold.DumpCtor(node.Identifier.ValueText, table, properties, nonEmptyCtor);
 
         if (ctortext is null)
         {
@@ -782,7 +854,9 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
             node = node.WithMembers(node.Members.Insert(insertIndex, mmbr));
         }
         
+        #if DEBUG
         string text = node.NormalizeWhitespace().ToFullString();
+        #endif
         
         return node;
     }
@@ -833,6 +907,46 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
             node = node.Parent;
         }
     }
+
+    private ClassDeclarationSyntax EnsureUniformPkInterface(ClassDeclarationSyntax node)
+    {
+        bool constraintFound = false;
+
+        if (node.BaseList is not null)
+        {
+            foreach (BaseTypeSyntax baseType in node.BaseList.Types)
+            {
+                if (baseType.Type is IdentifierNameSyntax ident)
+                {
+                    if (ident.Identifier.Text is "IEntity")
+                    {
+                        constraintFound = true;
+                        break;
+                    }
+                }
+            }   
+        }
+
+        if (!constraintFound)
+        {
+            if (node.BaseList is null)
+            {
+                SeparatedSyntaxList<BaseTypeSyntax> list = SyntaxFactory.SeparatedList<BaseTypeSyntax>();
+                list = list.Add(SyntaxFactory.SimpleBaseType("IEntity".ToTypeSyntax()));
+                node = node.WithBaseList(SyntaxFactory.BaseList(list));
+            }
+            else
+            {
+                node = node.WithBaseList(node.BaseList.AddTypes(SyntaxFactory.SimpleBaseType("IEntity".ToTypeSyntax())));
+            }
+        }
+        
+#if DEBUG
+        string text = node.NormalizeWhitespace().ToFullString();
+#endif
+
+        return node;
+    }
     
     public override SyntaxNode VisitClassDeclaration(ClassDeclarationSyntax node)
     {
@@ -846,16 +960,22 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
             ScanNamespace(node);
         }
 
+        if (cfg.UniformPk)
+        {
+            node = EnsureUniformPkInterface(node);
+        }
+
         ClassRewritten = true;
 
         CsPropertiesInfo properties = Properties(node, table, rootNode);
-        ModelActionsPatch actionsPatch = ComputeActionsPatch(node, properties);
+        //ModelActionsPatch actionsPatch = ComputeActionsPatch(node, properties);
 
         node = EnsureEmptyCtor(node);
         
         ModelPropertiesPatch patch = ComputePatch(node, properties);
         node = RemovePropertiesShrinkCtor(node, patch.PropertiesRemove);
-        node = ChangePropertiesTypeUpdateCtor(node, patch.PropertiesUpdate);   
+        node = ChangePropertiesNullabilityUpdateCtor(node, patch.PropertiesNullabilityUpdate);   
+        node = ChangePropertiesTypeUpdateCtor(node, patch.PropertiesTypeUpdate);   
         node = AddPropertiesExtendCtor(node, patch.PropertiesAdd);
         
         ModelForeignKeysPatch fksPatch = ComputeFksPatch(node);

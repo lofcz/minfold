@@ -184,7 +184,6 @@ public class SqlService
         command.Parameters.AddWithValue("@tableName", tableName);
         
         await using SqlDataReader reader = await command.ExecuteReaderAsync();
-        List<SqlResultSetColumn> cols = [];
 
         int colPosShrink = 0;
         string? sqlScript = null;

@@ -2,6 +2,8 @@ using System.Collections.Concurrent;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Formatting;
+using Microsoft.CodeAnalysis.Options;
 using Microsoft.CodeAnalysis.Text;
 
 namespace Minfold;
@@ -19,6 +21,7 @@ public class DaoClassRewriter : CSharpSyntaxRewriter
     private readonly string? identityColumnId, identityColumnType;
     private readonly bool generateGetWhereId;
     private readonly ConcurrentDictionary<string, string>? customUsings;
+    private bool codeTouched = false;
     
     /// <summary>
     /// Updates a dao
@@ -125,7 +128,7 @@ public class DaoClassRewriter : CSharpSyntaxRewriter
             }
         }
 
-        if (!solved)
+        if (!solved && generateGetWhereId)
         {
             MethodDeclarationSyntax? getWhereIdDecl = GetWhereIdMethodDecl();
 
@@ -134,8 +137,8 @@ public class DaoClassRewriter : CSharpSyntaxRewriter
                 node = node.WithMembers(node.Members.Insert(0, getWhereIdDecl));
             }
         }
-        
-        NewCode = node.NormalizeWhitespace().ToFullString();
+     
+        NewCode = node.ToFullString();
         ClassRewritten = true;
         
         return node;

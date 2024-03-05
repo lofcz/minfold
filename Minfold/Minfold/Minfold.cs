@@ -60,6 +60,11 @@ public class Minfold
 
     public SqlTable? MapModelToTable(string modelName)
     {
+        if (modelName.ToLowerInvariant() is "documentprototypefragmentdata")
+        {
+            int z = 0;
+        }
+        
         const bool enableSlowChecks = false;
         
         string modelInvariant = modelName.ToLowerInvariant();
@@ -189,7 +194,7 @@ public class Minfold
         return source;
     }
     
-    public static ColumnDefaultVal? ColumnDefaultValue(string colName, SqlTableColumn? column)
+    public static ColumnDefaultVal? ColumnDefaultValue(string colName, SqlTableColumn? column, string? key)
     {
         if (column is null)
         {
@@ -198,18 +203,32 @@ public class Minfold
         
         if (colName is "datecreated")
         {
-            return new ColumnDefaultVal(column, "DateTime.Now", ColumnDefaultValTypes.Value);
+            return new ColumnDefaultVal(column, "DateTime.Now", ColumnDefaultValTypes.Value, key);
         }
             
-        return new ColumnDefaultVal(column, null, ColumnDefaultValTypes.UserAssigned);
+        return new ColumnDefaultVal(column, null, ColumnDefaultValTypes.UserAssigned, key);
     }
 
-    public static string? DumpCtor(string className, SqlTable table, CsPropertiesInfo? properties)
+    public static string? DumpCtor(string className, SqlTable table, CsPropertiesInfo? properties, ConstructorDeclarationSyntax? existingCtor)
     {
         List<KeyValuePair<string, SqlTableColumn>> ctorCols = table.Columns.Where(x => x.Value is { IsComputed: false, IsIdentity: false }).ToList();
-        List<ColumnDefaultVal> ctorDeclCols = ctorCols.OrderBy(x => x.Value.OrdinalPosition).Select(x => ColumnDefaultValue(x.Key, x.Value)).ToList();
+        List<ColumnDefaultVal> ctorDeclCols = ctorCols.OrderBy(x => x.Value.OrdinalPosition).Select(x => ColumnDefaultValue(x.Key, x.Value, ColumnName(x.Value))).ToList();
         List<ColumnDefaultVal> ctorAssignCols = ctorDeclCols.Where(x => x.Type is not ColumnDefaultValTypes.Value).ToList();
+        
+        // respect existing parameter order, append preferentially
+        if (existingCtor is not null)
+        {
+            List<string> preferredPositions = CtorAnalyzer.GetParameterNames(existingCtor);
+            List<ColumnDefaultVal> reorderedAssignCols = preferredPositions.Select(preferredPosition => ctorAssignCols.FirstOrDefault(x => string.Equals(x.Key, preferredPosition, StringComparison.InvariantCultureIgnoreCase))).OfType<ColumnDefaultVal>().ToList();
 
+            foreach (ColumnDefaultVal ctorAssignCol in ctorAssignCols.Where(ctorAssignCol => !reorderedAssignCols.Any(x => string.Equals(x.Column.Name, ctorAssignCol.Column.Name, StringComparison.InvariantCultureIgnoreCase))))
+            {
+                reorderedAssignCols.Add(ctorAssignCol);
+            }
+
+            ctorAssignCols = reorderedAssignCols;
+        }
+        
         if (ctorCols.Count > 0)
         {
             return $$"""
@@ -321,8 +340,8 @@ public class Minfold
             
             foreach (SqlForeignKey fk in column.ForeignKeys)
             {
-                string tblName = fk.RefTable.FirstCharToUpper() ?? string.Empty;
-                string colName = fk.RefColumn.FirstCharToUpper() ?? string.Empty;
+                string tblName = fk.RefTable.FirstCharToUpper();
+                string colName = fk.RefColumn.FirstCharToUpper();
                 
                 if (tablesMap.TryGetValue(fk.RefTable.ToLowerInvariant(), out CsModelSource? tbl))
                 {
@@ -373,24 +392,35 @@ public class Minfold
 
             return sb.ToString();
         }
-            
-        string str = $$"""
+
+        StringBuilder usingsSb = new StringBuilder();
+        usingsSb.Append("""
         using System;
         using System.Collections.Generic;
         using System.ComponentModel.DataAnnotations;
         using System.ComponentModel.DataAnnotations.Schema;
         using Microsoft.EntityFrameworkCore;
-        using Minfold.Annotations;           
+        using Minfold.Annotations;
+        """);
+
+        if (cfg.UniformPk)
+        {
+            usingsSb.AppendLine();
+            usingsSb.AppendLine($"using {Source.ProjectNamespace}.Dao.Base;");
+        }
+            
+        string str = $$"""
+        {{usingsSb}}
                        
         namespace {{Source.ProjectNamespace}};
-        public class {{className}}
+        public class {{className}}{{(cfg.UniformPk ? " : IEntity" : string.Empty)}}
         {
         {{DumpProperties()}}
             public {{className}}()
             {
         
             }
-        {{DumpCtor(className, table, null)}}
+        {{DumpCtor(className, table, null, null)}}
         }
         """;
         
@@ -482,11 +512,6 @@ public class Minfold
         {
             daoName = $"{model.Name}Dao";
             modelName = model.Name;
-        }
-
-        if (modelName.ToLowerInvariant() is "userrole")
-        {
-            int z = 0;
         }
         
         string path = $"{Source.ProjectPath}\\Dao\\Dao\\{daoName}.cs";
@@ -588,7 +613,7 @@ public class Minfold
         
         FileScopedNamespaceDeclarationSyntax? namespaceNode = (FileScopedNamespaceDeclarationSyntax?)tree.ModelRootNode.ChildNodes().FirstOrDefault(x => x is FileScopedNamespaceDeclarationSyntax fileNamespaceDecl);
         
-        ModelClassRewriter modelClassVisitor = new ModelClassRewriter(modelName, table, tablesMap, tree, namespaceNode is null, (CompilationUnitSyntax)tree.ModelRootNode);
+        ModelClassRewriter modelClassVisitor = new ModelClassRewriter(modelName, table, tablesMap, tree, namespaceNode is null, (CompilationUnitSyntax)tree.ModelRootNode, cfg);
         CompilationUnitSyntax newNode = (CompilationUnitSyntax)modelClassVisitor.Visit(tree.ModelRootNode);
 
         string? modelNamespace = namespaceNode?.Name.ToFullString() ?? modelClassVisitor.Namespace;
@@ -664,7 +689,7 @@ public class Minfold
 
         List<CsDbSetDecl> decls = [];
         
-        foreach (KeyValuePair<string, CsDbSetDecl> pair in Source.DbSetMap)
+        foreach (KeyValuePair<string, CsDbSetDecl> pair in Source.DbSetMap.OrderBy(x => x.Key))
         {
             if (!synchronizedModelFiles.TryGetValue(pair.Key, out bool synchronized) || !synchronized)
             {
