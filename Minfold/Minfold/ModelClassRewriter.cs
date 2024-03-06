@@ -566,7 +566,7 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
             foreach (SqlForeignKey fk in patchProp.ForeignKeys)
             {
                 string modelName = fk.RefTable;
-                string columnName = fk.RefColumn.FirstCharToUpper() ?? string.Empty;
+                string columnName = fk.RefColumn.FirstCharToUpper();
                 bool selfRef = false;
                 
                 if (tablesMap.TryGetValue(fk.RefTable.ToLowerInvariant(), out CsModelSource? str))

@@ -836,7 +836,7 @@ public class Minfold
                     daoRootNode = await daoAst.GetRootAsync(token);
                 }
                 
-                CsModelSource model = new CsModelSource(className, path, daoPath, modelGen.Code, daoCode, modelAst, daoAst, "", source.Value, root, daoRootNode, modelGen.Columns, new ModelInfo { Namespace = modelGen.Namespace });
+                CsModelSource model = new CsModelSource(className, path, daoPath, modelGen.Code, daoCode, modelAst, daoAst, string.Empty, source.Value, root, daoRootNode, modelGen.Columns, new ModelInfo { Namespace = modelGen.Namespace });
                 ClassRewriteResult daoUpdateResult = await UpdateOrCreateDao(model, source.Value, tablesToModelsMap, ModelClassRewriter.Properties(classNode, source.Value, (CompilationUnitSyntax)root));
             
                 if (daoUpdateResult.Rewritten && daoPath is not null)
@@ -911,8 +911,6 @@ public class Minfold
                 File.Delete(existingFilePath);
             }
         }
-        
-        int z = 0;
         
         return new MinfoldResult(null);
     }
