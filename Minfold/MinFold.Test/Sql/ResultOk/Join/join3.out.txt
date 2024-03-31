@@ -1,0 +1,8 @@
+public class Model0
+{
+    public int Int1 { get; set; }
+    public DateTime? Dt1 { get; set; }
+    public string Name { get; set; }
+    public int Int2 { get; set; }
+    public DateTime? Dt2 { get; set; }
+}

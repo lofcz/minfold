@@ -27,7 +27,7 @@ public static class MinfoldSql
         options ??= MinfoldSqlOptions.Default;
         
         using StringReader rdr = new StringReader(sqlQuery);
-        TSql160Parser parser = new TSql160Parser(true, SqlEngineType.All);
+        TSql160Parser parser = new TSql160Parser(true, SqlEngineType.Standalone);
         TSqlFragment tree = parser.Parse(rdr, out IList<ParseError>? errors);
 
         if (errors?.Count > 0)
