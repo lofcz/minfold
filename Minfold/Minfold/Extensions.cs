@@ -1,6 +1,8 @@
 
+using System.Collections;
 using System.Data;
 using System.Diagnostics.CodeAnalysis;
+using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -192,6 +194,35 @@ public static class Extensions
     public static int ImplicitConversionPriority(this SqlDbTypeExt type)
     {
         return SqlDbTypeExtHelpers.SqlDbTypeExtPrecedence.GetValueOrDefault(type, 0);
+    }
+    
+    public static string? ToCsv(this IEnumerable? elems, string separator = ",")
+    {
+        if (elems == null)
+        {
+            return null;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        
+        foreach (object elem in elems)
+        {
+            if (sb.Length > 0)
+            {
+                sb.Append(separator);
+            }
+
+            if (elem is Enum)
+            {
+                sb.Append((int)elem);
+            }
+            else
+            {
+                sb.Append(elem);   
+            }
+        }
+
+        return sb.ToString();
     }
     
     public static string? FirstCharToLower(this string? str)

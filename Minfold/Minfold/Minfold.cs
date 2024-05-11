@@ -60,15 +60,9 @@ public class Minfold
 
     public SqlTable? MapModelToTable(string modelName)
     {
-        if (modelName.ToLowerInvariant() is "documentprototypefragmentdata")
-        {
-            int z = 0;
-        }
-        
         const bool enableSlowChecks = false;
-        
         string modelInvariant = modelName.ToLowerInvariant();
-    
+
         // 1. same name
         if (SqlSchema.TryGetValue(modelInvariant, out SqlTable? tbl))
         {
@@ -76,11 +70,11 @@ public class Minfold
         }
     
         // 2. rules
-        string? plural = modelInvariant.Plural();
+        string? plural = modelName.Plural();
 
         if (plural is not null)
         {
-            if (SqlSchema.TryGetValue($"{plural}", out SqlTable? tbl3))
+            if (SqlSchema.TryGetValue(plural.ToLowerInvariant(), out SqlTable? tbl3))
             {
                 return tbl3;
             }
@@ -184,7 +178,7 @@ public class Minfold
             string modelCode = await File.ReadAllTextAsync(path, token);
             SyntaxTree modelAst = CSharpSyntaxTree.ParseText(modelCode, cancellationToken: token);
             SyntaxNode root = await modelAst.GetRootAsync(token);
-            CsModelSource modelSource = new CsModelSource(fn, path, daoPath, modelCode, daoCode, modelAst, daoAst, "", MapModelToTable(fn.ToLowerInvariant()), root, daoRootNode, [], new ModelInfo());
+            CsModelSource modelSource = new CsModelSource(fn, path, daoPath, modelCode, daoCode, modelAst, daoAst, "", MapModelToTable(fn), root, daoRootNode, [], new ModelInfo());
             PropertyMapper modelClassVisitor = new PropertyMapper(fn, modelSource);
             modelClassVisitor.Visit(root);
             source.Models.TryAdd(fn.ToLowerInvariant(), modelSource);

@@ -27,7 +27,7 @@ public static class MinfoldSql
         options ??= MinfoldSqlOptions.Default;
         
         using StringReader rdr = new StringReader(sqlQuery);
-        TSql160Parser parser = new TSql160Parser(true, SqlEngineType.Standalone);
+        TSql160Parser parser = new TSql160Parser(true, SqlEngineType.All);
         TSqlFragment tree = parser.Parse(rdr, out IList<ParseError>? errors);
 
         if (errors?.Count > 0)
@@ -35,7 +35,7 @@ public static class MinfoldSql
             return new MinfoldSqlResult { ResultType = MinfoldSqlResultTypes.SqlSyntaxInvalid, ParseErrors = errors };
         }
         
-        MyVisitor checker = new MyVisitor();
+        SqlModelVisitor checker = new SqlModelVisitor();
         tree.Accept(checker);
         
         SqlService service = new SqlService(connString);
@@ -55,11 +55,106 @@ public static class MinfoldSql
             }
         }
         
+        // 1. extract unique referenced tables
+        HashSet<string> referencedTablesSet = [];
+
+        void AddReferencesInScope(Scope scope)
+        {
+            foreach (ScopeIdentifier ident in scope.Identifiers)
+            {
+                if (ident.Scope is not null)
+                {
+                    AddReferencesInScope(ident.Scope);
+                }
+                
+                if (ident.Table is not null)
+                {
+                    referencedTablesSet.Add(ident.Table.ToLowerInvariant());
+                }
+            }
+        }
+
+        void AddReferencesInQuery(Query query)
+        {
+            AddReferencesInScope(query.Scope);
+
+            foreach (Query child in query.Childs)
+            {
+                AddReferencesInQuery(child);
+            }
+        }
+        
+        AddReferencesInQuery(checker.Query);
+        
+        // 2. get column count for each referenced table to compute * offsets later
+        ConcurrentDictionary<string, int> referencedTables = [];
+        
+        if (referencedTablesSet.Count > 0)
+        {
+            ResultOrException<ConcurrentDictionary<string, int>> referencedTablesMap = await service.GetTableColumnCount(database, referencedTablesSet.ToList());
+
+            if (referencedTablesMap.Result is not null)
+            {
+                referencedTables = referencedTablesMap.Result;
+            }
+        }
+        
+        // 3. get select columns for each query via sp_describe_first_result_set
         foreach (Query qry in checker.Query.Childs)
         {
             await MapQuery(qry);
         }
         
+        // 4. recursively resolve each ScopeIdentifier into a finite amount of columns
+        void SolveQuery(Query query)
+        {
+            SolveScope(query.Scope);
+
+            foreach (Query child in query.Childs)
+            {
+                SolveQuery(child);
+            }
+        }
+
+        void SolveScope(Scope scope)
+        {
+            scope.GetColumnCount(referencedTables);
+        }
+        
+        foreach (Query child in checker.Query.Childs)
+        {
+            SolveQuery(child);
+        }
+        
+        // 5. assign column count to each scope
+        
+        
+        // 6. assign offset to each query
+        void OffsetQuery(Query query)
+        {
+            for (int i = 0; i < query.Scope.SelectColumns.Count; i++)
+            {
+                SelectColumn col = query.Scope.SelectColumns[i];
+                Query? colQuery = query.Childs.FirstOrDefault(x => x.ColumnIndex == i + 1);
+
+                if (colQuery is not null)
+                {
+                    colQuery.ColumnOffset = col.Columns;
+                }
+            }
+            
+            foreach (Query child in query.Childs)
+            {
+                OffsetQuery(child);
+            }
+        }
+        
+        foreach (Query x in checker.Query.Childs)
+        {
+            OffsetQuery(x);
+        }
+        
+        // 7. dump results
         DumpedQuery dumpedQuery = checker.Query.Dump();
         
         if (!options.IgnoreAmbiguities)
@@ -117,6 +212,8 @@ class ScopeIdentifier
     public string? Table { get; set; }
     public Scope? Scope { get; set; }
     public bool Nullable { get; set; }
+    public int Columns { get; set; }
+    public bool ColumnsSolved { get; set; }
 
     public ScopeIdentifier(string? ident, string table, bool nullable)
     {
@@ -130,6 +227,30 @@ class ScopeIdentifier
         Ident = ident;
         Scope = scope;
         Nullable = nullable;
+    }
+
+    public int GetColumnCount(ConcurrentDictionary<string, int> referencedTables)
+    {
+        if (ColumnsSolved)
+        {
+            return Columns;
+        }
+        
+        if (Table is null && Scope is not null)
+        {
+            ColumnsSolved = true;
+            Columns = Scope.GetColumnCount(referencedTables);
+        }
+        else if (Table is not null)
+        {
+            if (referencedTables.TryGetValue(Table.ToLowerInvariant(), out int colCount))
+            {
+                Columns = colCount;
+            }
+        }
+
+        ColumnsSolved = true;
+        return Columns;
     }
 }
 
@@ -150,6 +271,9 @@ class SelectColumn
     public SqlDbTypeExt? OutputLiteralType => TransformedLiteralType ?? LiteralType;
     public List<SelectColumn>? OneOfColumns { get; set; }
     public bool Nullable { get; set; }
+    public int Columns { get; set; }
+    public bool ColumnsSolved { get; set; }
+    public string? Identifier { get; set; }
     
     public SelectColumn(SelectColumnTypes type, string? alias, string? columnName, string? columnSource, TSqlFragment fragment, Scope scope)
     {
@@ -185,6 +309,40 @@ class SelectColumn
         Alias = alias;
         Fragment = fragment;
         OneOfColumns = oneOfColumns;
+    }
+
+    public int GetColumns(ConcurrentDictionary<string, int> referencedTables)
+    {
+        if (ColumnsSolved)
+        {
+            return Columns;
+        }
+        
+        ColumnsSolved = true;
+
+        if (Type is SelectColumnTypes.StarDelayed)
+        {
+            if (Identifier is not null)
+            {
+                ScopeIdentifier? ident = Scope?.GetIdentifier(Identifier);
+                Columns = ident?.GetColumnCount(referencedTables) ?? 0;
+            }
+            else
+            {
+                int? col = Scope?.GetColumnCount(referencedTables);
+                Columns = col ?? 1;
+            }
+        }
+        else if (Type is SelectColumnTypes.TableColumn or SelectColumnTypes.LiteralValue or SelectColumnTypes.Query)
+        {
+            Columns = 1;
+        }
+        else if (Type is SelectColumnTypes.OneOf)
+        {
+            
+        }
+        
+        return Columns;
     }
 }
 
@@ -307,8 +465,11 @@ class Query
     public string? TransformedSql { get; set; }
     public QuerySpecification QuerySpecification { get; set; }
     public int ColumnIndex { get; set; }
+    public int ColumnOffset { get; set; }
+    public int ColumnIndexComputed => ColumnOffset > 0 ? ColumnOffset : ColumnIndex;
     public List<SqlResultSetColumn>? SelectColumns { get; set; }
     public Dictionary<string, int> StarsOffset { get; set; } = [];
+    public Scope Scope { get; set; } = new Scope(null, null);
 
     public DumpedQuery Dump(int modelIndex = 0, int jsonDepth = 0)
     {
@@ -352,7 +513,7 @@ class Query
             
             foreach (SqlResultSetColumn col in SelectColumns.OrderBy(x => x.Position))
             {
-                Query? child = Childs.FirstOrDefault(x => x.ColumnIndex == col.Position);
+                Query? child = Childs.FirstOrDefault(x => x.ColumnIndexComputed == col.Position);
 
                 if (child is not null)
                 {
@@ -390,6 +551,9 @@ class Scope
     public List<SelectColumn> SelectColumns { get; set; } = [];
     public JsonForClauseOptions JsonOptions { get; set; }
     public bool DependenciesGathered { get; set; }
+    public List<Scope> Childs { get; set; } = [];
+    public int Columns { get; set; }
+    public bool ColumnsSolved { get; set; }
 
     public ScopeIdentifier? GetIdentifier(string ident)
     {
@@ -400,6 +564,28 @@ class Scope
     {
         Parent = parent;
         Select = qs;
+    }
+
+    public int GetColumnCount(ConcurrentDictionary<string, int> referencedTables)
+    {
+        if (ColumnsSolved)
+        {
+            return Columns;
+        }
+
+        foreach (ScopeIdentifier identifier in Identifiers)
+        {
+            identifier.GetColumnCount(referencedTables);
+        }
+
+        foreach (SelectColumn col in SelectColumns)
+        {
+            col.GetColumns(referencedTables);
+        }
+
+        Columns = SelectColumns.Sum(x => x.Columns);
+        ColumnsSolved = true;
+        return Columns;
     }
 
     public HashSet<string> GatherDependencies()
@@ -1011,395 +1197,5 @@ class MappedModel
         sb.AppendLine("}");
         dumpedModel.Code = sb.ToString();
         return dumpedModel;
-    }
-}
-
-class MyVisitor : TSqlFragmentVisitor
-{
-    public Scope Root { get; set; }
-    public Query Query { get; set; }
-
-    void SolveQuery(Scope scope, QuerySpecification qs, Query parent, int columnIndex, Dictionary<string, int> starsOffset)
-    {
-        Query query = new Query()
-        {
-            QuerySpecification = qs,
-            ColumnIndex = columnIndex,
-            StarsOffset = starsOffset
-        };
-
-        StringBuilder sb = new StringBuilder();
-        
-        if (qs.ForClause is JsonForClause jsonForClause)
-        {
-            int start = qs.ForClause.LastTokenIndex - qs.ForClause.FragmentLength;
-            int len = qs.ForClause.FragmentLength;
-
-            for (int i = qs.FirstTokenIndex; i < qs.LastTokenIndex; i++)
-            {
-                if (i >= start && i <= start + len)
-                {
-                    continue;
-                }
-
-                sb.Append(qs.ScriptTokenStream[i].Text);
-            }
-
-            query.TransformedSql = sb.ToString();
-            
-            foreach (JsonForClauseOption option in jsonForClause.Options)
-            {
-                query.JsonOptions |= option.OptionKind;
-            }
-        }
-
-        sb.Clear();
-        
-        for (int i = qs.FirstTokenIndex; i <= qs.LastTokenIndex; i++)
-        {
-            sb.Append(qs.ScriptTokenStream[i].Text);
-        }
-        
-        query.RawSql = sb.ToString();
-
-        void SolveSelectScalarCol(ScalarExpression scalarExpression, SelectScalarExpression? selScalar, int cIndex, Dictionary<string, int> starsOffset)
-        {
-            switch (scalarExpression)
-            {
-                case ScalarSubquery { QueryExpression: QuerySpecification subquerySpec }:
-                {
-                    SolveQuery(scope, subquerySpec, query, cIndex, starsOffset);
-                    break;
-                }      
-                case ParenthesisExpression parentExpr:
-                {
-                    SolveSelectScalarCol(parentExpr.Expression, null, cIndex, starsOffset);
-                    break;
-                }
-                case SearchedCaseExpression searchedCaseExpression:
-                {
-                    foreach (SearchedWhenClause whenBranch in searchedCaseExpression.WhenClauses)
-                    {
-                        SolveSelectScalarCol(whenBranch.ThenExpression, null, cIndex, starsOffset);
-                    }
-
-                    SolveSelectScalarCol(searchedCaseExpression.ElseExpression, null, cIndex, starsOffset);
-                    break;
-                }
-            }
-        }
-
-        Dictionary<string, int> so = [];
-        Scope localScope = new Scope(null, qs);
-
-        if (qs.FromClause?.TableReferences is not null)
-        {
-            foreach (TableReference source in qs.FromClause.TableReferences)
-            {
-                string? tbl, alias;
-
-                switch (source)
-                {
-                    case NamedTableReference namedFrom:
-                        tbl = namedFrom.SchemaObject.BaseIdentifier.Value;
-                        alias = namedFrom.Alias?.Value;
-
-                        localScope.Identifiers.Add(new ScopeIdentifier(alias ?? tbl, tbl, false));
-                        break;
-                    case QueryDerivedTable queryDerivedTable:
-                    {
-                        alias = queryDerivedTable.Alias?.Value;
-
-                        if (queryDerivedTable.QueryExpression is QuerySpecification fromQs)
-                        {
-                            localScope.Identifiers.Add(new ScopeIdentifier(alias, SolveSelect(fromQs, scope), false));
-                        }
-
-                        break;
-                    }
-                    case QualifiedJoin qualifiedJoin:
-                    {
-                        bool nullable = qualifiedJoin.QualifiedJoinType is QualifiedJoinType.LeftOuter or QualifiedJoinType.FullOuter;
-
-                        if (qualifiedJoin.FirstTableReference is NamedTableReference namedJoin1)
-                        {
-                            alias = namedJoin1.Alias?.Value;
-                            localScope.Identifiers.Add(new ScopeIdentifier(alias, namedJoin1.SchemaObject.BaseIdentifier.Value, nullable));
-                        }
-                        
-                        if (qualifiedJoin.SecondTableReference is NamedTableReference namedJoin2)
-                        {
-                            alias = namedJoin2.Alias?.Value;
-                            localScope.Identifiers.Add(new ScopeIdentifier(alias, namedJoin2.SchemaObject.BaseIdentifier.Value, nullable));
-                        }
-
-                        break;
-                    }
-                }
-            }   
-        }
-        
-        for (int i = 0; i < qs.SelectElements.Count; i++)
-        {
-            switch (qs.SelectElements[i])
-            {
-                case SelectStarExpression selStar:
-                {
-                    if (selStar.Qualifier is null || selStar.Qualifier.Identifiers.Count is 1 && selStar.Qualifier.Identifiers[0].Value is "*")
-                    {
-                        
-                    }
-                    else
-                    {
-                        
-                    }
-                    
-                    break;
-                }
-                case SelectScalarExpression selScalar:
-                {
-                    SolveSelectScalarCol(selScalar.Expression, selScalar, i, []);
-                    so.Clear();
-                    break;
-                }
-            }
-        }
-
-        parent.Childs.Add(query);
-    }
-    
-    Scope SolveSelect(QuerySpecification qs, Scope parent)
-    {
-        Scope localScope = new Scope(parent, qs);
-        
-        if (qs.ForClause is JsonForClause jsonForClause)
-        {
-            foreach (JsonForClauseOption option in jsonForClause.Options)
-            {
-                localScope.JsonOptions |= option.OptionKind;
-            }
-        }
-
-        if (qs.FromClause?.TableReferences is not null)
-        {
-            foreach (TableReference fromTbl in qs.FromClause.TableReferences)
-            {
-                string? tbl, alias;
-
-                switch (fromTbl)
-                {
-                    case NamedTableReference namedFrom:
-                        tbl = namedFrom.SchemaObject.BaseIdentifier.Value;
-                        alias = namedFrom.Alias?.Value;
-
-                        localScope.Identifiers.Add(new ScopeIdentifier(alias ?? tbl, tbl, false));
-                        break;
-                    case QueryDerivedTable queryDerivedTable:
-                    {
-                        alias = queryDerivedTable.Alias?.Value;
-
-                        if (queryDerivedTable.QueryExpression is QuerySpecification fromQs)
-                        {
-                            localScope.Identifiers.Add(new ScopeIdentifier(alias, SolveSelect(fromQs, localScope), false));
-                        }
-
-                        break;
-                    }
-                    case QualifiedJoin qualifiedJoin:
-                    {
-                        bool nullable = qualifiedJoin.QualifiedJoinType is QualifiedJoinType.LeftOuter or QualifiedJoinType.FullOuter;
-
-                        if (qualifiedJoin.FirstTableReference is NamedTableReference namedJoin1)
-                        {
-                            alias = namedJoin1.Alias?.Value;
-                            localScope.Identifiers.Add(new ScopeIdentifier(alias, namedJoin1.SchemaObject.BaseIdentifier.Value, nullable));
-                        }
-                        
-                        if (qualifiedJoin.SecondTableReference is NamedTableReference namedJoin2)
-                        {
-                            alias = namedJoin2.Alias?.Value;
-                            localScope.Identifiers.Add(new ScopeIdentifier(alias, namedJoin2.SchemaObject.BaseIdentifier.Value, nullable));
-                        }
-
-                        break;
-                    }
-                }
-            }
-        }
-        
-        SelectColumn? SolveSelectScalarCol(ScalarExpression scalarExpression, SelectScalarExpression? selScalar)
-        {
-            string? alias = selScalar?.ColumnName?.Value;
-            
-            switch (scalarExpression)
-            {
-                case ColumnReferenceExpression colRef when colRef.MultiPartIdentifier.Identifiers.Count is 1:
-                {
-                    return new SelectColumn(SelectColumnTypes.TableColumn, alias, colRef.MultiPartIdentifier.Identifiers[0].Value, null, null, colRef);
-                }
-                case ColumnReferenceExpression colRef when colRef.MultiPartIdentifier.Identifiers.Count is 2:
-                {
-                    return new SelectColumn(SelectColumnTypes.TableColumn, alias, colRef.MultiPartIdentifier.Identifiers[1].Value, colRef.MultiPartIdentifier.Identifiers[0].Value, null, colRef);
-                }
-                case ScalarSubquery { QueryExpression: QuerySpecification subquerySpec }:
-                {
-                    return new SelectColumn(SelectColumnTypes.Query, SolveSelect(subquerySpec, localScope), alias, scalarExpression);
-                }
-                case Literal literal:
-                {
-                    return new SelectColumn(SelectColumnTypes.LiteralValue, alias, null, null, literal.Value, literal)
-                    {
-                        LiteralType = literal.ToCsType()
-                    };
-                }
-                case CastCall castCall:
-                {
-                    SelectColumn? castQuery = SolveSelectCol(castCall.Parameter);
-
-                    if (castQuery is not null)
-                    {
-                        if (castCall.DataType is SqlDataTypeReference dataTypeReference)
-                        {
-                            castQuery.TransformedType = SelectColumnTypes.LiteralValue;
-                            castQuery.TransformedLiteralType = dataTypeReference.SqlDataTypeOption.ToCsType();
-                            castQuery.Nullable = true;
-                        }
-
-                        castQuery.Alias = alias;
-                    }
-                    
-                    return castQuery;
-                }
-                case SearchedCaseExpression searchedCaseExpression:
-                {
-                    List<SelectColumn> accu = [];
-                    
-                    foreach (SearchedWhenClause whenClause in searchedCaseExpression.WhenClauses)
-                    {
-                        SelectColumn? branchSelect = SolveSelectScalarCol(whenClause.ThenExpression, null);
-
-                        if (branchSelect is not null)
-                        {
-                            accu.Add(branchSelect);
-                        }
-                    }
-
-                    SelectColumn? elseSelect = SolveSelectScalarCol(searchedCaseExpression.ElseExpression, null);
-                    
-                    if (elseSelect is not null)
-                    {
-                        accu.Add(elseSelect);
-                    }
-
-                    foreach (SelectColumn x in accu)
-                    {
-                        if (x.Type is not SelectColumnTypes.LiteralValue)
-                        {
-                            return new SelectColumn(SelectColumnTypes.OneOf, alias, searchedCaseExpression, accu);
-                        }
-                    }
-                    
-                    return null;
-                }
-                case BinaryExpression binExpr:
-                {
-                    SelectColumn? lhs = SolveSelectCol(binExpr.FirstExpression);
-                    SelectColumn? rhs = SolveSelectCol(binExpr.SecondExpression);
-
-                    if (lhs?.Type is SelectColumnTypes.LiteralValue && rhs?.Type is SelectColumnTypes.LiteralValue && lhs.LiteralType is not null && rhs.LiteralType is not null)
-                    {
-                        int lhsP = lhs.LiteralType.Value.ImplicitConversionPriority();
-                        int rhsP = rhs.LiteralType.Value.ImplicitConversionPriority();
-
-                        return new SelectColumn(SelectColumnTypes.LiteralValue, alias, null, null, null, binExpr)
-                        {
-                            LiteralType = lhsP > rhsP ? lhs.LiteralType.Value : rhs.LiteralType.Value,
-                            Nullable = lhs.LiteralType is SqlDbTypeExt.Null || rhs.LiteralType is SqlDbTypeExt.Null || lhs.Nullable || rhs.Nullable
-                        };
-                    }
-                    
-                    int z = 0;
-                    
-                    return null;
-                }
-                case ParenthesisExpression parentExpr:
-                {
-                    return SolveSelectCol(parentExpr.Expression);
-                }
-                case FunctionCall functionCall:
-                {
-                    if (BuiltInFunctions.Common.TryGetValue(functionCall.FunctionName.Value, out Nullable<SqlDbTypeExt>? builtInType))
-                    {
-                        if (builtInType.Value is not (SqlDbTypeExt.ArgMixed or SqlDbTypeExt.Unknown or SqlDbTypeExt.CsIdentifier))
-                        {
-                            return new SelectColumn(SelectColumnTypes.LiteralValue, alias, null, null, null, functionCall)
-                            {
-                                LiteralType = builtInType.Value,
-                                Nullable = builtInType.CanBeNull
-                            };   
-                        }
-                    }
-                    
-                    return null;
-                }
-                default:
-                    return null;
-            }
-        }
-        
-        SelectColumn? SolveSelectCol(TSqlFragment selCol)
-        {
-            switch (selCol)
-            {
-                case SelectStarExpression selStar:
-                {
-                    return new SelectColumn(SelectColumnTypes.StarDelayed, null, null, null, selStar, localScope);
-                }
-                case ScalarExpression scalarExpression:
-                {
-                    return SolveSelectScalarCol(scalarExpression, null);
-                }
-                case SelectScalarExpression selScalar:
-                {
-                    return SolveSelectScalarCol(selScalar.Expression, selScalar);
-                }
-            }
-
-            return null;
-        }
-        
-        foreach (SelectElement selCol in qs.SelectElements)
-        {
-            SelectColumn? column = SolveSelectCol(selCol);
-
-            if (column is not null)
-            {
-                localScope.SelectColumns.Add(column);
-            }
-        }
-
-        return localScope;
-    }
-    
-    public override void Visit(TSqlStatement node)
-    {
-        if (node is SelectStatement select)
-        {
-            Scope root = new Scope(null, null);
-            Query rootQuery = new Query();
-            
-            if (select.QueryExpression is QuerySpecification qs)
-            {
-                SolveQuery(root, qs, rootQuery, 0, []);
-                root = SolveSelect(qs, root);
-            }
-            
-            Root = root;
-            Query = rootQuery;
-            
-            int z = 0;
-        }
-
-        base.Visit(node);
     }
 }

@@ -195,6 +195,29 @@ public class SqlService
 
         return new ResultOrException<string>(sqlScript ?? string.Empty, null);
     }
+
+    static string SqlColumnCount(string dbName, List<string> tables)
+    {
+        StringBuilder sb = new StringBuilder();
+        
+        for (int i = 0; i < tables.Count; i++)
+        {
+            if (i == tables.Count - 1)
+            {
+                sb.Append($"@t{i}");
+                continue;
+            }
+            
+            sb.Append($"@t{i}, ");
+        }
+        
+        return $$"""
+                 select TABLE_NAME as tbl, count(c.COLUMN_NAME) as cols
+                 from information_schema.columns c
+                 where c.TABLE_CATALOG = '{{dbName}}' and c.TABLE_SCHEMA = 'dbo' and c.TABLE_NAME in ({{sb}})
+                 group by c.TABLE_NAME
+                 """;
+    }
     
     static string SqlSchema(string dbName, List<string>? tables)
     {
@@ -299,6 +322,37 @@ public class SqlService
         }
 
         return new ResultOrException<List<SqlResultSetColumn>>(cols.OrderBy(x => x.Position).ToList(), null);
+    }
+
+    public async Task<ResultOrException<ConcurrentDictionary<string, int>>> GetTableColumnCount(string dbName, List<string> tables)
+    {
+        await using SqlConnectionResult conn = await Connect();
+
+        if (conn.Exception is not null)
+        {
+            return new ResultOrException<ConcurrentDictionary<string, int>>(null, conn.Exception);
+        }
+        
+        SqlCommand command = new(SqlColumnCount(dbName, tables), conn.Connection);
+        
+        for (int i = 0; i < tables.Count; i++)
+        {
+            command.Parameters.AddWithValue($"t{i}", tables[i]);
+        }
+        
+        await using SqlDataReader reader = await command.ExecuteReaderAsync();
+
+        ConcurrentDictionary<string, int> tablesMap = new();
+        
+        while (reader.Read())
+        {
+            string tableName = reader.GetString(0);
+            int columns = reader.GetInt32(1);
+           
+            tablesMap.TryAdd(tableName.ToLowerInvariant(), columns);
+        }
+
+        return new ResultOrException<ConcurrentDictionary<string, int>>(tablesMap, null);
     }
 
     public async Task<ResultOrException<ConcurrentDictionary<string, SqlTable>>> GetSchema(string dbName, List<string>? selectTables = null)

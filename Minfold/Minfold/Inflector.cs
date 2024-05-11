@@ -109,7 +109,7 @@ public static class Inflector
 
         List<string> uncountablesWords =
         [
-            "accommodation","advertising","air","aid","advice","anger","art","assistance","bread","business","butter","calm","cash","chaos","cheese","childhood",
+            "access","accommodation","advertising","air","aid","advice","anger","art","assistance","bread","business","butter","calm","cash","chaos","cheese","childhood",
             "clothing","coffee","content","corruption","courage","currency","damage","danger","darkness","data","determination","economics","education","electricity",
             "employment","energy","entertainment","enthusiasm","equipment","evidence","failure","fame","fire","flour","food","freedom","friendship","fuel","furniture",
             "fun","genetics","gold","grammar","guilt","hair","happiness","harm","health","heat","help","homework","honesty","hospitality","housework","humour",
@@ -138,7 +138,8 @@ public static class Inflector
     }
 
     /// <summary>
-    /// Splits input string into two parts - prefix and the last word, expects PascalCaseString
+    /// Splits input string into two parts - prefix and the last word, expects PascalCaseString or kebab_case_string.
+    /// Effective delimiters are underscores and uppercase characters.
     /// </summary>
     /// <param name="input"></param>
     /// <returns></returns>
@@ -149,7 +150,7 @@ public static class Inflector
         
         for (int i = input.Length - 1; i > 0; i--)
         {
-            if (char.IsUpper(input[i]))
+            if (char.IsUpper(input[i]) || input[i] == '_')
             {
                 if (!firstUpperFound)
                 {

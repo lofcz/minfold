@@ -1,0 +1,17 @@
+public class Model0
+{
+    public int Int1 { get; set; }
+    public DateTime? Dt1 { get; set; }
+    public string Name { get; set; }
+    public int Int2 { get; set; }
+    public DateTime? Dt2 { get; set; }
+    public Json<List<Model1>?>? IqInner { get; set; }
+}
+
+[SqlJson]
+public class Model1
+{
+    public int Int1 { get; set; }
+    public DateTime? Dt1 { get; set; }
+    public string Name { get; set; }
+}

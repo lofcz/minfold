@@ -1,0 +1,10 @@
+select iq.*, (
+	select *
+	from Table1 t11
+	for json path
+) as iqInner
+from (
+	select t1.*, t2.int2, t2.dt2
+	from Table1 t1
+	join Table2 t2 on t2.int2 = t1.int1
+) iq
