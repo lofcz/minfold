@@ -130,8 +130,9 @@ class MinfoldToolWindowFactory : ToolWindowFactory, DumbAware {
 
         private fun SetPlaceholder(field: JBTextField, placeholder: String, key: String) {
             field.putClientProperty(
-                    TextComponentEmptyText.STATUS_VISIBLE_FUNCTION,
-                    com.intellij.util.BooleanFunction<JBTextField> { x -> x.text.isEmpty() })
+                TextComponentEmptyText.STATUS_VISIBLE_FUNCTION,
+                { x: JBTextField -> x.text.isEmpty() }
+            )
 
             field.emptyText.text = placeholder
             inputMap[key] = field
@@ -139,8 +140,9 @@ class MinfoldToolWindowFactory : ToolWindowFactory, DumbAware {
 
         private fun SetPlaceholder(field: SmartPwInput, placeholder: String, key: String) {
             field.putClientProperty(
-                    TextComponentEmptyText.STATUS_VISIBLE_FUNCTION,
-                    com.intellij.util.BooleanFunction<JBTextField> { x -> x.text.isEmpty() })
+                TextComponentEmptyText.STATUS_VISIBLE_FUNCTION,
+                { x: JBTextField -> x.text.isEmpty() }
+            )
 
             field.emptyText.text = placeholder
             pwMap[key] = field
