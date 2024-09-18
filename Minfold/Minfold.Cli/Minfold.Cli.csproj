@@ -13,8 +13,8 @@
         <Description>Minfold a strongly opinionated EF Core scaffolder</Description>
         <Copyright>MIT</Copyright>
         <RepositoryUrl>https://github.com/lofcz/minfold</RepositoryUrl>
-        <Version>1.0.8</Version>
-        <PackageReleaseNotes>finished IEntity based projects support</PackageReleaseNotes>
+        <Version>1.0.9</Version>
+        <PackageReleaseNotes>improved inflection engine</PackageReleaseNotes>
     </PropertyGroup>
 
     <ItemGroup>
