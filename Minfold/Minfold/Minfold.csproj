@@ -8,15 +8,15 @@
 
     <ItemGroup>
       <PackageReference Include="Lofcz.Forks.OpenDBDiff.SqlServer.Schema" Version="1.0.2" />
-      <PackageReference Include="Microsoft.Build" Version="17.9.5" ExcludeAssets="runtime" />
-      <PackageReference Include="Microsoft.Build.Framework" Version="17.9.5" ExcludeAssets="runtime" />
+      <PackageReference Include="Microsoft.Build" Version="17.12.6" ExcludeAssets="runtime" />
+      <PackageReference Include="Microsoft.Build.Framework" Version="17.12.6" ExcludeAssets="runtime" />
       <PackageReference Include="Microsoft.Build.Locator" Version="1.7.8" />
-      <PackageReference Include="Microsoft.Build.Utilities.Core" Version="17.9.5" ExcludeAssets="runtime" />
-      <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.9.2" />
-      <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.9.2" />
-      <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="4.9.2" />
-      <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.0" />
-      <PackageReference Include="Microsoft.SqlServer.TransactSql.ScriptDom" Version="161.9109.0" />
+      <PackageReference Include="Microsoft.Build.Utilities.Core" Version="17.12.6" ExcludeAssets="runtime" />
+      <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.12.0-3.final" />
+      <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.12.0-3.final" />
+      <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="4.12.0-3.final" />
+      <PackageReference Include="Microsoft.Data.SqlClient" Version="6.0.0-preview2.24304.8" />
+      <PackageReference Include="Microsoft.SqlServer.TransactSql.ScriptDom" Version="161.9142.1" />
     </ItemGroup>
 
 </Project>

@@ -1,14 +1,8 @@
 using System.Collections.Concurrent;
-using System.Collections.Immutable;
-using System.Diagnostics;
 using System.Text;
-using Microsoft.Build.Locator;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
-using Microsoft.CodeAnalysis.MSBuild;
-using Microsoft.CodeAnalysis.Rename;
-using Microsoft.CodeAnalysis.Text;
 using Microsoft.SqlServer.TransactSql.ScriptDom;
 
 namespace Minfold;
@@ -85,13 +79,24 @@ public class Minfold
         {
             return tbl2;
         }
+        
+        // 4. rules without uncountable forms
+        plural = modelName.Plural(false);
+
+        if (plural is not null)
+        {
+            if (SqlSchema.TryGetValue(plural.ToLowerInvariant(), out SqlTable? tbl4))
+            {
+                return tbl4;
+            }
+        }
     
-        // 4. generic suffixes
+        // 5. generic suffixes
         foreach (string suffix in Inflector.Suffixes)
         {
-            if (SqlSchema.TryGetValue($"{modelInvariant}{suffix}", out SqlTable? tbl3))
+            if (SqlSchema.TryGetValue($"{modelInvariant}{suffix}", out SqlTable? tbl5))
             {
-                return tbl3;
+                return tbl5;
             }
         }
         
@@ -178,7 +183,7 @@ public class Minfold
             string modelCode = await File.ReadAllTextAsync(path, token);
             SyntaxTree modelAst = CSharpSyntaxTree.ParseText(modelCode, cancellationToken: token);
             SyntaxNode root = await modelAst.GetRootAsync(token);
-            CsModelSource modelSource = new CsModelSource(fn, path, daoPath, modelCode, daoCode, modelAst, daoAst, "", MapModelToTable(fn), root, daoRootNode, [], new ModelInfo());
+            CsModelSource modelSource = new CsModelSource(fn, path, daoPath, modelCode, daoCode, modelAst, daoAst, string.Empty, MapModelToTable(fn), root, daoRootNode, [], new ModelInfo());
             PropertyMapper modelClassVisitor = new PropertyMapper(fn, modelSource);
             modelClassVisitor.Visit(root);
             source.Models.TryAdd(fn.ToLowerInvariant(), modelSource);
@@ -439,9 +444,9 @@ public class Minfold
         """;
     }
 
-    private static readonly HashSet<string> defaultUsings = ["System.Collections", "System.Data", "System.Text", "Dapper", "System.Threading.Tasks", "Microsoft.EntityFrameworkCore", "Microsoft.Extensions.Primitives"];
+    private static readonly HashSet<string> DefaultUsings = ["System.Collections", "System.Data", "System.Text", "Dapper", "System.Threading.Tasks", "Microsoft.EntityFrameworkCore", "Microsoft.Extensions.Primitives"];
     
-    string GenerateDaoCode(string daoName, string modelName, string modelNamespace, string dbSetMappedTableName, string? identityColumnId, string? identityColumnType, bool generateGetWhereId, ConcurrentDictionary<string, string>? customUsings)
+    private string GenerateDaoCode(string daoName, string modelName, string modelNamespace, string dbSetMappedTableName, string? identityColumnId, string? identityColumnType, bool generateGetWhereId, ConcurrentDictionary<string, string>? customUsings)
     {
         string usings = $"""
           using System.Collections;
@@ -459,7 +464,7 @@ public class Minfold
         {
             HashSet<string> cpy =
             [
-                ..defaultUsings,
+                ..DefaultUsings,
                 $"{Source.ProjectNamespace}.Dao.Base",
                 $"{modelNamespace}"
             ];
@@ -569,7 +574,7 @@ public class Minfold
             declaredUsings.Add(usingDir.NamespaceOrType.ToFullString().Trim());
         }
 
-        addUsings.AddRange(from defaultUsing in defaultUsings where !declaredUsings.Contains(defaultUsing) select SyntaxFactory.UsingDirective(SyntaxFactory.IdentifierName(defaultUsing)));
+        addUsings.AddRange(from defaultUsing in DefaultUsings where !declaredUsings.Contains(defaultUsing) select SyntaxFactory.UsingDirective(SyntaxFactory.IdentifierName(defaultUsing)));
 
         if (!declaredUsings.Contains($"{Source.ProjectNamespace}.Dao.Base"))
         {
@@ -595,7 +600,22 @@ public class Minfold
 
         return new ClassRewriteResult(daoClassVisitor.ClassRewritten, newNode.NormalizeWhitespace().ToFullString());
     }
-    
+
+    public ModelClassRewriteResult ProbeUpdateModel(CsModelSource tree, SqlTable table, ConcurrentDictionary<string, CsModelSource> tablesMap)
+    {
+        string modelName = table.Name;
+        
+        if (tablesMap.TryGetValue(table.Name.ToLowerInvariant(), out CsModelSource? model))
+        {
+            modelName = model.Name;
+        }
+        
+        ModelClassProbeRewriter modelClassVisitor = new ModelClassProbeRewriter(modelName);
+        CompilationUnitSyntax newNode = (CompilationUnitSyntax)modelClassVisitor.Visit(tree.ModelRootNode);
+
+        return new ModelClassRewriteResult(modelClassVisitor.ClassCanBeRewritten, string.Empty, null);
+    }
+
     public async Task<ModelClassRewriteResult> UpdateModel(CsModelSource tree, SqlTable table, ConcurrentDictionary<string, CsModelSource> tablesMap)
     {
         string modelName = table.Name;
@@ -660,8 +680,8 @@ public class Minfold
 
         string content = await File.ReadAllTextAsync(path);
         
-        SyntaxTree dbsetAst = CSharpSyntaxTree.ParseText(content);
-        SyntaxNode root = await dbsetAst.GetRootAsync();
+        SyntaxTree dbSetAst = CSharpSyntaxTree.ParseText(content);
+        SyntaxNode root = await dbSetAst.GetRootAsync();
         
         DbSetMapper dbSetMapper = new DbSetMapper("Db", Source.DbSetMap);
         dbSetMapper.Visit(root);
@@ -683,7 +703,7 @@ public class Minfold
 
         List<CsDbSetDecl> decls = [];
         
-        foreach (KeyValuePair<string, CsDbSetDecl> pair in Source.DbSetMap.OrderBy(x => x.Key))
+        foreach (KeyValuePair<string, CsDbSetDecl> pair in Source.DbSetMap.OrderBy(x => x.Key, StringComparer.InvariantCulture))
         {
             if (!synchronizedModelFiles.TryGetValue(pair.Key, out bool synchronized) || !synchronized)
             {
@@ -693,8 +713,8 @@ public class Minfold
             decls.Add(pair.Value);
         }
         
-        DbSetClassRewritter dbSetRewritter = new DbSetClassRewritter("Db", decls, modelsToTablesMap, modelProperties);
-        CompilationUnitSyntax newNode = (CompilationUnitSyntax)dbSetRewritter.Visit(root);
+        DbSetClassRewritter dbSetRewriter = new DbSetClassRewritter("Db", decls, modelsToTablesMap, modelProperties);
+        CompilationUnitSyntax newNode = (CompilationUnitSyntax)dbSetRewriter.Visit(root);
 
         await File.WriteAllTextAsync(path, newNode.NormalizeWhitespace().ToFullString());
     }
@@ -739,7 +759,8 @@ public class Minfold
         MapTables();
         InferCapabilites();
 
-        await Parallel.ForEachAsync(Source.Models, async (source, token) =>
+        // 1. scan which models can be updated but don't update them yet
+        await Parallel.ForEachAsync(Source.Models, /*new ParallelOptions { MaxDegreeOfParallelism = 1 },*/ async (source, token) =>
         {
             if (string.IsNullOrWhiteSpace(source.Value.Name))
             {
@@ -758,28 +779,16 @@ public class Minfold
                 return;
             }
             
-            ModelClassRewriteResult modelUpdateResult = await UpdateModel(source.Value, mappedTable, tablesToModelsMap);
+            ModelClassRewriteResult canBeUpdated = ProbeUpdateModel(source.Value, mappedTable, tablesToModelsMap);
 
-            if (modelUpdateResult.Properties is not null)
+            if (canBeUpdated.Rewritten)
             {
-                modelProperties.TryAdd(source.Key, modelUpdateResult.Properties);   
-            }
-            
-            if (modelUpdateResult.Rewritten)
-            {
-                await File.WriteAllTextAsync(source.Value.ModelPath, modelUpdateResult.Text, token);
                 synchronizedTables.TryAdd(mappedTable.Name.ToLowerInvariant(), true);
                 synchronizedModelFiles.TryAdd(source.Key, true);
             }
-            
-            ClassRewriteResult daoUpdateResult = await UpdateOrCreateDao(source.Value, mappedTable, tablesToModelsMap, modelUpdateResult.Properties);
-            
-            if (daoUpdateResult.Rewritten && source.Value.DaoPath is not null)
-            {
-                await File.WriteAllTextAsync(source.Value.DaoPath, daoUpdateResult.Text, token);
-            }
         });
-        
+
+        // 2. synthetize all missing models
         await Parallel.ForEachAsync(SqlSchema, async (source, token) =>
         {
             if (synchronizedTables.TryGetValue(source.Key, out bool synchronized) && synchronized)
@@ -837,6 +846,48 @@ public class Minfold
                 {
                     await File.WriteAllTextAsync(daoPath, daoUpdateResult.Text, token);
                 }   
+            }
+        });
+        
+        // 3. finally, update models which can be updated - we now have complete information for solving FKs
+        await Parallel.ForEachAsync(Source.Models, /*new ParallelOptions { MaxDegreeOfParallelism = 1},*/ async (source, token) =>
+        {
+            if (string.IsNullOrWhiteSpace(source.Value.Name))
+            {
+                return;
+            }
+
+            SqlTable? mappedTable = null;
+
+            if (modelsToTablesMap.TryGetValue(source.Key, out SqlTable? tbl))
+            {
+                mappedTable = tbl;
+            }
+
+            if (mappedTable is null)
+            {
+                return;
+            }
+            
+            ModelClassRewriteResult modelUpdateResult = await UpdateModel(source.Value, mappedTable, tablesToModelsMap);
+
+            if (modelUpdateResult.Properties is not null)
+            {
+                modelProperties.TryAdd(source.Key, modelUpdateResult.Properties);   
+            }
+            
+            if (modelUpdateResult.Rewritten)
+            {
+                await File.WriteAllTextAsync(source.Value.ModelPath, modelUpdateResult.Text, token);
+                synchronizedTables.TryAdd(mappedTable.Name.ToLowerInvariant(), true);
+                synchronizedModelFiles.TryAdd(source.Key, true);
+            }
+            
+            ClassRewriteResult daoUpdateResult = await UpdateOrCreateDao(source.Value, mappedTable, tablesToModelsMap, modelUpdateResult.Properties);
+            
+            if (daoUpdateResult.Rewritten && source.Value.DaoPath is not null)
+            {
+                await File.WriteAllTextAsync(source.Value.DaoPath, daoUpdateResult.Text, token);
             }
         });
 

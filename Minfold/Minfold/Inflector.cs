@@ -17,17 +17,17 @@ public static class Inflector
     private static readonly List<Rule> singulars = [];
     private static readonly HashSet<string> uncountables = [];
     
-    public static string? Plural(this string str)
+    public static string? Plural(this string str, bool applyUncountables = true)
     {
         Tuple<string, string> parts = str.SplitPascal();
-        string? result = ApplyRules(plurals, parts.Item2);
+        string? result = ApplyRules(plurals, parts.Item2, applyUncountables);
         return result is not null ? $"{parts.Item1}{result}" : null;
     }
 
     public static string? Singular(this string str)
     {
         Tuple<string, string> parts = str.SplitPascal();
-        string? result = ApplyRules(singulars, parts.Item2);
+        string? result = ApplyRules(singulars, parts.Item2, true);
         return result is not null ? $"{parts.Item1}{result}" : null;
     }
     
@@ -170,7 +170,7 @@ public static class Inflector
 
     private class Rule(string pattern, string replacement)
     {
-        private readonly Regex regex = new(pattern, RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        private readonly Regex regex = new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         public string? Apply(string word)
         {
@@ -207,11 +207,11 @@ public static class Inflector
         singulars.Add(new Rule(rule, replacement));
     }
     
-    private static string? ApplyRules(IReadOnlyList<Rule> rules, string word)
+    private static string? ApplyRules(IReadOnlyList<Rule> rules, string word, bool applyUncountables)
     {
         string? result = word;
 
-        if (!uncountables.Contains(word.ToLowerInvariant()))
+        if (!applyUncountables || !uncountables.Contains(word.ToLowerInvariant()))
         {
             for (int i = rules.Count - 1; i >= 0; i--)
             {

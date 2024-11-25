@@ -7,6 +7,28 @@ using Microsoft.CodeAnalysis.FindSymbols;
 using Microsoft.CodeAnalysis.Text;
 namespace Minfold;
 
+public class ModelClassProbeRewriter : CSharpSyntaxRewriter
+{
+    public bool ClassCanBeRewritten { get; set; }
+    private readonly string expectedClassName;
+    
+    public ModelClassProbeRewriter(string expectedClassName)
+    {
+        this.expectedClassName = expectedClassName;
+    }
+
+    public override SyntaxNode VisitClassDeclaration(ClassDeclarationSyntax node)
+    {
+        if (node.Identifier.ValueText != expectedClassName)
+        {
+            return node;
+        }
+        
+        ClassCanBeRewritten = true;
+        return node;
+    }
+}
+
 public class ModelClassRewriter : CSharpSyntaxRewriter
 {
     public string NewCode { get; set; }
@@ -584,23 +606,20 @@ public class ModelClassRewriter : CSharpSyntaxRewriter
                         columnName = existingColumn;
                     }
                 }
-
+                
                 ExpressionSyntax expr = selfRef ? SyntaxFactory.IdentifierName(SyntaxFactory.Identifier(columnName)) : SyntaxFactory.MemberAccessExpression(SyntaxKind.SimpleMemberAccessExpression, SyntaxFactory.IdentifierName(modelName), SyntaxFactory.IdentifierName(columnName));
                 
-                keptAttrLists.Add(SyntaxFactory.AttributeList(SyntaxFactory.SeparatedList(new []
-                {
-                    SyntaxFactory.Attribute(SyntaxFactory.IdentifierName("ReferenceKey"), SyntaxFactory.AttributeArgumentList(SyntaxFactory.SeparatedList(new []
-                    {
+                keptAttrLists.Add(SyntaxFactory.AttributeList(SyntaxFactory.SeparatedList([
+                    SyntaxFactory.Attribute(SyntaxFactory.IdentifierName("ReferenceKey"), SyntaxFactory.AttributeArgumentList(SyntaxFactory.SeparatedList([
                         SyntaxFactory.AttributeArgument(SyntaxFactory.TypeOfExpression(SyntaxFactory.IdentifierName(modelName))),
                         SyntaxFactory.AttributeArgument(SyntaxFactory.InvocationExpression(SyntaxFactory.IdentifierName(SyntaxFactory.Identifier("nameof")), SyntaxFactory.ArgumentList(
-                            SyntaxFactory.SeparatedList(new []
-                            {
+                            SyntaxFactory.SeparatedList([
                                 SyntaxFactory.Argument(expr)
-                            })
+                            ])
                         ))),
                         SyntaxFactory.AttributeArgument(SyntaxFactory.LiteralExpression(fk.NotEnforced ? SyntaxKind.FalseLiteralExpression : SyntaxKind.TrueLiteralExpression))
-                    })))
-                })));
+                    ])))
+                ])));
             }
 
             PropertyDeclarationSyntax propDeclNew = propDecl.WithAttributeLists(SyntaxFactory.List(keptAttrLists));

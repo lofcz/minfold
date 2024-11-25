@@ -34,7 +34,7 @@ public class DbSetClassRewritter : CSharpSyntaxRewriter
         sb.AppendLine("protected override void OnModelCreating(ModelBuilder modelBuilder)");
         sb.AppendLine("{");
 
-        foreach (CsDbSetDecl set in sets.OrderBy(x => x.ModelName))
+        foreach (CsDbSetDecl set in sets.OrderBy(x => x.ModelName, StringComparer.InvariantCulture))
         {
             if (!modelsToTablesMap.TryGetValue(set.ModelName.ToLowerInvariant(), out SqlTable? tbl))
             {
