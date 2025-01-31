@@ -46,7 +46,6 @@ dependencies {
 
     intellijPlatform {
         rider("2024.3")
-        plugin("com.intellij.javafx", "1.0.4")
     }
 
     implementation("de.undercouch:bson4jackson:2.15.1")

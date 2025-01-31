@@ -1,12 +1,11 @@
 <idea-plugin>
     <id>com.github.lofcz.minfold</id>
     <name>Minfold</name>
-    <version>1.0.4</version>
+    <version>1.0.5</version>
     <description>Official Minfold intergration for Rider.</description>
     <vendor email="stagl@wattlescript.org">Matěj "lofcz" Štágl</vendor>
 
     <depends>com.intellij.modules.rider</depends>
-    <depends>com.intellij.javafx</depends>
     <idea-version since-build="233" until-build="243.*" />
 
     <actions>
@@ -18,15 +17,9 @@
             <add-to-group group-id="ToolsMenu" anchor="last"/>
             <add-to-group group-id="ToolbarRunGroup" anchor="after" relative-to-action="RunnerActions"/>
         </action>
-        <action id="com.example.ToggleReoAction" class="com.lofcz.minfold.ToggleReoAction"
-                text="Toggle Reo Prefix" description="Add 'reo.' prefix to search">
-            <add-to-group group-id="FindMenuGroup" anchor="last"/>
-        </action>
     </actions>
 
     <extensions defaultExtensionNs="com.intellij">
-        <searchEverywhereContributor implementation="com.lofcz.minfold.CustomSearchContributor$Factory"/>
-        <findInProjectSearchEngine implementation="com.lofcz.minfold.ReoFindInProjectSearchEngine"/>
         <notificationGroup id="lofcz.notification.test" displayType="BALLOON" />
         <toolWindow id="Minfold" secondary="true" icon="AllIcons.Toolwindows.WebToolWindow" anchor="right" factoryClass="com.lofcz.minfold.MinfoldToolWindowFactory"/>
     </extensions>
