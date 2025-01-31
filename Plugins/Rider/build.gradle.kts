@@ -1,5 +1,14 @@
 import org.jetbrains.changelog.Changelog
 import org.jetbrains.changelog.markdownToHTML
+import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
+import org.jetbrains.intellij.platform.gradle.extensions.intellijPlatform
+
+tasks.wrapper {
+    gradleVersion = "8.12.1"
+    // You can either download the binary-only version of Gradle (BIN) or
+    // the full version (with sources and documentation) of Gradle (ALL)
+    distributionType = Wrapper.DistributionType.ALL
+}
 
 fun properties(key: String) = providers.gradleProperty(key)
 fun environment(key: String) = providers.environmentVariable(key)
@@ -8,7 +17,7 @@ plugins {
     id("java") // Java support
     id("me.filippov.gradle.jvm.wrapper") version "0.14.0"
     id("org.jetbrains.changelog") version "2.2.1"
-    id("org.jetbrains.intellij") version "1.17.4"
+    id("org.jetbrains.intellij.platform") version "2.2.1"
     id("org.jetbrains.kotlin.jvm") version "2.0.20"
 }
 
@@ -19,30 +28,35 @@ val sinceBuildVersion = properties("pluginSinceBuild")
 // Configure project's dependencies
 repositories {
     mavenCentral()
+
+    intellijPlatform {
+        defaultRepositories()
+    }
+}
+
+intellijPlatform {
+    pluginVerification {
+        ides {
+            ide(IntelliJPlatformType.Rider, "2024.3")
+        }
+    }
 }
 
 dependencies {
+
+    intellijPlatform {
+        rider("2024.3")
+        plugin("com.intellij.javafx", "1.0.4")
+    }
+
     implementation("de.undercouch:bson4jackson:2.15.1")
     implementation("com.github.pgreze:kotlin-process:1.5")
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.18.+")
     testImplementation("org.testng:testng:7.10.2")
 }
 
-// Set the JVM language level used to build the project. Use Java 11 for 2020.3+, and Java 17 for 2022.2+.
-kotlin {
-    jvmToolchain(17)
-}
 
 val riderSdkVersion: String by project
-
-// Configure Gradle IntelliJ Plugin – read more: https://plugins.jetbrains.com/docs/intellij/tools-gradle-intellij-plugin.html
-intellij {
-    type.set("RD")
-    version.set(riderSdkVersion)
-    downloadSources.set(false)
-    updateSinceUntilBuild.set(false)
-    plugins.set(listOf("com.intellij.javafx:1.0.4"))
-}
 
 // Configure Gradle Changelog Plugin – read more: https://github.com/JetBrains/gradle-changelog-plugin
 changelog {
@@ -71,7 +85,8 @@ tasks {
     }
 
     patchPluginXml {
-        version.set("${project.version}")
+        // version.set("${project.version}")
         sinceBuild.set(sinceBuildVersion)
+        untilBuild.set(provider { null })
     }
 }
