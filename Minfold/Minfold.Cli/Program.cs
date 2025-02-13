@@ -18,23 +18,23 @@ class Program
         string? codePath = null;
         bool decorateStd = false;
         
-        Option<string> databaseOption = new("--database", "The database to scaffold")
+        Option<string> databaseOption = new Option<string>("--database", "The database to scaffold")
         {
             IsRequired = true
         };
         
-        Option<bool?> decorateStreamsOption = new("--stdDecorate", "Decorates stdout,stderror and each output line with a prefix info|warn|err");
+        Option<bool?> decorateStreamsOption = new Option<bool?>("--stdDecorate", "Decorates stdout,stderror and each output line with a prefix info|warn|err");
         
         databaseOption.AddAlias("-d");
         
-        Option<string> connStringOption = new("--connection", "The database connection string")
+        Option<string> connStringOption = new Option<string>("--connection", "The database connection string")
         {
             IsRequired = true
         };
         
         connStringOption.AddAlias("-c");
         
-        Option<string> codePathOption = new("--codePath", "Path to a folder containing a single .csproj project. If multiple projects are present, use --project to choose one.")
+        Option<string> codePathOption = new Option<string>("--codePath", "Path to a folder containing a single .csproj project. If multiple projects are present, use --project to choose one.")
         {
             IsRequired = true
         };

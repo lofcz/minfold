@@ -7,8 +7,8 @@
     </PropertyGroup>
 
     <ItemGroup>
-      <PackageReference Include="Microsoft.SqlServer.Management.SqlParser" Version="172.1.1" />
-      <PackageReference Include="SqlParserCS" Version="0.5.7" />
+      <PackageReference Include="Microsoft.SqlServer.Management.SqlParser" Version="172.14.1" />
+      <PackageReference Include="SqlParserCS" Version="0.6.3" />
     </ItemGroup>
 
 </Project>

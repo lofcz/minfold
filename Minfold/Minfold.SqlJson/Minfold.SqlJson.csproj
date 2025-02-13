@@ -12,8 +12,8 @@
           <PrivateAssets>all</PrivateAssets>
           <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
         </PackageReference>
-        <PackageReference Include="Microsoft.SqlServer.TransactSql.ScriptDom" Version="170.3.0" />
-        <PackageReference Include="SqlParserCS" Version="0.6.0" />
+        <PackageReference Include="Microsoft.SqlServer.TransactSql.ScriptDom" Version="170.23.0" />
+        <PackageReference Include="SqlParserCS" Version="0.6.3" />
       </ItemGroup>
 
       <ItemGroup>

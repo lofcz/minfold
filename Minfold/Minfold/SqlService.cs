@@ -1,8 +1,6 @@
 ﻿using System.Collections.Concurrent;
 using System.Data;
 using System.Text;
-using Microsoft.CodeAnalysis.CSharp;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.Data.SqlClient;
 namespace Minfold;
 
@@ -83,7 +81,6 @@ public class SqlService
                      				CASE WHEN dc.[definition] IS NOT NULL THEN ' CONSTRAINT ' + quotename(dc.name) + ' DEFAULT' + dc.[definition] ELSE '' END +
                      				CASE WHEN ck.[definition] IS NOT NULL THEN ' CONSTRAINT ' + quotename(ck.name) + ' CHECK' + ck.[definition] ELSE '' END +
                      				CASE WHEN ic.is_identity = 1 THEN ' IDENTITY(' + CAST(ISNULL(ic.seed_value, '0') AS VARCHAR) + ',' + CAST(ISNULL(ic.increment_value, '1') AS VARCHAR) + ')' ELSE '' END
-                     
                      		END + CHAR(13)
                          FROM sys.columns c WITH (NOWAIT)
                          JOIN sys.types tp WITH (NOWAIT) ON c.user_type_id = tp.user_type_id
@@ -91,8 +88,15 @@ public class SqlService
                          LEFT JOIN sys.identity_columns ic WITH (NOWAIT) ON c.is_identity = 1 AND c.[object_id] = ic.[object_id] AND c.column_id = ic.column_id
                      	LEFT JOIN sys.default_constraints dc WITH (NOWAIT) ON c.default_object_id != 0 AND c.[object_id] = dc.parent_object_id AND c.column_id = dc.parent_column_id
                      	LEFT JOIN sys.check_constraints ck WITH (NOWAIT) ON c.[object_id] = ck.parent_object_id AND c.column_id = ck.parent_column_id
+                        LEFT JOIN (
+                         SELECT ic.column_id, ic.object_id
+                         FROM sys.index_columns ic
+                         JOIN sys.indexes i ON ic.object_id = i.object_id 
+                             AND ic.index_id = i.index_id
+                         WHERE i.is_primary_key = 1
+                        ) pk ON c.object_id = pk.object_id AND c.column_id = pk.column_id
                          WHERE c.[object_id] = @object_id
-                         ORDER BY c.column_id
+                         ORDER BY CASE WHEN pk.column_id IS NOT NULL THEN 0 ELSE 1 END, c.name COLLATE Latin1_General_CI_AS
                          FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, CHAR(9) + ' ')
                          + ISNULL((SELECT CHAR(9) + ', CONSTRAINT [' + k.name + '] PRIMARY KEY (' +
                                          (SELECT STUFF((
@@ -102,6 +106,7 @@ public class SqlService
                                               WHERE ic.is_included_column = 0
                                                   AND ic.[object_id] = k.parent_object_id
                                                   AND ic.index_id = k.unique_index_id
+                                              ORDER BY c.name COLLATE Latin1_General_CI_AS
                                               FOR XML PATH(N''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, ''))
                                  + ')' + CHAR(13)
                                  FROM sys.key_constraints k WITH (NOWAIT)
@@ -119,6 +124,7 @@ public class SqlService
                                      SELECT ', [' + k.cname + ']'
                                      FROM fk_columns k
                                      WHERE k.constraint_object_id = fk.[object_id]
+                                     ORDER BY k.cname COLLATE Latin1_General_CI_AS
                                      FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '')
                                     + ')' +
                                    ' REFERENCES [' + SCHEMA_NAME(ro.[schema_id]) + '].[' + ro.name + '] ('
@@ -126,6 +132,7 @@ public class SqlService
                                      SELECT ', [' + k.rcname + ']'
                                      FROM fk_columns k
                                      WHERE k.constraint_object_id = fk.[object_id]
+                                     ORDER BY k.rcname COLLATE Latin1_General_CI_AS
                                      FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '')
                                     + ')'
                                  + CASE
@@ -144,6 +151,7 @@ public class SqlService
                              FROM sys.foreign_keys fk WITH (NOWAIT)
                              JOIN sys.objects ro WITH (NOWAIT) ON ro.[object_id] = fk.referenced_object_id
                              WHERE fk.parent_object_id = @object_id
+                             ORDER BY fk.name COLLATE Latin1_General_CI_AS
                              FOR XML PATH(N''), TYPE).value('.', 'NVARCHAR(MAX)')), '')
                          + ISNULL(((SELECT
                               CHAR(13) + 'CREATE' + CASE WHEN i.is_unique = 1 THEN ' UNIQUE' ELSE '' END
@@ -153,6 +161,7 @@ public class SqlService
                                      FROM index_column c
                                      WHERE c.is_included_column = 0
                                          AND c.index_id = i.index_id
+                                     ORDER BY c.name COLLATE Latin1_General_CI_AS
                                      FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '') + ')'
                                      + ISNULL(CHAR(13) + 'INCLUDE (' +
                                          STUFF((
@@ -160,11 +169,13 @@ public class SqlService
                                          FROM index_column c
                                          WHERE c.is_included_column = 1
                                              AND c.index_id = i.index_id
+                                         ORDER BY c.name COLLATE Latin1_General_CI_AS
                                          FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '') + ')', '')  + CHAR(13)
                              FROM sys.indexes i WITH (NOWAIT)
                              WHERE i.[object_id] = @object_id
                                  AND i.is_primary_key = 0
                                  AND i.[type] = 2
+                             ORDER BY i.name COLLATE Latin1_General_CI_AS
                              FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)')
                          ), '')
 
@@ -180,7 +191,7 @@ public class SqlService
             return new ResultOrException<string>(null, conn.Exception);
         }
         
-        SqlCommand command = new(sqlTableCreateScriptSql, conn.Connection);
+        SqlCommand command = new SqlCommand(sqlTableCreateScriptSql, conn.Connection);
         command.Parameters.AddWithValue("@tableName", tableName);
         
         await using SqlDataReader reader = await command.ExecuteReaderAsync();
@@ -238,31 +249,58 @@ public class SqlService
                 sb.Append($"@t{i}, ");
             }
         }
-        
+
         return $$"""
-         use [{{dbName}}]
-         select col.TABLE_NAME, col.COLUMN_NAME, col.ORDINAL_POSITION, col.IS_NULLABLE, col.DATA_TYPE,
-                 columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'IsIdentity') as IS_IDENTITY,
-                 columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'IsComputed') as IS_COMPUTED,
-                isnull(j.pk, cast(0 as bit)) as IS_PRIMARY,
-                 cc.definition as COMPUTED_DEFINITION, case
-         			when DATA_TYPE in('datetime2', 'datetime', 'time', 'timestamp') then DATETIME_PRECISION
-         			when DATA_TYPE in ('varchar', 'nvarchar', 'text', 'binary', 'varbinary', 'blob') then CHARACTER_MAXIMUM_LENGTH
-         			else null
-         		 end as LENGTH_OR_PRECISION
-         from information_schema.COLUMNS col
-         left join sys.computed_columns cc on cc.object_id = object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME) and cc.column_id = columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'ColumnId')
-         left join (select k.COLUMN_NAME, k.TABLE_NAME, iif(k.CONSTRAINT_NAME is null, 0, 1) as pk
-                    from information_schema.TABLE_CONSTRAINTS AS c
-                    join information_schema.KEY_COLUMN_USAGE AS k on c.TABLE_NAME = k.TABLE_NAME
-                 		and c.CONSTRAINT_CATALOG = k.CONSTRAINT_CATALOG
-                 		and c.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA
-                 		and c.CONSTRAINT_NAME = k.CONSTRAINT_NAME
-                    where c.CONSTRAINT_TYPE = 'PRIMARY KEY'
-                   ) j on col.COLUMN_NAME = j.COLUMN_NAME and j.TABLE_NAME = col.TABLE_NAME
-         where TABLE_SCHEMA = 'dbo' {{(tables is null ? string.Empty : $"and col.TABLE_NAME in ({sb})")}}
-         order by col.TABLE_NAME, col.COLUMN_NAME
-         """;
+                   use [{{dbName}}]
+                   select col.TABLE_NAME, 
+                   col.COLUMN_NAME, 
+                   col.ORDINAL_POSITION, 
+                   col.IS_NULLABLE, 
+                   col.DATA_TYPE,
+                   columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'IsIdentity') as IS_IDENTITY,
+                   columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'IsComputed') as IS_COMPUTED,
+                   isnull(j.pk, cast(0 as bit)) as IS_PRIMARY,
+                   cc.definition as COMPUTED_DEFINITION, 
+                   case
+                       when DATA_TYPE in('datetime2', 'datetime', 'time', 'timestamp') then DATETIME_PRECISION
+                       when DATA_TYPE in ('varchar', 'nvarchar', 'text', 'binary', 'varbinary', 'blob') then CHARACTER_MAXIMUM_LENGTH
+                       else null
+                   end as LENGTH_OR_PRECISION
+                    from information_schema.COLUMNS col
+                    inner join sys.objects o 
+                        on object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME) = o.object_id
+                        and o.type = 'U'
+                        and cast(case 
+                            when o.is_ms_shipped = 1 then 1
+                            when exists (
+                                select 1 
+                                from sys.extended_properties 
+                                where major_id = o.object_id 
+                                    and minor_id = 0 
+                                    and class = 1 
+                                    and name = N'microsoft_database_tools_support'
+                            ) then 1
+                            else 0
+                        end as bit) = 0
+                    left join sys.computed_columns cc 
+                        on cc.object_id = object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME) 
+                        and cc.column_id = columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'ColumnId')
+                    left join (
+                        select k.COLUMN_NAME, 
+                               k.TABLE_NAME, 
+                               iif(k.CONSTRAINT_NAME is null, 0, 1) as pk
+                        from information_schema.TABLE_CONSTRAINTS AS c
+                        join information_schema.KEY_COLUMN_USAGE AS k 
+                            on c.TABLE_NAME = k.TABLE_NAME
+                            and c.CONSTRAINT_CATALOG = k.CONSTRAINT_CATALOG
+                            and c.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA
+                            and c.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+                        where c.CONSTRAINT_TYPE = 'PRIMARY KEY'
+                    ) j on col.COLUMN_NAME = j.COLUMN_NAME and j.TABLE_NAME = col.TABLE_NAME
+                    where TABLE_SCHEMA = 'dbo' 
+                        {{(tables is null ? string.Empty : $"and col.TABLE_NAME in ({sb})")}}
+                    order by col.TABLE_NAME, col.COLUMN_NAME
+                 """;
     }
 
     public async Task<ResultOrException<int>> Execute(string sql)
@@ -276,7 +314,7 @@ public class SqlService
 
         try
         {
-            SqlCommand command = new(sql, conn.Connection);
+            SqlCommand command = new SqlCommand(sql, conn.Connection);
             await using SqlDataReader reader = await command.ExecuteReaderAsync();
             return new ResultOrException<int>(1, null);
         }
@@ -295,7 +333,7 @@ public class SqlService
             return new ResultOrException<List<SqlResultSetColumn>>(null, conn.Exception);
         }
         
-        SqlCommand command = new("exec sp_describe_first_result_set @tsql = @sql", conn.Connection);
+        SqlCommand command = new SqlCommand("exec sp_describe_first_result_set @tsql = @sql", conn.Connection);
         command.Parameters.AddWithValue("@sql", selectQuery);
         
         await using SqlDataReader reader = await command.ExecuteReaderAsync();
@@ -333,7 +371,7 @@ public class SqlService
             return new ResultOrException<ConcurrentDictionary<string, int>>(null, conn.Exception);
         }
         
-        SqlCommand command = new(SqlColumnCount(dbName, tables), conn.Connection);
+        SqlCommand command = new SqlCommand(SqlColumnCount(dbName, tables), conn.Connection);
         
         for (int i = 0; i < tables.Count; i++)
         {
@@ -342,7 +380,7 @@ public class SqlService
         
         await using SqlDataReader reader = await command.ExecuteReaderAsync();
 
-        ConcurrentDictionary<string, int> tablesMap = new();
+        ConcurrentDictionary<string, int> tablesMap = new ConcurrentDictionary<string, int>();
         
         while (reader.Read())
         {
@@ -364,7 +402,8 @@ public class SqlService
             return new ResultOrException<ConcurrentDictionary<string, SqlTable>>(null, conn.Exception);
         }
 
-        SqlCommand command = new(SqlSchema(dbName, selectTables), conn.Connection);
+        string sql = SqlSchema(dbName, selectTables);
+        SqlCommand command = new SqlCommand(sql, conn.Connection);
    
         if (selectTables is not null)
         {
@@ -376,7 +415,7 @@ public class SqlService
         
         await using SqlDataReader reader = await command.ExecuteReaderAsync();
 
-        ConcurrentDictionary<string, SqlTable> tables = new();
+        ConcurrentDictionary<string, SqlTable> tables = new ConcurrentDictionary<string, SqlTable>();
         
         while (reader.Read())
         {
@@ -396,7 +435,7 @@ public class SqlService
                 continue;
             }
             
-            SqlTableColumn column = new(columnName, ordinalPosition, isNullable, isIdentity, (SqlDbTypeExt)dt, [], isComputed, isPk, computedSql, lengthOrPrecision);
+            SqlTableColumn column = new SqlTableColumn(columnName, ordinalPosition, isNullable, isIdentity, (SqlDbTypeExt)dt, [], isComputed, isPk, computedSql, lengthOrPrecision);
             
             if (tables.TryGetValue(tableName.ToLowerInvariant(), out SqlTable? table))
             {
@@ -420,7 +459,7 @@ public class SqlService
             return new ResultOrException<Dictionary<string, List<SqlForeignKey>>>(null, conn.Exception);
         }
 
-        SqlCommand command = new()
+        SqlCommand command = new SqlCommand
         {
             Connection = conn.Connection
         };
@@ -443,7 +482,7 @@ public class SqlService
         
         await using SqlDataReader reader = await command.ExecuteReaderAsync();
 
-        Dictionary<string, List<SqlForeignKey>> foreignKeys = new();
+        Dictionary<string, List<SqlForeignKey>> foreignKeys = new Dictionary<string, List<SqlForeignKey>>();
         
         while (reader.Read())
         {

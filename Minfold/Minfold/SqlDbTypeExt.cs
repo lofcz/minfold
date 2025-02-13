@@ -5,7 +5,7 @@ public static class SqlDbTypeExtHelpers
     /// <summary>
     /// From highest to lowest
     /// </summary>
-    public static readonly Dictionary<SqlDbTypeExt, int> SqlDbTypeExtPrecedence = new Dictionary<SqlDbTypeExt, int>()
+    public static readonly Dictionary<SqlDbTypeExt, int> SqlDbTypeExtPrecedence = new Dictionary<SqlDbTypeExt, int>
     {
         {SqlDbTypeExt.Udt, 28},
         {SqlDbTypeExt.Xml, 27},
@@ -35,7 +35,7 @@ public static class SqlDbTypeExtHelpers
         {SqlDbTypeExt.VarChar, 3},
         {SqlDbTypeExt.Char, 2},
         {SqlDbTypeExt.VarBinary, 1},
-        { SqlDbTypeExt.Binary, 0 }
+        {SqlDbTypeExt.Binary, 0}
     };   
 }
 
