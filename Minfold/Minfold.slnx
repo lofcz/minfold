@@ -1,0 +1,8 @@
+<Solution>
+  <Project Path="Minfold.Annotations/Minfold.Annotations.csproj" />
+  <Project Path="Minfold.Cli/Minfold.Cli.csproj" />
+  <Project Path="Minfold.SqlJson/Minfold.SqlJson.csproj" />
+  <Project Path="Minfold.SqlJsonCli/Minfold.SqlJsonCli.csproj" />
+  <Project Path="MinFold.Test/MinFold.Test.csproj" />
+  <Project Path="Minfold/Minfold.csproj" />
+</Solution>

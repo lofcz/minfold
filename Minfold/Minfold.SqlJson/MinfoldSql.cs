@@ -40,50 +40,9 @@ public static class MinfoldSql
         
         SqlService service = new SqlService(connString);
 
-        async Task MapQuery(Query qry)
-        {
-            ResultOrException<List<SqlResultSetColumn>> selectResult = await service.DescribeSelect(database, qry.TransformedSql ?? qry.RawSql);
-
-            if (selectResult.Exception is null)
-            {
-                qry.SelectColumns = selectResult.Result;
-            }
-
-            foreach (Query child in qry.Childs)
-            {
-                await MapQuery(child);
-            }
-        }
-        
         // 1. extract unique referenced tables
         HashSet<string> referencedTablesSet = [];
 
-        void AddReferencesInScope(Scope scope)
-        {
-            foreach (ScopeIdentifier ident in scope.Identifiers)
-            {
-                if (ident.Scope is not null)
-                {
-                    AddReferencesInScope(ident.Scope);
-                }
-                
-                if (ident.Table is not null)
-                {
-                    referencedTablesSet.Add(ident.Table.ToLowerInvariant());
-                }
-            }
-        }
-
-        void AddReferencesInQuery(Query query)
-        {
-            AddReferencesInScope(query.Scope);
-
-            foreach (Query child in query.Childs)
-            {
-                AddReferencesInQuery(child);
-            }
-        }
-        
         AddReferencesInQuery(checker.Query);
         
         // 2. get column count for each referenced table to compute * offsets later
@@ -104,23 +63,8 @@ public static class MinfoldSql
         {
             await MapQuery(qry);
         }
-        
+
         // 4. recursively resolve each ScopeIdentifier into a finite amount of columns
-        void SolveQuery(Query query)
-        {
-            SolveScope(query.Scope);
-
-            foreach (Query child in query.Childs)
-            {
-                SolveQuery(child);
-            }
-        }
-
-        void SolveScope(Scope scope)
-        {
-            scope.GetColumnCount(referencedTables);
-        }
-        
         foreach (Query child in checker.Query.Childs)
         {
             SolveQuery(child);
@@ -128,27 +72,8 @@ public static class MinfoldSql
         
         // 5. assign column count to each scope
         
-        
-        // 6. assign offset to each query
-        void OffsetQuery(Query query)
-        {
-            for (int i = 0; i < query.Scope.SelectColumns.Count; i++)
-            {
-                SelectColumn col = query.Scope.SelectColumns[i];
-                Query? colQuery = query.Childs.FirstOrDefault(x => x.ColumnIndex == i + 1);
 
-                if (colQuery is not null)
-                {
-                    colQuery.ColumnOffset = col.Columns;
-                }
-            }
-            
-            foreach (Query child in query.Childs)
-            {
-                OffsetQuery(child);
-            }
-        }
-        
+        // 6. assign offset to each query
         foreach (Query x in checker.Query.Childs)
         {
             OffsetQuery(x);
@@ -169,6 +94,81 @@ public static class MinfoldSql
         
         string describeCode = dumpedQuery.Flatten();
         return new MinfoldSqlResult { ResultType = MinfoldSqlResultTypes.Ok, GeneratedCode = describeCode };
+        
+        void OffsetQuery(Query query)
+        {
+            for (int i = 0; i < query.Scope.SelectColumns.Count; i++)
+            {
+                SelectColumn col = query.Scope.SelectColumns[i];
+                Query? colQuery = query.Childs.FirstOrDefault(x => x.ColumnIndex == i + 1);
+
+                if (colQuery is not null)
+                {
+                    colQuery.ColumnOffset = col.Columns;
+                }
+            }
+            
+            foreach (Query child in query.Childs)
+            {
+                OffsetQuery(child);
+            }
+        }
+
+        void AddReferencesInScope(Scope scope)
+        {
+            foreach (ScopeIdentifier ident in scope.Identifiers)
+            {
+                if (ident.Scope is not null)
+                {
+                    AddReferencesInScope(ident.Scope);
+                }
+                
+                if (ident.Table is not null)
+                {
+                    referencedTablesSet.Add(ident.Table.ToLowerInvariant());
+                }
+            }
+        }
+
+        void SolveScope(Scope scope)
+        {
+            scope.GetColumnCount(referencedTables);
+        }
+        
+        void SolveQuery(Query query)
+        {
+            SolveScope(query.Scope);
+
+            foreach (Query child in query.Childs)
+            {
+                SolveQuery(child);
+            }
+        }
+
+        void AddReferencesInQuery(Query query)
+        {
+            AddReferencesInScope(query.Scope);
+
+            foreach (Query child in query.Childs)
+            {
+                AddReferencesInQuery(child);
+            }
+        }
+
+        async Task MapQuery(Query qry)
+        {
+            ResultOrException<List<SqlResultSetColumn>> selectResult = await service.DescribeSelect(database, qry.TransformedSql ?? qry.RawSql);
+
+            if (selectResult.Exception is null)
+            {
+                qry.SelectColumns = selectResult.Result;
+            }
+
+            foreach (Query child in qry.Childs)
+            {
+                await MapQuery(child);
+            }
+        }
 
         async Task<MinfoldSqlResult> RunStaticAnalysis()
         {

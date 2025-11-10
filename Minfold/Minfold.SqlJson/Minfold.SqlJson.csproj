@@ -12,6 +12,7 @@
           <PrivateAssets>all</PrivateAssets>
           <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
         </PackageReference>
+        <PackageReference Include="Microsoft.SqlServer.DacFx" Version="170.0.94" />
         <PackageReference Include="Microsoft.SqlServer.TransactSql.ScriptDom" Version="170.23.0" />
         <PackageReference Include="SqlParserCS" Version="0.6.3" />
       </ItemGroup>

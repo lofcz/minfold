@@ -20,7 +20,8 @@ public class Minfold
     public async Task<ResultOrException<ConcurrentDictionary<string, SqlTable>>> AnalyzeSqlSchema(string sqlConn, string dbName)
     {
         SqlService ss = new SqlService(sqlConn);
-        ResultOrException<ConcurrentDictionary<string, SqlTable>> schema = await ss.GetSchema(dbName);
+        List<string> excludeTables = ["__MinfoldMigrations"];
+        ResultOrException<ConcurrentDictionary<string, SqlTable>> schema = await ss.GetSchema(dbName, null, excludeTables);
 
         if (schema.Exception is not null || schema.Result is null)
         {
@@ -747,7 +748,7 @@ public class Minfold
             return new MinfoldResult(new MinfoldError(MinfoldSteps.ConnectDb, $"Failed to connect via connection string: {sqlConn}. Please fix your connection string.", e));
         }
         
-        ResultOrException<ConcurrentDictionary<string, SqlTable>> sqlSchema = await AnalyzeSqlSchema(sqlConn, dbName);
+        ResultOrException<ConcurrentDictionary<string, SqlTable>> sqlSchema = await AnalyzeSqlSchema(sqlConn, dbName); // Already excludes __MinfoldMigrations
 
         if (sqlSchema.Exception is not null)
         {
@@ -817,7 +818,10 @@ public class Minfold
             CsModelGenerateResult modelGen = await GenerateModel(className, source.Value, tablesToModelsMap);
             modelProperties.TryAdd(className.ToLowerInvariant(), modelGen.PropertiesInfo);   
             
-            await File.WriteAllTextAsync(path, modelGen.Code, token);
+            if (!options.DryRun)
+            {
+                await File.WriteAllTextAsync(path, modelGen.Code, token);
+            }
             synchronizedTables.TryAdd(source.Key, true);
             synchronizedModelFiles.TryAdd(className.ToLowerInvariant(), true);
 
@@ -842,7 +846,7 @@ public class Minfold
                 CsModelSource model = new CsModelSource(className, path, daoPath, modelGen.Code, daoCode, modelAst, daoAst, string.Empty, source.Value, root, daoRootNode, modelGen.Columns, new ModelInfo { Namespace = modelGen.Namespace });
                 ClassRewriteResult daoUpdateResult = await UpdateOrCreateDao(model, source.Value, tablesToModelsMap, ModelClassRewriter.Properties(classNode, source.Value, (CompilationUnitSyntax)root));
             
-                if (daoUpdateResult.Rewritten && daoPath is not null)
+                if (daoUpdateResult.Rewritten && daoPath is not null && !options.DryRun)
                 {
                     await File.WriteAllTextAsync(daoPath, daoUpdateResult.Text, token);
                 }   
@@ -878,42 +882,51 @@ public class Minfold
             
             if (modelUpdateResult.Rewritten)
             {
-                await File.WriteAllTextAsync(source.Value.ModelPath, modelUpdateResult.Text, token);
+                if (!options.DryRun)
+                {
+                    await File.WriteAllTextAsync(source.Value.ModelPath, modelUpdateResult.Text, token);
+                }
                 synchronizedTables.TryAdd(mappedTable.Name.ToLowerInvariant(), true);
                 synchronizedModelFiles.TryAdd(source.Key, true);
             }
             
             ClassRewriteResult daoUpdateResult = await UpdateOrCreateDao(source.Value, mappedTable, tablesToModelsMap, modelUpdateResult.Properties);
             
-            if (daoUpdateResult.Rewritten && source.Value.DaoPath is not null)
+            if (daoUpdateResult.Rewritten && source.Value.DaoPath is not null && !options.DryRun)
             {
                 await File.WriteAllTextAsync(source.Value.DaoPath, daoUpdateResult.Text, token);
             }
         });
 
-        Parallel.ForEach(Source.Models, pair =>
+        if (!options.DryRun)
         {
-            if (!synchronizedModelFiles.TryGetValue(pair.Key, out bool synchronizedModel) || !synchronizedModel)
+            Parallel.ForEach(Source.Models, pair =>
             {
-                if (File.Exists(pair.Value.ModelPath))
+                if (!synchronizedModelFiles.TryGetValue(pair.Key, out bool synchronizedModel) || !synchronizedModel)
                 {
-                    File.Delete(pair.Value.ModelPath);   
+                    if (File.Exists(pair.Value.ModelPath))
+                    {
+                        File.Delete(pair.Value.ModelPath);   
+                    }
                 }
-            }
-        });
-        
-        Parallel.ForEach(Source.Daos, pair =>
-        {
-            if (!synchronizedDaoFiles.TryGetValue(pair.Key, out bool synchronizedDao) || !synchronizedDao)
+            });
+            
+            Parallel.ForEach(Source.Daos, pair =>
             {
-                if (File.Exists(pair.Value) && !ProtectedDaos.Contains(pair.Key))
+                if (!synchronizedDaoFiles.TryGetValue(pair.Key, out bool synchronizedDao) || !synchronizedDao)
                 {
-                    File.Delete(pair.Value);   
+                    if (File.Exists(pair.Value) && !ProtectedDaos.Contains(pair.Key))
+                    {
+                        File.Delete(pair.Value);   
+                    }
                 }
-            }
-        });
+            });
+        }
 
-        await UpdateDbSet();
+        if (!options.DryRun)
+        {
+            await UpdateDbSet();
+        }
 
         string schemaPath = $"{Source.ProjectPath}\\Dao\\Schema";
         
@@ -944,16 +957,22 @@ public class Minfold
                 
                 generator.GenerateScript(tree, out string formattedQuery);
                 
-                await File.WriteAllTextAsync($"{schemaPath}\\{pair.Value.Name}.sql", formattedQuery, token);
+                if (!options.DryRun)
+                {
+                    await File.WriteAllTextAsync($"{schemaPath}\\{pair.Value.Name}.sql", formattedQuery, token);
+                }
                 writtenFiles.TryAdd($"{schemaPath}\\{pair.Value.Name}.sql", true);
             }
         });
 
-        foreach (string existingFilePath in existingSchemaFiles)
+        if (!options.DryRun)
         {
-            if (!writtenFiles.TryGetValue(existingFilePath, out bool _))
+            foreach (string existingFilePath in existingSchemaFiles)
             {
-                File.Delete(existingFilePath);
+                if (!writtenFiles.TryGetValue(existingFilePath, out bool _))
+                {
+                    File.Delete(existingFilePath);
+                }
             }
         }
         

@@ -9,7 +9,7 @@ namespace Minfold;
 
 public record SqlTable(string Name, Dictionary<string, SqlTableColumn> Columns);
 public record SqlTableColumn(string Name, int OrdinalPosition, bool IsNullable, bool IsIdentity, SqlDbTypeExt SqlType, List<SqlForeignKey> ForeignKeys, bool IsComputed, bool IsPrimaryKey, string? ComputedSql, int? LengthOrPrecision);
-public record SqlForeignKey(string Name, string Table, string Column, string RefTable, string RefColumn, bool NotEnforced);
+public record SqlForeignKey(string Name, string Table, string Column, string RefTable, string RefColumn, bool NotEnforced, bool NotForReplication = false, int DeleteAction = 0, int UpdateAction = 0);
 public record CsModelSource(string Name, string ModelPath, string? DaoPath, string ModelSourceCode, string? DaoSourceCode, SyntaxTree ModelAst, SyntaxTree? DaoAst, string NameLastPart, SqlTable? Table, SyntaxNode ModelRootNode, SyntaxNode? DaoRootNode, ConcurrentDictionary<string, string> Columns, ModelInfo ModelInfo);
 public record CsSource(string DbPath, string DbSource, ConcurrentDictionary<string, CsModelSource> Models, ConcurrentDictionary<string, string> Daos, string ProjectNamespace, string ProjectPath, ConcurrentDictionary<string, CsDbSetDecl> DbSetMap);
 public record ColumnDefaultVal(SqlTableColumn Column, string? DefaultValue, ColumnDefaultValTypes Type, string? Key);
@@ -99,4 +99,31 @@ public class ModelInfo
 public class MinfoldOptions
 {
     public bool DecorateMessages { get; set; }
+    public bool DryRun { get; set; }
 }
+
+public record MigrationGenerationResult(string MigrationName, string UpScriptPath, string DownScriptPath, string Description);
+public record MigrationApplyResult(List<string> AppliedMigrations);
+public record MigrationRollbackResult(string RolledBackMigration);
+public record MigrationGotoResult(List<string> AppliedMigrations, List<string> RolledBackMigrations);
+public record MigrationInfo(string MigrationName, string Timestamp, string Description, string UpScriptPath, string? DownScriptPath, DateTime? AppliedAt);
+
+// Schema comparison types for incremental migrations
+public enum ColumnChangeType
+{
+    Add,
+    Drop,
+    Modify
+}
+
+public enum ForeignKeyChangeType
+{
+    Add,
+    Drop,
+    Modify
+}
+
+public record ColumnChange(ColumnChangeType ChangeType, SqlTableColumn? OldColumn, SqlTableColumn? NewColumn);
+public record ForeignKeyChange(ForeignKeyChangeType ChangeType, SqlForeignKey? OldForeignKey, SqlForeignKey? NewForeignKey);
+public record TableDiff(string TableName, List<ColumnChange> ColumnChanges, List<ForeignKeyChange> ForeignKeyChanges);
+public record SchemaDiff(List<SqlTable> NewTables, List<string> DroppedTableNames, List<TableDiff> ModifiedTables);

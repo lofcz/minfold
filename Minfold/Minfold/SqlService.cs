@@ -135,6 +135,7 @@ public class SqlService
                                      ORDER BY k.rcname COLLATE Latin1_General_CI_AS
                                      FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '')
                                     + ')'
+                                 + CASE WHEN fk.is_not_for_replication = 1 THEN ' NOT FOR REPLICATION' ELSE '' END
                                  + CASE
                                      WHEN fk.delete_referential_action = 1 THEN ' ON DELETE CASCADE'
                                      WHEN fk.delete_referential_action = 2 THEN ' ON DELETE SET NULL'
@@ -393,7 +394,7 @@ public class SqlService
         return new ResultOrException<ConcurrentDictionary<string, int>>(tablesMap, null);
     }
 
-    public async Task<ResultOrException<ConcurrentDictionary<string, SqlTable>>> GetSchema(string dbName, List<string>? selectTables = null)
+    public async Task<ResultOrException<ConcurrentDictionary<string, SqlTable>>> GetSchema(string dbName, List<string>? selectTables = null, List<string>? excludeTables = null)
     {
         await using SqlConnectionResult conn = await Connect();
 
@@ -416,10 +417,18 @@ public class SqlService
         await using SqlDataReader reader = await command.ExecuteReaderAsync();
 
         ConcurrentDictionary<string, SqlTable> tables = new ConcurrentDictionary<string, SqlTable>();
+        HashSet<string> excludeSet = excludeTables?.Select(t => t.ToLowerInvariant()).ToHashSet() ?? new HashSet<string>();
         
         while (reader.Read())
         {
             string tableName = reader.GetString(0);
+            
+            // Skip excluded tables
+            if (excludeSet.Contains(tableName.ToLowerInvariant()))
+            {
+                continue;
+            }
+            
             string columnName = reader.GetString(1);
             int ordinalPosition = reader.GetInt32(2);
             bool isNullable = reader.GetString(3) is "YES";
@@ -473,7 +482,7 @@ public class SqlService
         }
 
         command.CommandText = $"""
-           select f.name as 'name', object_name(f.parent_object_id) as 'table', col_name(fc.parent_object_id,fc.parent_column_id) as 'column', object_name(t.object_id) as 'refTable', col_name(t.object_id,fc.referenced_column_id) as 'refColumn', f.is_disabled as 'disabled'
+           select f.name as 'name', object_name(f.parent_object_id) as 'table', col_name(fc.parent_object_id,fc.parent_column_id) as 'column', object_name(t.object_id) as 'refTable', col_name(t.object_id,fc.referenced_column_id) as 'refColumn', f.is_not_trusted as 'notEnforced', f.is_not_for_replication as 'notForReplication', f.delete_referential_action as 'deleteAction', f.update_referential_action as 'updateAction'
            from sys.foreign_keys as f
            cross join sys.foreign_key_columns as fc
            cross join sys.tables t
@@ -492,8 +501,11 @@ public class SqlService
             string refTable  = reader.GetString(3);
             string refColumn = reader.GetString(4);
             bool notEnforced = reader.GetBoolean(5);
+            bool notForReplication = reader.GetBoolean(6);
+            int deleteAction = Convert.ToInt32(reader.GetValue(7));
+            int updateAction = Convert.ToInt32(reader.GetValue(8));
 
-            SqlForeignKey key = new SqlForeignKey(fkName, tableName, column, refTable, refColumn, notEnforced);
+            SqlForeignKey key = new SqlForeignKey(fkName, tableName, column, refTable, refColumn, notEnforced, notForReplication, deleteAction, updateAction);
 
             if (foreignKeys.TryGetValue(tableName.ToLowerInvariant(), out List<SqlForeignKey>? keys))
             {

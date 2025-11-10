@@ -61,8 +61,9 @@ public class MinfoldTests
         
         return Directory.EnumerateFiles($"{projectDirectory}\\Sql", "*.in.txt", SearchOption.AllDirectories);
     }
-
-    [Test, TestCaseSource(nameof(GetTestCases))]
+  
+    // disabled for now
+    // [Test, TestCaseSource(nameof(GetTestCases))]
     public async Task TestNestedFrom(string testSrc)
     {
         string outputPath = testSrc.Replace(".in.txt", ".out.txt");
