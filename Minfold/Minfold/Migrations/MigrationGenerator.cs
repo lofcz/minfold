@@ -17,9 +17,9 @@ public static class MigrationGenerator
         return MigrationUtilities.GetMigrationsPath(codePath);
     }
 
-    public static string GetNextMigrationTimestamp()
+    public static string GetNextMigrationTimestamp(string codePath)
     {
-        return MigrationUtilities.GetNextMigrationTimestamp();
+        return MigrationUtilities.GetNextMigrationTimestamp(codePath);
     }
 
     public static string FormatMigrationScript(string script)
@@ -249,7 +249,7 @@ public static class MigrationGenerator
             
             downScript.AppendLine();
 
-            string timestamp = MigrationUtilities.GetNextMigrationTimestamp();
+            string timestamp = MigrationUtilities.GetNextMigrationTimestamp(codePath);
             string migrationName = string.IsNullOrWhiteSpace(description) ? timestamp : $"{timestamp}_{description}";
             string migrationFolder = Path.Combine(migrationsPath, migrationName);
             Directory.CreateDirectory(migrationFolder);
@@ -2104,7 +2104,7 @@ public static class MigrationGenerator
                 upScript.AppendLine();
             }
 
-            string timestamp = MigrationUtilities.GetNextMigrationTimestamp();
+            string timestamp = MigrationUtilities.GetNextMigrationTimestamp(codePath);
             string migrationName = string.IsNullOrWhiteSpace(description) ? timestamp : $"{timestamp}_{description}";
             string migrationFolder = Path.Combine(migrationsPath, migrationName);
             Directory.CreateDirectory(migrationFolder);
@@ -2143,7 +2143,7 @@ public static class MigrationGenerator
             string migrationsPath = MigrationUtilities.GetMigrationsPath(codePath);
             Directory.CreateDirectory(migrationsPath);
 
-            string timestamp = MigrationUtilities.GetNextMigrationTimestamp();
+            string timestamp = MigrationUtilities.GetNextMigrationTimestamp(codePath);
             string migrationName = string.IsNullOrWhiteSpace(description) ? timestamp : $"{timestamp}_{description}";
             string migrationFolder = Path.Combine(migrationsPath, migrationName);
             Directory.CreateDirectory(migrationFolder);

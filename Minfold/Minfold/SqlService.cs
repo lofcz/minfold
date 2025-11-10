@@ -283,7 +283,9 @@ public class SqlService
                        else null
                    end as LENGTH_OR_PRECISION,
                    ic.seed_value as IDENTITY_SEED,
-                   ic.increment_value as IDENTITY_INCR
+                   ic.increment_value as IDENTITY_INCR,
+                   dc.name as DEFAULT_CONSTRAINT_NAME,
+                   dc.definition as DEFAULT_CONSTRAINT_VALUE
                     from information_schema.COLUMNS col
                     inner join sys.objects o 
                         on object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME) = o.object_id
@@ -306,6 +308,9 @@ public class SqlService
                     left join sys.identity_columns ic
                         on ic.object_id = object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME)
                         and ic.column_id = columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'ColumnId')
+                    left join sys.default_constraints dc
+                        on dc.parent_object_id = object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME)
+                        and dc.parent_column_id = columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'ColumnId')
                     left join (
                         select k.COLUMN_NAME, 
                                k.TABLE_NAME, 
@@ -605,6 +610,10 @@ public class SqlService
                 }
             }
             
+            // Read default constraint information
+            string? defaultConstraintName = reader.GetValue(13) as string;
+            string? defaultConstraintValue = reader.GetValue(14) as string;
+            
             SqlDbTypeExt sqlDbTypeExt;
             if (Enum.TryParse(typeof(SqlDbType), dataType, true, out object? dataTypeObject) && dataTypeObject is SqlDbType dt)
             {
@@ -620,7 +629,7 @@ public class SqlService
                 }
             }
             
-            SqlTableColumn column = new SqlTableColumn(columnName, ordinalPosition, isNullable, isIdentity, sqlDbTypeExt, [], isComputed, isPk, computedSql, lengthOrPrecision, identitySeed, identityIncrement);
+            SqlTableColumn column = new SqlTableColumn(columnName, ordinalPosition, isNullable, isIdentity, sqlDbTypeExt, [], isComputed, isPk, computedSql, lengthOrPrecision, identitySeed, identityIncrement, defaultConstraintName, defaultConstraintValue);
             
             if (tables.TryGetValue(tableName.ToLowerInvariant(), out SqlTable? table))
             {

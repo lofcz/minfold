@@ -80,6 +80,19 @@ public static class MigrationSqlGenerator
                     sb.Append(" NOT NULL");
                 }
 
+                // Default constraint (if exists)
+                // Note: When creating tables, we can use the existing constraint name if available
+                // since the table doesn't exist yet, so there's no conflict
+                if (!string.IsNullOrWhiteSpace(col.DefaultConstraintValue))
+                {
+                    string constraintName = !string.IsNullOrWhiteSpace(col.DefaultConstraintName)
+                        ? col.DefaultConstraintName
+                        : $"DF_{table.Name}_{col.Name}_{Guid.NewGuid():N}";
+                    // Normalize the default value (remove outer parentheses that SQL Server adds)
+                    string normalizedValue = NormalizeDefaultConstraintValue(col.DefaultConstraintValue);
+                    sb.Append($" CONSTRAINT [{constraintName}] DEFAULT {normalizedValue}");
+                }
+
                 // Identity
                 if (col.IsIdentity)
                 {
@@ -115,7 +128,87 @@ public static class MigrationSqlGenerator
         return sb.ToString();
     }
 
-    public static string GenerateAddColumnStatement(SqlTableColumn column, string tableName, string schema = "dbo")
+    /// <summary>
+    /// Normalizes a default constraint value by removing outer parentheses.
+    /// SQL Server stores default constraint values with parentheses (e.g., "((0))"),
+    /// but we want to use the normalized value in generated SQL.
+    /// </summary>
+    private static string NormalizeDefaultConstraintValue(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return value;
+        
+        string normalized = value.Trim();
+        // Remove outer balanced parentheses
+        while (normalized.StartsWith('(') && normalized.EndsWith(')'))
+        {
+            // Check if it's balanced parentheses
+            int depth = 0;
+            bool isBalanced = true;
+            for (int i = 0; i < normalized.Length; i++)
+            {
+                if (normalized[i] == '(') depth++;
+                else if (normalized[i] == ')') depth--;
+                // If depth reaches 0 before the end, it's not fully wrapped
+                if (depth == 0 && i < normalized.Length - 1)
+                {
+                    isBalanced = false;
+                    break;
+                }
+            }
+            if (isBalanced && depth == 0)
+            {
+                normalized = normalized.Substring(1, normalized.Length - 2).Trim();
+            }
+            else
+            {
+                break;
+            }
+        }
+        return normalized;
+    }
+
+    /// <summary>
+    /// Generates a default value for a NOT NULL column based on its SQL type.
+    /// This is used when adding NOT NULL columns to tables that may have data.
+    /// </summary>
+    private static string GetDefaultValueForType(SqlDbTypeExt sqlType)
+    {
+        return sqlType switch
+        {
+            SqlDbTypeExt.Bit => "0",
+            SqlDbTypeExt.TinyInt => "0",
+            SqlDbTypeExt.SmallInt => "0",
+            SqlDbTypeExt.Int => "0",
+            SqlDbTypeExt.BigInt => "0",
+            SqlDbTypeExt.Real => "0.0",
+            SqlDbTypeExt.Float => "0.0",
+            SqlDbTypeExt.Decimal => "0",
+            SqlDbTypeExt.Numeric => "0",
+            SqlDbTypeExt.Money => "0",
+            SqlDbTypeExt.SmallMoney => "0",
+            SqlDbTypeExt.Char => "''",
+            SqlDbTypeExt.VarChar => "''",
+            SqlDbTypeExt.NChar => "N''",
+            SqlDbTypeExt.NVarChar => "N''",
+            SqlDbTypeExt.Text => "''",
+            SqlDbTypeExt.NText => "N''",
+            SqlDbTypeExt.Binary => "0x00",
+            SqlDbTypeExt.VarBinary => "0x00",
+            SqlDbTypeExt.Image => "0x00",
+            SqlDbTypeExt.Date => "CAST('1900-01-01' AS DATE)",
+            SqlDbTypeExt.Time => "CAST('00:00:00' AS TIME)",
+            SqlDbTypeExt.DateTime => "CAST('1900-01-01 00:00:00' AS DATETIME)",
+            SqlDbTypeExt.DateTime2 => "CAST('1900-01-01 00:00:00' AS DATETIME2)",
+            SqlDbTypeExt.DateTimeOffset => "CAST('1900-01-01 00:00:00' AS DATETIMEOFFSET)",
+            SqlDbTypeExt.SmallDateTime => "CAST('1900-01-01 00:00:00' AS SMALLDATETIME)",
+            SqlDbTypeExt.Timestamp => "DEFAULT", // Timestamp is auto-generated
+            SqlDbTypeExt.UniqueIdentifier => "NEWID()",
+            _ => "NULL" // Fallback - but this shouldn't be used for NOT NULL columns
+        };
+    }
+
+    public static string GenerateAddColumnStatement(SqlTableColumn column, string tableName, string schema = "dbo", bool tableMayHaveData = false)
     {
         StringBuilder sb = new StringBuilder();
         sb.Append($"ALTER TABLE [{schema}].[{tableName}] ADD [");
@@ -163,7 +256,47 @@ public static class MigrationSqlGenerator
             }
             else
             {
-                sb.Append(" NOT NULL");
+                // For NOT NULL columns, we need to add a DEFAULT constraint if:
+                // 1. The table may have data (required by SQL Server for NOT NULL columns)
+                // 2. OR the column already has a default constraint value (preserve existing defaults)
+                // SQL Server requires either NULL, DEFAULT, IDENTITY, or empty table for NOT NULL columns
+                bool needsDefault = (tableMayHaveData || !string.IsNullOrWhiteSpace(column.DefaultConstraintValue)) && !column.IsIdentity;
+                
+                if (needsDefault)
+                {
+                    // Use existing default constraint if available (preserves user-defined defaults)
+                    // Otherwise, generate a default value based on the column type
+                    string defaultValue;
+                    string constraintName;
+                    
+                    if (!string.IsNullOrWhiteSpace(column.DefaultConstraintValue))
+                    {
+                        // Column already has a default constraint - preserve the value but generate a new constraint name
+                        // to avoid conflicts when adding the column (the constraint may already exist in the database)
+                        // Normalize the value by removing outer parentheses if present (SQL Server stores them with parentheses)
+                        defaultValue = NormalizeDefaultConstraintValue(column.DefaultConstraintValue);
+                        // Always generate a new constraint name to avoid conflicts
+                        constraintName = $"DF_{tableName}_{column.Name}_{Guid.NewGuid():N}";
+                    }
+                    else
+                    {
+                        // No existing default constraint - generate one based on type
+                        defaultValue = GetDefaultValueForType(column.SqlType);
+                        constraintName = $"DF_{tableName}_{column.Name}_{Guid.NewGuid():N}";
+                    }
+                    
+                    // Add a DEFAULT constraint that will persist in the database schema
+                    // This constraint:
+                    // 1. Allows adding the NOT NULL column to a table with existing data (required by SQL Server)
+                    // 2. Provides a default value for future INSERT statements (desired behavior)
+                    // 3. Becomes part of the permanent schema (the constraint remains after migration)
+                    // Note: The constraint name includes a GUID to ensure uniqueness if not preserving existing
+                    sb.Append($" NOT NULL CONSTRAINT [{constraintName}] DEFAULT {defaultValue}");
+                }
+                else
+                {
+                    sb.Append(" NOT NULL");
+                }
             }
 
             // Identity
@@ -427,6 +560,9 @@ public static class MigrationSqlGenerator
         
         bool sameName = string.Equals(oldColumn.Name, newColumn.Name, StringComparison.OrdinalIgnoreCase);
         
+        // Check if table exists in currentSchema (may have data)
+        bool tableMayHaveData = currentSchema != null && currentSchema.ContainsKey(tableName.ToLowerInvariant());
+        
         // Use direct check if available, otherwise fall back to diff-based check
         bool needsSafeHandling = isOnlyColumn || isOnlyColumnByDiff || wouldReduceToZero;
         
@@ -440,18 +576,31 @@ public static class MigrationSqlGenerator
                 SqlTableColumn tempColumn = newColumn with { Name = tempColumnName };
                 
                 // Add new column with temporary name
-                sb.Append(GenerateAddColumnStatement(tempColumn, tableName, schema));
+                sb.Append(GenerateAddColumnStatement(tempColumn, tableName, schema, tableMayHaveData));
                 
                 // Drop old column
                 sb.AppendLine(GenerateDropColumnStatement(oldColumn.Name, tableName, schema));
                 
                 // Rename temporary column to final name
                 sb.AppendLine(GenerateRenameColumnStatement(tableName, tempColumnName, newColumn.Name, schema));
+                
+                // After renaming, if the new column shouldn't have a default constraint (but the temp column had one),
+                // drop the temporary constraint. The constraint is now associated with the renamed column.
+                // Check if temp column would have gotten a default constraint but new column shouldn't have one
+                bool tempColumnNeedsDefault = tableMayHaveData && !tempColumn.IsIdentity && string.IsNullOrWhiteSpace(tempColumn.DefaultConstraintValue);
+                bool newColumnShouldHaveDefault = !string.IsNullOrWhiteSpace(newColumn.DefaultConstraintValue);
+                
+                if (tempColumnNeedsDefault && !newColumnShouldHaveDefault)
+                {
+                    // Temp column got a default constraint, but new column shouldn't have one - drop it
+                    // After renaming, the constraint is associated with the new column name, so use that
+                    sb.Append(GenerateDropDefaultConstraintStatement(newColumn.Name, tableName, null, schema));
+                }
             }
             else
             {
                 // Different name: add new column first, then drop old
-                sb.Append(GenerateAddColumnStatement(newColumn, tableName, schema));
+                sb.Append(GenerateAddColumnStatement(newColumn, tableName, schema, tableMayHaveData));
                 sb.AppendLine(GenerateDropColumnStatement(oldColumn.Name, tableName, schema));
             }
         }
@@ -459,7 +608,7 @@ public static class MigrationSqlGenerator
         {
             // Safe scenario: can drop then add (existing behavior)
             sb.AppendLine(GenerateDropColumnStatement(oldColumn.Name, tableName, schema));
-            sb.Append(GenerateAddColumnStatement(newColumn, tableName, schema));
+            sb.Append(GenerateAddColumnStatement(newColumn, tableName, schema, tableMayHaveData));
         }
         
         return sb.ToString();
@@ -468,6 +617,15 @@ public static class MigrationSqlGenerator
     public static string GenerateColumnModifications(TableDiff tableDiff, ConcurrentDictionary<string, SqlTable>? currentSchema = null, ConcurrentDictionary<string, SqlTable>? targetSchema = null)
     {
         StringBuilder sb = new StringBuilder();
+
+        // For incremental migrations, the table must exist in the target schema
+        // If it doesn't, this indicates a problem with migration ordering or the target schema
+        if (targetSchema == null || !targetSchema.ContainsKey(tableDiff.TableName.ToLowerInvariant()))
+        {
+            throw new InvalidOperationException(
+                $"Cannot generate column modifications for table '{tableDiff.TableName}': table does not exist in target schema. " +
+                "This usually indicates that a previous migration that creates this table has not been applied, or there is an issue with migration ordering.");
+        }
 
         // Get schema from current schema or target schema or default to dbo
         string schema = "dbo";
@@ -542,6 +700,13 @@ public static class MigrationSqlGenerator
             }
         }
         
+        // Check if table exists in targetSchema (may have data)
+        // For incremental migrations, targetSchema represents the state before this migration is applied
+        // If the table exists in targetSchema, it was created by a previous migration, so it may have data
+        // We check targetSchema (not currentSchema) because that's what the database state will be
+        // when this migration is applied to a fresh database
+        bool tableMayHaveData = targetSchema != null && targetSchema.ContainsKey(tableDiff.TableName.ToLowerInvariant());
+        
         if (wouldReduceToZero && dropChanges.Count > 0)
         {
             // Need to add columns first before dropping to avoid zero-column state
@@ -550,7 +715,7 @@ public static class MigrationSqlGenerator
             {
                 if (change.NewColumn != null)
                 {
-                    sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName, schema));
+                    sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName, schema, tableMayHaveData));
                 }
             }
         }
@@ -562,7 +727,7 @@ public static class MigrationSqlGenerator
             {
                 if (change.NewColumn != null)
                 {
-                    sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName, schema));
+                    sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName, schema, tableMayHaveData));
                 }
             }
         }
@@ -599,7 +764,7 @@ public static class MigrationSqlGenerator
                     {
                         // Columns already added first, safe to use normal DROP+ADD
                         sb.AppendLine(GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName, schema));
-                        sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName, schema));
+                        sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName, schema, tableMayHaveData));
                     }
                     else
                     {
@@ -629,7 +794,7 @@ public static class MigrationSqlGenerator
                     {
                         // Columns already added first, safe to use normal DROP+ADD
                         sb.AppendLine(GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName, schema));
-                        sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName, schema));
+                        sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName, schema, tableMayHaveData));
                     }
                     else
                     {
@@ -637,13 +802,18 @@ public static class MigrationSqlGenerator
                         sb.Append(GenerateSafeColumnDropAndAdd(change.OldColumn, change.NewColumn, tableDiff.TableName, schema, tableDiff, currentSchema));
                     }
                 }
+                
+                // Check if default constraint changed (added, removed, or value changed)
+                bool defaultConstraintChanged = (change.OldColumn.DefaultConstraintValue ?? string.Empty) != (change.NewColumn.DefaultConstraintValue ?? string.Empty);
+                
                 // Check if only PK property changed (and no other significant changes) - handle via PK constraint changes
                 // Note: PK changes are also handled via FK changes, but we need to ensure column is recreated if needed
-                else if (change.OldColumn.IsPrimaryKey != change.NewColumn.IsPrimaryKey && 
+                if (change.OldColumn.IsPrimaryKey != change.NewColumn.IsPrimaryKey && 
                          change.OldColumn.IsIdentity == change.NewColumn.IsIdentity &&
                          change.OldColumn.IsComputed == change.NewColumn.IsComputed &&
                          change.OldColumn.SqlType == change.NewColumn.SqlType &&
-                         change.OldColumn.IsNullable == change.NewColumn.IsNullable)
+                         change.OldColumn.IsNullable == change.NewColumn.IsNullable &&
+                         !defaultConstraintChanged)
                 {
                     // Only PK changed, no other changes - PK constraint will be handled separately
                     // But we still need to handle the column if there are other changes
@@ -653,12 +823,55 @@ public static class MigrationSqlGenerator
                         sb.Append(alterSql);
                     }
                 }
+                else if (defaultConstraintChanged && 
+                         change.OldColumn.IsIdentity == change.NewColumn.IsIdentity &&
+                         change.OldColumn.IsComputed == change.NewColumn.IsComputed &&
+                         change.OldColumn.SqlType == change.NewColumn.SqlType &&
+                         change.OldColumn.IsNullable == change.NewColumn.IsNullable &&
+                         change.OldColumn.IsPrimaryKey == change.NewColumn.IsPrimaryKey)
+                {
+                    // Only default constraint changed - drop old and add new
+                    // Drop old default constraint if it exists
+                    if (!string.IsNullOrWhiteSpace(change.OldColumn.DefaultConstraintValue))
+                    {
+                        sb.Append(GenerateDropDefaultConstraintStatement(change.OldColumn.Name, tableDiff.TableName, null, schema));
+                    }
+                    
+                    // Add new default constraint if specified
+                    if (!string.IsNullOrWhiteSpace(change.NewColumn.DefaultConstraintValue))
+                    {
+                        string constraintName = !string.IsNullOrWhiteSpace(change.NewColumn.DefaultConstraintName)
+                            ? change.NewColumn.DefaultConstraintName
+                            : $"DF_{tableDiff.TableName}_{change.NewColumn.Name}_{Guid.NewGuid():N}";
+                        string normalizedValue = NormalizeDefaultConstraintValue(change.NewColumn.DefaultConstraintValue);
+                        sb.AppendLine($"ALTER TABLE [{schema}].[{tableDiff.TableName}] ADD CONSTRAINT [{constraintName}] DEFAULT {normalizedValue} FOR [{change.NewColumn.Name}];");
+                    }
+                }
                 else
                 {
                     string alterSql = GenerateAlterColumnStatement(change.OldColumn, change.NewColumn, tableDiff.TableName, schema);
                     if (!string.IsNullOrEmpty(alterSql))
                     {
                         sb.Append(alterSql);
+                        
+                        // Handle default constraint changes separately (ALTER COLUMN doesn't support DEFAULT)
+                        if (defaultConstraintChanged)
+                        {
+                            // Drop old default constraint if it exists
+                            if (!string.IsNullOrWhiteSpace(change.OldColumn.DefaultConstraintValue))
+                            {
+                                sb.Append(GenerateDropDefaultConstraintStatement(change.OldColumn.Name, tableDiff.TableName, null, schema));
+                            }
+                            
+                            // Add new default constraint if specified
+                            if (!string.IsNullOrWhiteSpace(change.NewColumn.DefaultConstraintValue))
+                            {
+                                string constraintName = !string.IsNullOrWhiteSpace(change.NewColumn.DefaultConstraintName)
+                                    ? change.NewColumn.DefaultConstraintName
+                                    : $"DF_{tableDiff.TableName}_{change.NewColumn.Name}_{Guid.NewGuid():N}";
+                                sb.AppendLine($"ALTER TABLE [{schema}].[{tableDiff.TableName}] ADD CONSTRAINT [{constraintName}] DEFAULT {change.NewColumn.DefaultConstraintValue} FOR [{change.NewColumn.Name}];");
+                            }
+                        }
                     }
                 }
             }
@@ -671,7 +884,7 @@ public static class MigrationSqlGenerator
             {
                 if (change.NewColumn != null)
                 {
-                    sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName, schema));
+                    sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName, schema, tableMayHaveData));
                 }
             }
         }
@@ -1146,6 +1359,17 @@ public static class MigrationSqlGenerator
                     sb.Append(" NOT NULL");
                 }
                 
+                // Default constraint (if exists) - preserve value but generate new constraint name when reordering
+                // to avoid conflicts (the original constraint may still exist in the database)
+                if (!string.IsNullOrWhiteSpace(col.DefaultConstraintValue))
+                {
+                    // Always generate a new constraint name to avoid conflicts during reordering
+                    string constraintName = $"DF_{actualTable.Name}_{col.Name}_{Guid.NewGuid():N}";
+                    // Normalize the default value (remove outer parentheses that SQL Server adds)
+                    string normalizedValue = NormalizeDefaultConstraintValue(col.DefaultConstraintValue);
+                    sb.Append($" CONSTRAINT [{constraintName}] DEFAULT {normalizedValue}");
+                }
+                
                 if (col.IsIdentity)
                 {
                     sb.Append(" IDENTITY");
@@ -1265,8 +1489,9 @@ public static class MigrationSqlGenerator
         sb.AppendLine($"-- Copy data from original table to temporary table");
         
         // Build a check that verifies the table exists and all columns exist
-        // First check if table exists, then check if all columns exist
-        string tableExistsCheck = $"OBJECT_ID('[{actualTable.Schema}].[{actualTable.Name}]', 'U') IS NOT NULL";
+        // Store OBJECT_ID result in a variable to avoid calling it multiple times
+        string tableObjectIdVar = $"@tableObjectId_{Guid.NewGuid():N}";
+        sb.AppendLine($"DECLARE {tableObjectIdVar} INT = OBJECT_ID('[{actualTable.Schema}].[{actualTable.Name}]', 'U');");
         
         List<string> columnExistenceChecks = new List<string>();
         foreach (string selectCol in selectColumns)
@@ -1274,10 +1499,10 @@ public static class MigrationSqlGenerator
             string colName = selectCol.Trim('[', ']');
             // Escape single quotes in column names for SQL string literals
             string escapedColName = colName.Replace("'", "''");
-            columnExistenceChecks.Add($"EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('[{actualTable.Schema}].[{actualTable.Name}]', 'U') AND name = '{escapedColName}')");
+            columnExistenceChecks.Add($"EXISTS (SELECT 1 FROM sys.columns WHERE object_id = {tableObjectIdVar} AND name = '{escapedColName}')");
         }
         
-        string allColumnsExistCheck = $"{tableExistsCheck} AND {string.Join(" AND ", columnExistenceChecks)}";
+        string allColumnsExistCheck = $"{tableObjectIdVar} IS NOT NULL AND {string.Join(" AND ", columnExistenceChecks)}";
         
         // Build the INSERT statement as a dynamic SQL string
         // Escape single quotes in the SQL string

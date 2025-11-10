@@ -388,7 +388,7 @@ public static class Extensions
             SqlDataTypeOption.TinyInt => SqlDbTypeExt.TinyInt,
             SqlDataTypeOption.Bit => SqlDbTypeExt.Bit,
             SqlDataTypeOption.Decimal => SqlDbTypeExt.Decimal,
-            SqlDataTypeOption.Numeric => SqlDbTypeExt.Decimal,
+            SqlDataTypeOption.Numeric => SqlDbTypeExt.Numeric,
             SqlDataTypeOption.Money => SqlDbTypeExt.Money,
             SqlDataTypeOption.SmallMoney => SqlDbTypeExt.SmallMoney,
             SqlDataTypeOption.Float => SqlDbTypeExt.Float,

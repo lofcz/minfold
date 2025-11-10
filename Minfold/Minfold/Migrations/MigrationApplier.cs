@@ -101,6 +101,9 @@ public class MigrationApplier
 
         List<MigrationInfo> migrations = new List<MigrationInfo>();
 
+        // Store folder paths with migrations for deterministic sorting
+        List<(MigrationInfo Migration, string FolderPath)> migrationsWithPaths = new List<(MigrationInfo, string)>();
+
         foreach (string folderPath in migrationFolders)
         {
             string folderName = Path.GetFileName(folderPath);
@@ -110,17 +113,29 @@ public class MigrationApplier
             string downScriptPath = Path.Combine(folderPath, "down.sql");
             string? downScriptPathIfExists = File.Exists(downScriptPath) ? downScriptPath : null;
 
-            migrations.Add(new MigrationInfo(
-                folderName,
-                timestamp,
-                description,
-                upScriptPath,
-                downScriptPathIfExists,
-                null
+            migrationsWithPaths.Add((
+                new MigrationInfo(
+                    folderName,
+                    timestamp,
+                    description,
+                    upScriptPath,
+                    downScriptPathIfExists,
+                    null
+                ),
+                folderPath
             ));
         }
 
-        return migrations.OrderBy(m => m.Timestamp).ToList();
+        // Sort by timestamp first, then by creation time for deterministic ordering
+        // When timestamps are equal (can happen when running tests in parallel), 
+        // file system creation time provides a deterministic tiebreaker that reflects
+        // the actual order migrations were created
+        return migrationsWithPaths
+            .OrderBy(m => m.Migration.Timestamp)
+            .ThenBy(m => Directory.GetCreationTimeUtc(m.FolderPath))
+            .ThenBy(m => m.Migration.MigrationName, StringComparer.Ordinal) // Final tiebreaker
+            .Select(m => m.Migration)
+            .ToList();
     }
 
     public static (string Timestamp, string Description) ParseMigrationName(string folderName)
@@ -224,9 +239,9 @@ public class MigrationApplier
             HashSet<string> appliedSet = appliedMigrationsResult.Result?.ToHashSet() ?? new HashSet<string>();
             List<MigrationInfo> allMigrations = GetMigrationFiles(codePath);
 
-            List<string> migrationsToApply = allMigrations
+            // Filter and keep MigrationInfo objects (not just names) to preserve order
+            List<MigrationInfo> migrationsToApply = allMigrations
                 .Where(m => !appliedSet.Contains(m.MigrationName))
-                .Select(m => m.MigrationName)
                 .ToList();
 
             if (migrationsToApply.Count == 0)
@@ -236,33 +251,33 @@ public class MigrationApplier
 
             if (dryRun)
             {
-                return new ResultOrException<MigrationApplyResult>(new MigrationApplyResult(migrationsToApply), null);
+                return new ResultOrException<MigrationApplyResult>(
+                    new MigrationApplyResult(migrationsToApply.Select(m => m.MigrationName).ToList()), null);
             }
 
             List<string> successfullyApplied = new List<string>();
 
-            foreach (string migrationName in migrationsToApply)
+            foreach (MigrationInfo migration in migrationsToApply)
             {
-                MigrationInfo? migration = allMigrations.FirstOrDefault(m => m.MigrationName == migrationName);
                 if (migration is null)
                 {
                     continue;
                 }
 
-                MigrationLogger.Log($">>> Applying migration: {migrationName}");
+                MigrationLogger.Log($">>> Applying migration: {migration.MigrationName}");
                 string upScript = await File.ReadAllTextAsync(migration.UpScriptPath);
                 ResultOrException<int> executeResult = await ExecuteMigrationScript(sqlConn, upScript);
 
                 if (executeResult.Exception is not null)
                 {
                     return new ResultOrException<MigrationApplyResult>(null, 
-                        new Exception($"Failed to apply migration {migrationName}: {executeResult.Exception.Message}", executeResult.Exception));
+                        new Exception($"Failed to apply migration {migration.MigrationName}: {executeResult.Exception.Message}", executeResult.Exception));
                 }
 
                 // Record migration as applied
-                await RecordMigrationApplied(sqlConn, migrationName, dbName);
+                await RecordMigrationApplied(sqlConn, migration.MigrationName, dbName);
 
-                successfullyApplied.Add(migrationName);
+                successfullyApplied.Add(migration.MigrationName);
             }
 
             return new ResultOrException<MigrationApplyResult>(new MigrationApplyResult(successfullyApplied), null);

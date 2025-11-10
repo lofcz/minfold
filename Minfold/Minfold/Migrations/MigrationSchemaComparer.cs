@@ -306,6 +306,42 @@ public static class MigrationSchemaComparer
 
     private static bool AreColumnsEqual(SqlTableColumn col1, SqlTableColumn col2)
     {
+        // Normalize default constraint values for comparison
+        // SQL Server may store values with extra parentheses, so we normalize them
+        string NormalizeDefaultValue(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return string.Empty;
+            
+            // Remove outer parentheses if they wrap the entire value
+            string normalized = value.Trim();
+            while (normalized.StartsWith('(') && normalized.EndsWith(')'))
+            {
+                // Check if it's balanced parentheses (simple check)
+                int depth = 0;
+                bool isBalanced = true;
+                for (int i = 0; i < normalized.Length; i++)
+                {
+                    if (normalized[i] == '(') depth++;
+                    else if (normalized[i] == ')') depth--;
+                    if (depth == 0 && i < normalized.Length - 1)
+                    {
+                        isBalanced = false;
+                        break;
+                    }
+                }
+                if (isBalanced && depth == 0)
+                {
+                    normalized = normalized.Substring(1, normalized.Length - 2).Trim();
+                }
+                else
+                {
+                    break;
+                }
+            }
+            return normalized;
+        }
+        
         return col1.Name.Equals(col2.Name, StringComparison.OrdinalIgnoreCase) &&
                col1.IsNullable == col2.IsNullable &&
                col1.IsIdentity == col2.IsIdentity &&
@@ -313,7 +349,8 @@ public static class MigrationSchemaComparer
                col1.IsPrimaryKey == col2.IsPrimaryKey &&
                col1.SqlType == col2.SqlType &&
                col1.LengthOrPrecision == col2.LengthOrPrecision &&
-               (col1.ComputedSql ?? string.Empty) == (col2.ComputedSql ?? string.Empty);
+               (col1.ComputedSql ?? string.Empty) == (col2.ComputedSql ?? string.Empty) &&
+               NormalizeDefaultValue(col1.DefaultConstraintValue) == NormalizeDefaultValue(col2.DefaultConstraintValue);
     }
 
     private static bool AreForeignKeysEqual(SqlForeignKey fk1, SqlForeignKey fk2)

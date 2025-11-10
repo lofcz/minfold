@@ -21,7 +21,60 @@ public static class MigrationUtilities
         return Path.Combine(codePath, "Dao", "Migrations");
     }
 
-    public static string GetNextMigrationTimestamp()
+    /// <summary>
+    /// Gets the next migration timestamp, ensuring uniqueness by checking if a migration folder
+    /// with that timestamp already exists. If it does, increments the timestamp until a free slot is found.
+    /// </summary>
+    public static string GetNextMigrationTimestamp(string codePath)
+    {
+        string migrationsPath = GetMigrationsPath(codePath);
+        string baseTimestamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+        string candidateTimestamp = baseTimestamp;
+        int increment = 0;
+
+        // Ensure the migrations directory exists
+        Directory.CreateDirectory(migrationsPath);
+
+        // Check if a migration folder with this timestamp already exists
+        // If it does, increment the timestamp until we find a free slot
+        while (true)
+        {
+            // Check if any migration folder starts with this timestamp
+            string[] existingFolders = Directory.GetDirectories(migrationsPath);
+            bool timestampExists = existingFolders.Any(folder =>
+            {
+                string folderName = Path.GetFileName(folder);
+                // Check if folder name starts with the candidate timestamp
+                return folderName.StartsWith(candidateTimestamp, StringComparison.Ordinal);
+            });
+
+            if (!timestampExists)
+            {
+                // Found a free slot
+                return candidateTimestamp;
+            }
+
+            // Timestamp collision - increment by 1 second
+            increment++;
+            DateTime baseTime = DateTime.ParseExact(baseTimestamp, "yyyyMMddHHmmss", null, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal);
+            DateTime incrementedTime = baseTime.AddSeconds(increment);
+            candidateTimestamp = incrementedTime.ToString("yyyyMMddHHmmss");
+
+            // Safety check: if we've incremented too much (more than 60 seconds), something is wrong
+            if (increment > 60)
+            {
+                throw new InvalidOperationException(
+                    $"Unable to find a unique migration timestamp after {increment} attempts. " +
+                    $"There may be too many migrations being created simultaneously.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the next migration timestamp without checking for uniqueness.
+    /// Use this only when you don't have access to codePath or when uniqueness is guaranteed elsewhere.
+    /// </summary>
+    public static string GetNextMigrationTimestampUnsafe()
     {
         return DateTime.UtcNow.ToString("yyyyMMddHHmmss");
     }

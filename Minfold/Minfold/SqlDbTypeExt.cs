@@ -19,6 +19,7 @@ public static class SqlDbTypeExtHelpers
         {SqlDbTypeExt.Float, 19},
         {SqlDbTypeExt.Real, 18},
         {SqlDbTypeExt.Decimal, 17},
+        {SqlDbTypeExt.Numeric, 17},
         {SqlDbTypeExt.Money, 16},
         {SqlDbTypeExt.SmallMoney, 15},
         {SqlDbTypeExt.BigInt, 14},
@@ -130,6 +131,9 @@ public enum SqlDbTypeExt
     DateTimeOffset = 34, // 0x00000022,
     /// <summary>A JSON value. Stores JSON documents in a native binary format. Available in SQL Server 2025 (17.x) Preview, Azure SQL Database, and Azure SQL Managed Instance.</summary>
     Json = 35, // 0x00000023
+    /// <summary>
+    /// <see cref="T:System.Decimal" />. A fixed precision and scale numeric value. Functionally equivalent to Decimal in SQL Server.</summary>
+    Numeric = 36,
     CsIdentifier,
     Unknown,
     Null,
