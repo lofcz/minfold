@@ -1068,38 +1068,165 @@ public static class MigrationGenerator
                     }
                 }
 
-                // Second pass: Restore columns that were dropped by the migration
-                // For Add changes: column exists in targetSchema (before migration) but not in currentSchema (after migration)
-                // This means the column was DROPPED by the migration, so we need to ADD it back during rollback
+                // Second pass: Restore columns that were dropped by the migration AND reverse modifications
+                // IMPORTANT: Interleave Add and Modify operations based on their original positions in targetSchema
+                // to preserve column order. For example, if original order was id, col1, col2, col3:
+                // - id (Modify) should be restored first
+                // - col1, col2, col3 (Add) should be restored after id
+                
+                // Get target table to determine original column order
+                if (!targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTable))
+                {
+                    targetTable = null;
+                }
+                
+                // Create a combined list of Add and Modify operations, ordered by original position
+                List<(ColumnChange Change, int OriginalPosition, bool IsModify)> allRestoreOperations = new List<(ColumnChange, int, bool)>();
+                
+                // Add Modify operations (these restore modified columns)
+                foreach (ColumnChange change in modifyChanges)
+                {
+                    if (change.NewColumn != null && targetTable != null)
+                    {
+                        if (targetTable.Columns.TryGetValue(change.NewColumn.Name.ToLowerInvariant(), out SqlTableColumn? targetCol))
+                        {
+                            allRestoreOperations.Add((change, targetCol.OrdinalPosition, true));
+                        }
+                    }
+                }
+                
+                // Add Add operations (these restore dropped columns)
                 foreach (ColumnChange change in addChanges)
                 {
-                    if (change.NewColumn != null)
+                    if (change.NewColumn != null && targetTable != null)
                     {
-                        string columnKey = $"{tableDiff.TableName}.{change.NewColumn.Name}";
-                        // Only add if we haven't already added it and we haven't dropped it in this script
-                        if (!columnsBeingAdded.Contains(columnKey) && !columnsBeingDropped.Contains(columnKey))
+                        if (targetTable.Columns.TryGetValue(change.NewColumn.Name.ToLowerInvariant(), out SqlTableColumn? targetCol))
                         {
-                            columnsBeingAdded.Add(columnKey);
-                            MigrationLogger.Log($"  [ADD] {columnKey}");
-                            downScript.Append(MigrationSqlGenerator.GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName));
+                            allRestoreOperations.Add((change, targetCol.OrdinalPosition, false));
                         }
-                        else
+                    }
+                }
+                
+                // Sort by original position to preserve column order
+                allRestoreOperations = allRestoreOperations.OrderBy(op => op.OriginalPosition).ToList();
+                
+                // Process operations in order, but handle Modify operations specially (they need DROP+ADD logic)
+                foreach (var (change, originalPosition, isModify) in allRestoreOperations)
+                {
+                    if (isModify)
+                    {
+                        // Handle Modify operation (restore modified column)
+                        if (change.OldColumn != null && change.NewColumn != null)
                         {
-                            MigrationLogger.Log($"  [SKIP ADD] {columnKey} (already added or being dropped)");
+                            // For down script, we're restoring OldColumn, so use that for the key
+                            string columnKey = $"{tableDiff.TableName}.{change.OldColumn.Name}";
+                            
+                            MigrationLogger.Log($"  [MODIFY] {columnKey}: OldColumn.IsIdentity={change.OldColumn.IsIdentity}, NewColumn.IsIdentity={change.NewColumn.IsIdentity}");
+                            
+                            // Get schema from current schema or default to dbo
+                            string schema = "dbo";
+                            if (currentSchemaResult.Result != null && currentSchemaResult.Result.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? currentTable))
+                            {
+                                schema = currentTable.Schema;
+                            }
+                            
+                            // Check if identity or computed property changed - SQL Server requires DROP + ADD
+                            bool requiresDropAdd = (change.OldColumn.IsIdentity != change.NewColumn.IsIdentity) ||
+                                                   (change.OldColumn.IsComputed != change.NewColumn.IsComputed);
+                            
+                            if (requiresDropAdd)
+                            {
+                                string changeType = change.OldColumn.IsIdentity != change.NewColumn.IsIdentity ? "identity" : "computed";
+                                MigrationLogger.Log($"    Reversing {changeType} change: {change.OldColumn.Name} -> {change.NewColumn.Name}");
+                                
+                                // If the column being dropped has a primary key constraint, drop it first
+                                if (change.OldColumn.IsPrimaryKey)
+                                {
+                                    string pkConstraintName = $"PK_{tableDiff.TableName}";
+                                    downScript.AppendLine(MigrationSqlGenerator.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, schema));
+                                    MigrationLogger.Log($"    Dropped PK constraint before dropping column {change.OldColumn.Name}");
+                                }
+                                
+                                // Create a reversed TableDiff for the safe wrapper to check column state
+                                // In down script, currentSchema is the state after up migration (has OldColumn)
+                                // We need to check if NewColumn would be the only column when we restore it
+                                // If needsModifyBeforeDrop, include Drop changes in the diff so safe wrapper can detect single-column scenario
+                                List<ColumnChange> reversedDiffChanges = new List<ColumnChange> { new ColumnChange(ColumnChangeType.Modify, change.OldColumn, change.NewColumn) };
+                                if (needsModifyBeforeDrop)
+                                {
+                                    // Include Drop changes so GenerateSafeColumnDropAndAdd can detect that this would be the only column
+                                    reversedDiffChanges.AddRange(dropChanges);
+                                }
+                                TableDiff reversedDiff = new TableDiff(
+                                    tableDiff.TableName,
+                                    reversedDiffChanges,
+                                    new List<ForeignKeyChange>(),
+                                    new List<IndexChange>()
+                                );
+                                
+                                // Use currentSchema (state after up migration) to check if safe
+                                // Drop OldColumn (current state) and add NewColumn (target state)
+                                string safeDropAdd = MigrationSqlGenerator.GenerateSafeColumnDropAndAdd(
+                                    change.OldColumn,  // Drop this (current state after migration)
+                                    change.NewColumn,  // Add this (target state before migration)
+                                    tableDiff.TableName,
+                                    schema,
+                                    reversedDiff,
+                                    currentSchemaResult.Result
+                                );
+                                downScript.Append(safeDropAdd);
+                                columnsBeingAdded.Add(columnKey); // Track that we've processed this Modify
+                                MigrationLogger.Log($"    Added back {change.NewColumn.Name}");
+                            }
+                            else
+                            {
+                                // No identity/computed change, can use ALTER COLUMN
+                                // Generate ALTER COLUMN statement to reverse the modification
+                                string reverseAlter = MigrationSqlGenerator.GenerateAlterColumnStatement(change.OldColumn, change.NewColumn, tableDiff.TableName, schema);
+                                if (!string.IsNullOrEmpty(reverseAlter))
+                                {
+                                    downScript.Append(reverseAlter);
+                                    MigrationLogger.Log($"    Reversed column modification: {change.OldColumn.Name} -> {change.NewColumn.Name}");
+                                }
+                                columnsBeingAdded.Add(columnKey); // Track that we've processed this Modify
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // Handle Add operation (restore dropped column)
+                        if (change.NewColumn != null)
+                        {
+                            string columnKey = $"{tableDiff.TableName}.{change.NewColumn.Name}";
+                            // Only add if we haven't already added it and we haven't dropped it in this script
+                            if (!columnsBeingAdded.Contains(columnKey) && !columnsBeingDropped.Contains(columnKey))
+                            {
+                                columnsBeingAdded.Add(columnKey);
+                                MigrationLogger.Log($"  [ADD] {columnKey}");
+                                downScript.Append(MigrationSqlGenerator.GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName));
+                            }
+                            else
+                            {
+                                MigrationLogger.Log($"  [SKIP ADD] {columnKey} (already added or being dropped)");
+                            }
                         }
                     }
                 }
 
-                // Third pass: Reverse modifications (now safe to restore identity since added identity columns are dropped)
-                // BUT: if needsModifyBeforeDrop, we process Modify BEFORE Drop to avoid "only column" error
-                // For Modify changes: OldColumn = current state (after migration), NewColumn = target state (before migration)
-                // We need to restore from OldColumn to NewColumn
+                // Third pass: Handle any remaining Modify operations that weren't processed above
+                // (Modify operations should have been processed in second pass, but check for any missed ones)
                 foreach (ColumnChange change in modifyChanges)
                 {
                     if (change.OldColumn != null && change.NewColumn != null)
                     {
                         // For down script, we're restoring OldColumn, so use that for the key
                         string columnKey = $"{tableDiff.TableName}.{change.OldColumn.Name}";
+                        
+                        // Skip if already processed in second pass
+                        if (columnsBeingAdded.Contains(columnKey))
+                        {
+                            continue;
+                        }
                         
                         MigrationLogger.Log($"  [MODIFY] {columnKey}: OldColumn.IsIdentity={change.OldColumn.IsIdentity}, NewColumn.IsIdentity={change.NewColumn.IsIdentity}");
                         
@@ -1433,6 +1560,139 @@ public static class MigrationGenerator
                 }
             }
 
+            // Reorder phase for down script: Ensure columns are in correct order after rollback
+            // Compare actual database column order (after down script operations) with target schema order
+            // Target schema is what we're rolling back to (the state before the migration)
+            StringBuilder downColumnReorder = new StringBuilder();
+            
+            // Calculate schema after all down script column operations
+            // For down script: we're rolling back from currentSchema (after migration) to targetSchema (before migration)
+            // So after applying down script, the schema should match targetSchema
+            ConcurrentDictionary<string, SqlTable> schemaAfterDownOperations = MigrationSchemaSnapshot.ApplySchemaDiffToTarget(currentSchemaResult.Result ?? new ConcurrentDictionary<string, SqlTable>(), diff);
+            
+            // Build FK dictionary for reorder
+            ConcurrentDictionary<string, SqlTable> allTablesForFkDown = new ConcurrentDictionary<string, SqlTable>(targetSchema, StringComparer.OrdinalIgnoreCase);
+            
+            foreach (TableDiff tableDiff in diff.ModifiedTables.OrderBy(t => t.TableName))
+            {
+                // Skip if table doesn't exist in targetSchema (shouldn't happen for ModifiedTables)
+                if (!targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTableDown))
+                {
+                    continue;
+                }
+                
+                // Only reorder if there were column Add or Modify operations that could have changed column order
+                // Drop operations don't change the order of remaining columns, so no reorder needed
+                // IMPORTANT: Only reorder if we have Add operations OR Modify operations that require DROP+ADD
+                // This is because these operations add columns at the end, which can change the order
+                bool hasColumnAddOrModify = tableDiff.ColumnChanges.Any(c => 
+                    c.ChangeType == ColumnChangeType.Add || 
+                    (c.ChangeType == ColumnChangeType.Modify && c.OldColumn != null && c.NewColumn != null &&
+                     ((c.OldColumn.IsIdentity != c.NewColumn.IsIdentity) || (c.OldColumn.IsComputed != c.NewColumn.IsComputed))));
+                
+                if (!hasColumnAddOrModify)
+                {
+                    // No column Add/Modify operations that would change order, skip reordering
+                    // Drop operations don't change the order of remaining columns
+                    continue;
+                }
+                
+                // Get actual table from currentSchema (before down script) - this reflects the actual database order
+                // We'll compare this with targetSchema to see if reordering is needed
+                SqlTable? actualTableBeforeDown = null;
+                if (currentSchemaResult.Result != null && currentSchemaResult.Result.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? currentTable))
+                {
+                    actualTableBeforeDown = currentTable;
+                }
+                
+                if (actualTableBeforeDown == null)
+                {
+                    // Can't determine actual order, skip reordering
+                    continue;
+                }
+                
+                // Get actual table from schemaAfterDownOperations (what database will have after down script)
+                if (schemaAfterDownOperations.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? actualTableDown))
+                {
+                    // Safety check: ensure table has columns
+                    if (actualTableDown.Columns.Count == 0)
+                    {
+                        continue;
+                    }
+                    
+                    // Desired table is targetSchema (what we're rolling back to)
+                    // Compare actual order (from actualTableBeforeDown, but with columns that will remain after down script)
+                    // with desired order (from targetSchema)
+                    // Build actual table with only columns that will remain after down script
+                    Dictionary<string, SqlTableColumn> actualColumnsAfterDown = new Dictionary<string, SqlTableColumn>(StringComparer.OrdinalIgnoreCase);
+                    HashSet<string> droppedColumnNames = tableDiff.ColumnChanges
+                        .Where(c => c.ChangeType == ColumnChangeType.Drop && c.OldColumn != null)
+                        .Select(c => c.OldColumn!.Name.ToLowerInvariant())
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    
+                    int position = 1;
+                    foreach (SqlTableColumn col in actualTableBeforeDown.Columns.Values.OrderBy(c => c.OrdinalPosition))
+                    {
+                        // Skip columns that will be dropped
+                        if (droppedColumnNames.Contains(col.Name.ToLowerInvariant()))
+                        {
+                            continue;
+                        }
+                        
+                        // Use column from actualTableDown (has correct properties after down script)
+                        if (actualTableDown.Columns.TryGetValue(col.Name.ToLowerInvariant(), out SqlTableColumn? colAfterDown))
+                        {
+                            actualColumnsAfterDown[col.Name.ToLowerInvariant()] = colAfterDown with { OrdinalPosition = position++ };
+                        }
+                    }
+                    
+                    // Add any columns that were added back (from Add operations)
+                    foreach (ColumnChange addChange in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Add))
+                    {
+                        if (addChange.NewColumn != null && actualTableDown.Columns.TryGetValue(addChange.NewColumn.Name.ToLowerInvariant(), out SqlTableColumn? newCol))
+                        {
+                            if (!actualColumnsAfterDown.ContainsKey(newCol.Name.ToLowerInvariant()))
+                            {
+                                actualColumnsAfterDown[newCol.Name.ToLowerInvariant()] = newCol with { OrdinalPosition = position++ };
+                            }
+                        }
+                    }
+                    
+                    SqlTable actualTableForReorder = new SqlTable(actualTableDown.Name, actualColumnsAfterDown, actualTableDown.Indexes, actualTableDown.Schema);
+                    
+                    // Desired table is targetSchema (what we're rolling back to)
+                    // Both should have the same columns, but order might differ
+                    (string reorderSql, List<string> constraintSql) = MigrationSqlGenerator.GenerateColumnReorderStatement(
+                        actualTableForReorder,      // Actual database state after down script (with correct order)
+                        targetTableDown,            // Desired state (target schema - what we're rolling back to)
+                        allTablesForFkDown);
+                    
+                    if (!string.IsNullOrEmpty(reorderSql))
+                    {
+                        downColumnReorder.Append(reorderSql);
+                        
+                        // Recreate all constraints and indexes that were dropped during table recreation
+                        foreach (string constraint in constraintSql)
+                        {
+                            downColumnReorder.Append(constraint);
+                            downColumnReorder.AppendLine();
+                        }
+                    }
+                }
+            }
+            
+            string downReorderContent = downColumnReorder.ToString().Trim();
+            if (!string.IsNullOrEmpty(downReorderContent))
+            {
+                downScript.AppendLine();
+                downScript.AppendLine("-- ==============================================");
+                downScript.AppendLine("-- Reorder Columns (to match target schema order)");
+                downScript.AppendLine("-- ==============================================");
+                downScript.AppendLine();
+                downScript.AppendLine(downReorderContent);
+                downScript.AppendLine();
+            }
+
             downScript.AppendLine();
 
             // Build up script with phases
@@ -1530,6 +1790,307 @@ public static class MigrationGenerator
             {
                 upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Add Foreign Key Constraints and Primary Key Constraints"));
                 upScript.AppendLine(phase3Content);
+                upScript.AppendLine();
+                phaseNumber++;
+            }
+
+            // Phase 3.5: Reorder columns to match current schema order (after all column operations and constraints)
+            // Compare actual database column order (after Phase 2) with desired order
+            // Desired order: current schema order (the state we're migrating TO, which has the correct order)
+            StringBuilder phase3_5ColumnReorder = new StringBuilder();
+            
+            // Calculate schema after all column changes (this is what the database looks like after Phase 2)
+            MigrationLogger.Log($"\n=== Computing schemaAfterAllColumnChanges ===");
+            MigrationLogger.Log($"  upDiff.ModifiedTables.Count: {upDiff.ModifiedTables.Count}");
+            foreach (TableDiff tableDiff in upDiff.ModifiedTables)
+            {
+                MigrationLogger.Log($"  Table: {tableDiff.TableName}, ColumnChanges.Count: {tableDiff.ColumnChanges.Count}");
+                foreach (ColumnChange change in tableDiff.ColumnChanges)
+                {
+                    MigrationLogger.Log($"    ChangeType: {change.ChangeType}, Column: {change.OldColumn?.Name ?? change.NewColumn?.Name ?? "null"}");
+                }
+            }
+            // IMPORTANT: The diff passed here might not include Drop operations if they were already processed.
+            // We need to ensure schemaAfterAllColumnChanges reflects the state AFTER Phase 2, which means:
+            // - Columns that were dropped should NOT be in the result
+            // - Columns that were added should be in the result
+            // - Columns that were modified should reflect their new state
+            // 
+            // If the diff doesn't have Drop operations, we need to manually remove columns that are being dropped
+            // by checking the actual ColumnChanges in the diff.
+            // Filter out Drop operations from upDiff when computing schemaAfterAllColumnChanges for the up script
+            // Drop operations are for the down script (reversing the migration), not for the up script
+            // We only want to process Add and Modify operations to get the state after Phase 2
+            SchemaDiff upDiffFiltered = new SchemaDiff(
+                upDiff.NewTables,
+                upDiff.DroppedTableNames,
+                upDiff.ModifiedTables.Select(td => new TableDiff(
+                    td.TableName,
+                    td.ColumnChanges.Where(c => c.ChangeType != ColumnChangeType.Drop).ToList(),
+                    td.ForeignKeyChanges,
+                    td.IndexChanges
+                )).ToList(),
+                upDiff.NewSequences,
+                upDiff.DroppedSequenceNames,
+                upDiff.ModifiedSequences,
+                upDiff.NewProcedures,
+                upDiff.DroppedProcedureNames,
+                upDiff.ModifiedProcedures
+            );
+            
+            MigrationLogger.Log($"  Filtered upDiffFiltered.ModifiedTables.Count: {upDiffFiltered.ModifiedTables.Count}");
+            foreach (TableDiff tableDiff in upDiffFiltered.ModifiedTables)
+            {
+                MigrationLogger.Log($"  Table: {tableDiff.TableName}, ColumnChanges.Count (after filtering): {tableDiff.ColumnChanges.Count}");
+                foreach (ColumnChange change in tableDiff.ColumnChanges)
+                {
+                    MigrationLogger.Log($"    ChangeType: {change.ChangeType}, Column: {change.OldColumn?.Name ?? change.NewColumn?.Name ?? "null"}");
+                }
+            }
+            
+            ConcurrentDictionary<string, SqlTable> schemaAfterAllColumnChanges = MigrationSchemaSnapshot.ApplySchemaDiffToTarget(targetSchema, upDiffFiltered);
+            
+            // Double-check: if upDiffFiltered has Drop operations but ApplySchemaDiffToTarget didn't remove them,
+            // manually remove them now. Also, if targetSchema has columns that currentSchema doesn't have,
+            // those columns were dropped, so remove them from schemaAfterAllColumnChanges.
+            // NOTE: We use upDiffFiltered (not diff) because we've already filtered out Drop operations
+            foreach (TableDiff tableDiff in upDiffFiltered.ModifiedTables)
+            {
+                if (schemaAfterAllColumnChanges.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? table))
+                {
+                    HashSet<string> droppedColumnNames = tableDiff.ColumnChanges
+                        .Where(c => c.ChangeType == ColumnChangeType.Drop && c.OldColumn != null)
+                        .Select(c => c.OldColumn!.Name.ToLowerInvariant())
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    
+                    // Also check: if targetSchema has columns that currentSchema doesn't have, those were dropped
+                    // BUT: Only do this check if the diff actually has Drop operations, to avoid false positives
+                    // when comparing schemas that are in different states (e.g., during up vs down script generation)
+                    if (droppedColumnNames.Count == 0 && 
+                        targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTable) &&
+                        currentSchemaResult.Result != null &&
+                        currentSchemaResult.Result.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? currentTable))
+                    {
+                        // Only check for dropped columns if the diff doesn't already have Drop operations
+                        // This prevents false positives when comparing schemas in different states
+                        foreach (string targetColName in targetTable.Columns.Keys)
+                        {
+                            if (!currentTable.Columns.ContainsKey(targetColName))
+                            {
+                                // Column exists in targetSchema but not in currentSchema - it was dropped
+                                // But only add it if it's not already being added by the diff
+                                bool isBeingAdded = tableDiff.ColumnChanges.Any(c => 
+                                    c.ChangeType == ColumnChangeType.Add && 
+                                    c.NewColumn != null &&
+                                    c.NewColumn.Name.Equals(targetColName, StringComparison.OrdinalIgnoreCase));
+                                
+                                if (!isBeingAdded)
+                                {
+                                    droppedColumnNames.Add(targetColName);
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (droppedColumnNames.Count > 0)
+                    {
+                        MigrationLogger.Log($"  Manually removing dropped columns from {tableDiff.TableName}: [{string.Join(", ", droppedColumnNames)}]");
+                        Dictionary<string, SqlTableColumn> newColumns = new Dictionary<string, SqlTableColumn>(table.Columns);
+                        foreach (string droppedCol in droppedColumnNames)
+                        {
+                            newColumns.Remove(droppedCol);
+                        }
+                        schemaAfterAllColumnChanges[tableDiff.TableName.ToLowerInvariant()] = new SqlTable(table.Name, newColumns, table.Indexes, table.Schema);
+                    }
+                }
+            }
+            
+            MigrationLogger.Log($"  schemaAfterAllColumnChanges tables: [{string.Join(", ", schemaAfterAllColumnChanges.Keys)}]");
+            foreach (var kvp in schemaAfterAllColumnChanges)
+            {
+                MigrationLogger.Log($"    {kvp.Key}: columns=[{string.Join(", ", kvp.Value.Columns.Values.OrderBy(c => c.OrdinalPosition).Select(c => c.Name))}]");
+            }
+            
+            // Build a complete schema dictionary for FK generation (includes all tables from schemaAfterAllColumnChanges)
+            ConcurrentDictionary<string, SqlTable> allTablesForFk = new ConcurrentDictionary<string, SqlTable>(schemaAfterAllColumnChanges, StringComparer.OrdinalIgnoreCase);
+            
+            // Use upDiff (not diff) for Phase 3.5 to ensure we're using the correct diff for the up script
+            foreach (TableDiff tableDiff in upDiff.ModifiedTables.OrderBy(t => t.TableName))
+            {
+                MigrationLogger.Log($"\n=== Phase 3.5: Reorder Columns for table: {tableDiff.TableName} ===");
+                
+                // Skip reordering if there are no Add or Modify (DROP+ADD) operations that would change column order
+                // Drop operations don't change the order of remaining columns, so no reorder needed
+                bool hasColumnAddOrModify = tableDiff.ColumnChanges.Any(c => 
+                    c.ChangeType == ColumnChangeType.Add || 
+                    (c.ChangeType == ColumnChangeType.Modify && c.OldColumn != null && c.NewColumn != null &&
+                     ((c.OldColumn.IsIdentity != c.NewColumn.IsIdentity) || (c.OldColumn.IsComputed != c.NewColumn.IsComputed))));
+                
+                bool hasDropOperations = tableDiff.ColumnChanges.Any(c => c.ChangeType == ColumnChangeType.Drop);
+                
+                MigrationLogger.Log($"  hasColumnAddOrModify: {hasColumnAddOrModify}, hasDropOperations: {hasDropOperations}");
+                
+                if (!hasColumnAddOrModify)
+                {
+                    // No column Add/Modify operations that would change order, skip reordering
+                    // Drop operations don't change the order of remaining columns
+                    // IMPORTANT: If we only have Drop operations, skip reordering entirely
+                    // This prevents trying to reorder columns that were already dropped
+                    MigrationLogger.Log($"  Skipping reordering: no Add/Modify operations that change order");
+                    continue;
+                }
+                
+                // Get actual table from schemaAfterAllColumnChanges (what database has after Phase 2 - reflects actual column order)
+                if (schemaAfterAllColumnChanges.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? actualTable))
+                {
+                    MigrationLogger.Log($"  actualTable columns after Phase 2: [{string.Join(", ", actualTable.Columns.Values.OrderBy(c => c.OrdinalPosition).Select(c => c.Name))}]");
+                    
+                    // Safety check: ensure table has columns before attempting reorder
+                    if (actualTable.Columns.Count == 0)
+                    {
+                        MigrationLogger.Log($"  Skipping reordering: table has no columns");
+                        continue;
+                    }
+                    
+                    // Build desired table with correct column order
+                    // Desired order: use actualTable (state after Phase 2) when columns are dropped
+                    // Otherwise use currentSchema (the state we're migrating TO) to preserve manual reordering
+                    // This ensures we only include columns that actually exist after Phase 2
+                    SqlTable? desiredTable = null;
+                    
+                    // Check if there are Drop operations - if so, use actualTable (state after Phase 2) as order source
+                    // This ensures we don't include dropped columns in the desired order
+                    // Otherwise, use currentSchema (preserves manual reordering)
+                    // Note: hasDropOperations was already computed above
+                    
+                    if (hasDropOperations)
+                    {
+                        // Columns are being dropped - use actualTable (the state after Phase 2) directly as desiredTable
+                        // This ensures we only include columns that exist after drops
+                        // Since orderSourceTable would be actualTable, and actualTable already has the correct state,
+                        // we can use it directly without rebuilding
+                        desiredTable = actualTable;
+                        MigrationLogger.Log($"  Using actualTable directly as desiredTable (hasDropOperations=true)");
+                        MigrationLogger.Log($"  desiredTable columns: [{string.Join(", ", desiredTable.Columns.Values.OrderBy(c => c.OrdinalPosition).Select(c => c.Name))}]");
+                    }
+                    else
+                    {
+                        // No drops - use currentSchema to preserve manual reordering
+                        SqlTable? orderSourceTable = null;
+                        if (currentSchemaResult.Result != null && currentSchemaResult.Result.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? currentTable))
+                        {
+                            orderSourceTable = currentTable;
+                        }
+                        else if (targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTableFallback))
+                        {
+                            orderSourceTable = targetTableFallback;
+                        }
+                        
+                        if (orderSourceTable == null)
+                        {
+                            continue;
+                        }
+                        
+                        // Build desired column order: use order from orderSourceTable, but only include columns that exist in actualTable
+                        Dictionary<string, SqlTableColumn> desiredColumns = new Dictionary<string, SqlTableColumn>(StringComparer.OrdinalIgnoreCase);
+                            
+                            // Start with order source columns (preserve their order - this is the desired order)
+                            List<SqlTableColumn> orderSourceColumns = orderSourceTable.Columns.Values.OrderBy(c => c.OrdinalPosition).ToList();
+                            
+                            // Track which columns we've already added
+                            HashSet<string> addedColumnNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                            
+                            int position = 1;
+                            
+                            // Add columns from order source in their order (this is the desired order)
+                            // BUT only include columns that exist in actualTable (after Phase 2)
+                            // This ensures we don't try to copy columns that were dropped
+                            // IMPORTANT: Use column properties directly from orderSourceTable (current or target schema)
+                            // This represents the final desired state after the migration, so it has all correct properties
+                            // including IDENTITY, PK, FKs, etc.
+                            foreach (SqlTableColumn col in orderSourceColumns)
+                            {
+                                // Only include columns that exist in actualTable (after Phase 2)
+                                // Columns that were dropped won't be in actualTable, so skip them
+                                if (actualTable.Columns.ContainsKey(col.Name.ToLowerInvariant()))
+                                {
+                                    // Use column from order source directly (has all correct properties)
+                                    // Reassign OrdinalPosition to reflect desired order (from order source)
+                                    desiredColumns[col.Name.ToLowerInvariant()] = col with { OrdinalPosition = position++ };
+                                    addedColumnNames.Add(col.Name.ToLowerInvariant());
+                                }
+                            }
+                            
+                            // Include any columns from actualTable that aren't in order source (shouldn't happen, but safety check)
+                            foreach (SqlTableColumn actualCol in actualTable.Columns.Values)
+                            {
+                                if (!addedColumnNames.Contains(actualCol.Name.ToLowerInvariant()))
+                                {
+                                    // Column exists in actualTable but not in order source - append at end
+                                    desiredColumns[actualCol.Name.ToLowerInvariant()] = actualCol with { OrdinalPosition = position++ };
+                                    addedColumnNames.Add(actualCol.Name.ToLowerInvariant());
+                                }
+                            }
+                            
+                        // Create desired table with correct column order
+                        desiredTable = new SqlTable(actualTable.Name, desiredColumns, actualTable.Indexes, actualTable.Schema);
+                    }
+                    
+                    if (desiredTable == null)
+                    {
+                        continue;
+                    }
+                    
+                    if (desiredTable != null)
+                    {
+                        // Safety check: if desiredTable is the same reference as actualTable, and they have the same columns,
+                        // then the order should already match (since they're the same object)
+                        // This prevents reordering when we're using actualTable directly as desiredTable (e.g., when columns are dropped)
+                        bool isSameReference = ReferenceEquals(desiredTable, actualTable);
+                        bool hasSameColumns = isSameReference || 
+                            (desiredTable.Columns.Count == actualTable.Columns.Count &&
+                             desiredTable.Columns.Keys.All(k => actualTable.Columns.ContainsKey(k)) &&
+                             actualTable.Columns.Keys.All(k => desiredTable.Columns.ContainsKey(k)));
+                        
+                        MigrationLogger.Log($"  isSameReference: {isSameReference}, hasSameColumns: {hasSameColumns}");
+                        MigrationLogger.Log($"  actualTable.Columns.Count: {actualTable.Columns.Count}, desiredTable.Columns.Count: {desiredTable.Columns.Count}");
+                        
+                        if (isSameReference && hasSameColumns)
+                        {
+                            // Same reference and same columns - order already matches, skip reordering
+                            MigrationLogger.Log($"  Skipping reordering: same reference and same columns (order already matches)");
+                            continue;
+                        }
+                        
+                        MigrationLogger.Log($"  Calling GenerateColumnReorderStatement with:");
+                        MigrationLogger.Log($"    actualTable columns: [{string.Join(", ", actualTable.Columns.Values.OrderBy(c => c.OrdinalPosition).Select(c => c.Name))}]");
+                        MigrationLogger.Log($"    desiredTable columns: [{string.Join(", ", desiredTable.Columns.Values.OrderBy(c => c.OrdinalPosition).Select(c => c.Name))}]");
+                        
+                        (string reorderSql, List<string> constraintSql) = MigrationSqlGenerator.GenerateColumnReorderStatement(
+                            actualTable,      // Actual database state (from schemaAfterAllColumnChanges - reflects state after Phase 2)
+                            desiredTable,     // Desired state (with columns in correct order)
+                            allTablesForFk);
+                        
+                        if (!string.IsNullOrEmpty(reorderSql))
+                        {
+                            phase3_5ColumnReorder.Append(reorderSql);
+                            
+                            // Recreate all constraints and indexes that were dropped during table recreation
+                            foreach (string constraint in constraintSql)
+                            {
+                                phase3_5ColumnReorder.Append(constraint);
+                                phase3_5ColumnReorder.AppendLine();
+                            }
+                        }
+                    }
+                }
+            }
+            
+            string phase3_5Content = phase3_5ColumnReorder.ToString().Trim();
+            if (!string.IsNullOrEmpty(phase3_5Content))
+            {
+                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Reorder Columns"));
+                upScript.AppendLine(phase3_5Content);
                 upScript.AppendLine();
                 phaseNumber++;
             }

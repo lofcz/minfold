@@ -128,9 +128,51 @@ public enum ForeignKeyChangeType
 }
 
 public record ColumnChange(ColumnChangeType ChangeType, SqlTableColumn? OldColumn, SqlTableColumn? NewColumn);
-public record ForeignKeyChange(ForeignKeyChangeType ChangeType, SqlForeignKey? OldForeignKey, SqlForeignKey? NewForeignKey);
-public record TableDiff(string TableName, List<ColumnChange> ColumnChanges, List<ForeignKeyChange> ForeignKeyChanges, List<IndexChange> IndexChanges);
-public record IndexChange(IndexChangeType ChangeType, SqlIndex? OldIndex, SqlIndex? NewIndex);
+
+public record ForeignKeyChange(ForeignKeyChangeType ChangeType, SqlForeignKey? OldForeignKey, SqlForeignKey? NewForeignKey)
+{
+    public override string ToString()
+    {
+        return $"""
+                [{ChangeType}] 
+                old: {OldForeignKey?.Table}.{OldForeignKey?.Column}, name: {OldForeignKey?.Name}, delete action: {OldForeignKey?.DeleteAction}, ref table: {OldForeignKey?.RefTable}, ref column: {OldForeignKey?.RefTable}, update action: {OldForeignKey?.UpdateAction}, not enforced: {OldForeignKey?.NotEnforced}
+                new: {NewForeignKey?.Table}.{NewForeignKey?.Column}, name: {NewForeignKey?.Name}, delete action: {NewForeignKey?.DeleteAction}, ref table: {NewForeignKey?.RefTable}, ref column: {NewForeignKey?.RefTable}, update action: {NewForeignKey?.UpdateAction}, not enforced: {NewForeignKey?.NotEnforced}
+                """;
+    }
+}
+
+public record TableDiff(string TableName, List<ColumnChange> ColumnChanges, List<ForeignKeyChange> ForeignKeyChanges, List<IndexChange> IndexChanges)
+{
+
+    public override string ToString()
+    {
+        return $"""
+               TableName = {TableName}
+               ColumnChanges = [
+                {string.Join("\n", ColumnChanges.Select(x => x.ToString()))}
+               ]
+               ForeignKeyChanges = [
+                {string.Join("\n", ForeignKeyChanges.Select(x => x.ToString()))}
+               ]
+               IndexChanges = [
+                {string.Join("\n", IndexChanges.Select(x => x.ToString()))}
+               ]
+               """;
+    }
+}
+
+public record IndexChange(IndexChangeType ChangeType, SqlIndex? OldIndex, SqlIndex? NewIndex)
+{
+    public override string ToString()
+    {
+        return $"""
+                [{ChangeType}] 
+                old: {OldIndex?.Table}, columns: {string.Join(", ", OldIndex?.Columns ?? [])}, {OldIndex?.Name}
+                new: {NewIndex?.Table}, columns: {string.Join(", ", NewIndex?.Columns ?? [])}, {NewIndex?.Name}"
+                """;
+    }
+}
+
 public enum IndexChangeType { Add, Drop, Modify }
 public record SequenceChange(SequenceChangeType ChangeType, SqlSequence? OldSequence, SqlSequence? NewSequence);
 public enum SequenceChangeType { Add, Drop, Modify }

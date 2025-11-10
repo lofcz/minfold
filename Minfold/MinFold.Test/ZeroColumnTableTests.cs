@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text;
 using Microsoft.Data.SqlClient;
 using Minfold;
 using Newtonsoft.Json;
@@ -44,6 +45,14 @@ public class ZeroColumnTableTests
             // Step 1: Generate initial migration
             MigrationTestState step1State = await Step1_GenerateInitialMigration(tempProjectPath, tempDbConnectionString, tempDbName);
             stateHistory["Step1"] = step1State;
+            
+            // Verify column order after initial migration
+            if (step1State.Schema.TryGetValue("testtable", out SqlTable? step1Table))
+            {
+                List<string> step1ColumnOrder = GetColumnOrder(step1Table);
+                Assert.That(step1ColumnOrder, Is.EqualTo(new List<string> { "id", "col1", "col2", "col3" }), 
+                    "Step 1: Initial migration column order should be id, col1, col2, col3");
+            }
 
             // Step 2: Scenario 1 - Remove multiple columns in succession to reduce table to 0 columns
             await Step2_RemoveMultipleColumnsInSuccession(tempDbConnectionString, tempDbName);
@@ -64,6 +73,14 @@ public class ZeroColumnTableTests
             try
             {
                 await Step4_ApplyScenario1MigrationAndVerify(tempProjectPath, freshDb1ConnectionString, freshDb1Name, step2State.Schema);
+                
+                // Verify column order is preserved after applying migration to fresh database
+                ConcurrentDictionary<string, SqlTable> freshDb1Schema = await GetCurrentSchema(freshDb1ConnectionString, freshDb1Name);
+                if (freshDb1Schema.TryGetValue("testtable", out SqlTable? freshDb1Table) && 
+                    step2State.Schema.TryGetValue("testtable", out SqlTable? step2Table))
+                {
+                    VerifyColumnOrder(freshDb1Table, step2Table, "Step 4: Fresh database after applying migration");
+                }
             }
             finally
             {
@@ -72,6 +89,14 @@ public class ZeroColumnTableTests
 
             // Step 5: Rollback scenario 1 migration and verify schema restored
             await Step5_RollbackScenario1Migration(tempProjectPath, tempDbConnectionString, tempDbName, step1State.Schema, step3State.MigrationName!);
+            
+            // Verify column order is preserved after rollback
+            ConcurrentDictionary<string, SqlTable> afterRollbackSchema = await GetCurrentSchema(tempDbConnectionString, tempDbName);
+            if (afterRollbackSchema.TryGetValue("testtable", out SqlTable? afterRollbackTable) && 
+                step1State.Schema.TryGetValue("testtable", out SqlTable? step1TableAfterRollback))
+            {
+                VerifyColumnOrder(afterRollbackTable, step1TableAfterRollback, "Step 5: After rolling back scenario 1 migration");
+            }
 
             // Step 6: Scenario 2 - Modify the only column while also dropping other columns
             // This tests the case where we modify a column that would become the only column,
@@ -94,6 +119,14 @@ public class ZeroColumnTableTests
             try
             {
                 await Step8_ApplyScenario2MigrationAndVerify(tempProjectPath, freshDb2ConnectionString, freshDb2Name, step6State.Schema);
+                
+                // Verify column order is preserved after applying migration to fresh database
+                ConcurrentDictionary<string, SqlTable> freshDb2Schema = await GetCurrentSchema(freshDb2ConnectionString, freshDb2Name);
+                if (freshDb2Schema.TryGetValue("testtable", out SqlTable? freshDb2Table) && 
+                    step6State.Schema.TryGetValue("testtable", out SqlTable? step6Table))
+                {
+                    VerifyColumnOrder(freshDb2Table, step6Table, "Step 8: Fresh database after applying scenario 2 migration");
+                }
             }
             finally
             {
@@ -102,6 +135,14 @@ public class ZeroColumnTableTests
 
             // Step 9: Rollback scenario 2 migration and verify schema restored
             await Step9_RollbackScenario2Migration(tempProjectPath, tempDbConnectionString, tempDbName, step1State.Schema, step7State.MigrationName!);
+            
+            // Verify column order is preserved after final rollback
+            ConcurrentDictionary<string, SqlTable> finalSchema = await GetCurrentSchema(tempDbConnectionString, tempDbName);
+            if (finalSchema.TryGetValue("testtable", out SqlTable? finalTable) && 
+                step1State.Schema.TryGetValue("testtable", out SqlTable? step1FinalTable))
+            {
+                VerifyColumnOrder(finalTable, step1FinalTable, "Step 9: After rolling back scenario 2 migration (final state)");
+            }
         }
         finally
         {
@@ -243,6 +284,29 @@ public class ZeroColumnTableTests
         Assert.That(diff.NewProcedures, Is.Empty, "Schema mismatch: Found unexpected new procedures");
         Assert.That(diff.DroppedProcedureNames, Is.Empty, "Schema mismatch: Found unexpected dropped procedures");
         Assert.That(diff.ModifiedProcedures, Is.Empty, "Schema mismatch: Found unexpected procedure modifications");
+    }
+
+    /// <summary>
+    /// Gets the column order (by name) from a table schema, ordered by OrdinalPosition.
+    /// </summary>
+    private List<string> GetColumnOrder(SqlTable table)
+    {
+        return table.Columns.Values
+            .OrderBy(c => c.OrdinalPosition)
+            .Select(c => c.Name)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Verifies that column order matches between two tables.
+    /// </summary>
+    private void VerifyColumnOrder(SqlTable actualTable, SqlTable expectedTable, string context)
+    {
+        List<string> actualOrder = GetColumnOrder(actualTable);
+        List<string> expectedOrder = GetColumnOrder(expectedTable);
+        
+        Assert.That(actualOrder, Is.EqualTo(expectedOrder), 
+            $"{context}: Column order mismatch. Expected: [{string.Join(", ", expectedOrder)}], Actual: [{string.Join(", ", actualOrder)}]");
     }
 
     private async Task<MigrationTestState> GetCurrentState(string connectionString, string dbName, string projectPath, string stepName, string? migrationName)
@@ -624,6 +688,14 @@ public class ZeroColumnTableTests
             MigrationTestState step2State = await Step2_GenerateInitialMigration(tempProjectPath, tempDbConnectionString, tempDbName);
             stateHistory["Step2"] = step2State;
             
+            // Verify column order after initial migration (should be [id])
+            if (step2State.Schema.TryGetValue("sampletable", out SqlTable? step2Table))
+            {
+                List<string> step2ColumnOrder = GetColumnOrder(step2Table);
+                Assert.That(step2ColumnOrder, Is.EqualTo(new List<string> { "id" }), 
+                    "Step 2: Initial migration column order should be [id]");
+            }
+            
             // Record initial migration as applied (database-first approach)
             Assert.That(step2State.MigrationName, Is.Not.Null, "Step 2: Initial migration name is null");
             await RecordMigrationApplied(tempDbConnectionString, tempDbName, step2State.MigrationName!);
@@ -632,6 +704,16 @@ public class ZeroColumnTableTests
             await Step3_ModifyIdAndAddTextColumn(tempDbConnectionString, tempDbName);
             MigrationTestState step3State = await GetCurrentState(tempDbConnectionString, tempDbName, tempProjectPath, "Step3", null);
             stateHistory["Step3"] = step3State;
+            
+            // Verify column order after manual modification and reordering
+            // After adding text and modifying id, we manually reordered to [id, text]
+            // The migration generator should preserve this correct order
+            if (step3State.Schema.TryGetValue("sampletable", out SqlTable? step3Table))
+            {
+                List<string> step3ColumnOrder = GetColumnOrder(step3Table);
+                Assert.That(step3ColumnOrder, Is.EqualTo(new List<string> { "id", "text" }), 
+                    "Step 3: After manual modification and reordering, column order should be [id, text]");
+            }
             
             // Step 4: Generate incremental migration
             MigrationTestState step4State = await Step4_GenerateIncrementalMigration(tempProjectPath, tempDbConnectionString, tempDbName);
@@ -647,6 +729,14 @@ public class ZeroColumnTableTests
             try
             {
                 await Step5_ApplyMigrationAndVerify(tempProjectPath, freshDbConnectionString, freshDbName, step3State.Schema);
+                
+                // Verify column order is preserved after applying migration to fresh database
+                ConcurrentDictionary<string, SqlTable> freshDbSchema = await GetCurrentSchema(freshDbConnectionString, freshDbName);
+                if (freshDbSchema.TryGetValue("sampletable", out SqlTable? freshDbTable) && 
+                    step3State.Schema.TryGetValue("sampletable", out SqlTable? step3TableForFresh))
+                {
+                    VerifyColumnOrder(freshDbTable, step3TableForFresh, "Step 5: Fresh database after applying migrations");
+                }
             }
             finally
             {
@@ -659,8 +749,24 @@ public class ZeroColumnTableTests
             Assert.That(step4State.MigrationName, Is.Not.Null, "Step 6: Incremental migration name is null");
             await Step6_RollbackToInitial(tempProjectPath, tempDbConnectionString, tempDbName, step2State.Schema, step4State.MigrationName!);
             
+            // Verify column order is preserved after rollback (should be [id])
+            ConcurrentDictionary<string, SqlTable> afterRollbackSchema = await GetCurrentSchema(tempDbConnectionString, tempDbName);
+            if (afterRollbackSchema.TryGetValue("sampletable", out SqlTable? afterRollbackTable) && 
+                step2State.Schema.TryGetValue("sampletable", out SqlTable? step2TableAfterRollback))
+            {
+                VerifyColumnOrder(afterRollbackTable, step2TableAfterRollback, "Step 6: After rolling back incremental migration");
+            }
+            
             // Step 7: Reapply migration and verify final schema
             await Step7_ReapplyAndVerify(tempProjectPath, tempDbConnectionString, tempDbName, step3State.Schema);
+            
+            // Verify column order is preserved after reapply (should be [id, text])
+            ConcurrentDictionary<string, SqlTable> finalSchema = await GetCurrentSchema(tempDbConnectionString, tempDbName);
+            if (finalSchema.TryGetValue("sampletable", out SqlTable? finalTable) && 
+                step3State.Schema.TryGetValue("sampletable", out SqlTable? step3FinalTable))
+            {
+                VerifyColumnOrder(finalTable, step3FinalTable, "Step 7: After reapplying incremental migration (final state)");
+            }
         }
         finally
         {
@@ -710,13 +816,13 @@ public class ZeroColumnTableTests
         SqlService sqlService = new SqlService(connectionString);
         
         // This step simulates the scenario where we want to:
-        // 1. Add text column
-        // 2. Modify id to add PK and IDENTITY(1,1)
-        // The migration generator should detect that id is the only column and add text FIRST before modifying id
+        // 1. Add text column (SQL Server adds it at the end: [id, text])
+        // 2. Modify id to add PK and IDENTITY(1,1) (drop/add puts it at the end: [text, id])
+        // 3. Manually reorder columns to correct order: [id, text]
+        // The migration generator should preserve this correct order
         
         // Add text column first (manually, to simulate the target state)
-        // The migration generator will compare current state (only id) with target state (id with identity + text)
-        // and should generate: ADD text, then modify id
+        // SQL Server adds new columns at the end, so order becomes [id, text]
         ResultOrException<int> result1 = await sqlService.Execute("""
             ALTER TABLE [dbo].[SampleTable] ADD [text] NVARCHAR(MAX) NULL
             """);
@@ -727,6 +833,7 @@ public class ZeroColumnTableTests
         
         // Now modify id column to add PK and IDENTITY(1,1)
         // Use safe wrapper approach since we now have 2 columns
+        // This will drop and add id, which puts it at the end: [text, id]
         string tempColumnName = $"id_tmp_{Guid.NewGuid():N}";
         string addTempColumnSql = MigrationSqlGenerator.GenerateAddColumnStatement(
             new SqlTableColumn(
@@ -764,6 +871,56 @@ public class ZeroColumnTableTests
         if (result3.Exception is not null)
         {
             throw new Exception($"Step 3 failed (add PK): {result3.Exception.Message}", result3.Exception);
+        }
+        
+        // Now manually reorder columns to correct order: [id, text]
+        // Get current schema (has [text, id] order)
+        ConcurrentDictionary<string, SqlTable> currentSchema = await GetCurrentSchema(connectionString, dbName);
+        if (!currentSchema.TryGetValue("sampletable", out SqlTable? actualTable))
+        {
+            throw new Exception("Step 3 failed: Could not find SampleTable in current schema");
+        }
+        
+        // Build desired table with correct column order: [id, text]
+        Dictionary<string, SqlTableColumn> desiredColumns = new Dictionary<string, SqlTableColumn>(StringComparer.OrdinalIgnoreCase);
+        
+        // Get id column (should be first)
+        if (actualTable.Columns.TryGetValue("id", out SqlTableColumn? idCol))
+        {
+            desiredColumns["id"] = idCol with { OrdinalPosition = 1 };
+        }
+        
+        // Get text column (should be second)
+        if (actualTable.Columns.TryGetValue("text", out SqlTableColumn? textCol))
+        {
+            desiredColumns["text"] = textCol with { OrdinalPosition = 2 };
+        }
+        
+        SqlTable desiredTable = new SqlTable(actualTable.Name, desiredColumns, actualTable.Indexes, actualTable.Schema);
+        
+        // Generate reorder SQL
+        (string reorderSql, List<string> constraintSql) = MigrationSqlGenerator.GenerateColumnReorderStatement(
+            actualTable,
+            desiredTable,
+            new ConcurrentDictionary<string, SqlTable>(currentSchema, StringComparer.OrdinalIgnoreCase));
+        
+        if (!string.IsNullOrEmpty(reorderSql))
+        {
+            // Execute reorder SQL
+            StringBuilder reorderScript = new StringBuilder();
+            reorderScript.AppendLine(reorderSql);
+            
+            // Add constraint recreation SQL
+            foreach (string constraint in constraintSql)
+            {
+                reorderScript.AppendLine(constraint);
+            }
+            
+            ResultOrException<int> result4 = await sqlService.Execute(reorderScript.ToString());
+            if (result4.Exception is not null)
+            {
+                throw new Exception($"Step 3 failed (reorder columns): {result4.Exception.Message}", result4.Exception);
+            }
         }
     }
 

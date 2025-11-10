@@ -230,22 +230,145 @@ public static class MigrationSchemaSnapshot
             {
                 Dictionary<string, SqlTableColumn> newColumns = new Dictionary<string, SqlTableColumn>(table.Columns);
 
-                // Apply column changes
-                foreach (ColumnChange change in tableDiff.ColumnChanges)
+                // Track which columns will be dropped (to remove them and update positions)
+                HashSet<string> droppedColumnNames = tableDiff.ColumnChanges
+                    .Where(c => c.ChangeType == ColumnChangeType.Drop && c.OldColumn != null)
+                    .Select(c => c.OldColumn!.Name.ToLowerInvariant())
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                // Apply column changes in order: Add first, then Modify, then Drop
+                // This ensures that columns are added before they might be dropped (e.g., in down scripts)
+                List<ColumnChange> addChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Add).ToList();
+                List<ColumnChange> modifyChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Modify).ToList();
+                List<ColumnChange> dropChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Drop).ToList();
+                
+                // Process Add operations first
+                foreach (ColumnChange change in addChanges)
                 {
-                    if (change.ChangeType == ColumnChangeType.Add && change.NewColumn != null)
-                    {
-                        newColumns[change.NewColumn.Name.ToLowerInvariant()] = change.NewColumn;
-                    }
-                    else if (change.ChangeType == ColumnChangeType.Drop && change.OldColumn != null)
-                    {
-                        newColumns.Remove(change.OldColumn.Name.ToLowerInvariant());
-                    }
-                    else if (change.ChangeType == ColumnChangeType.Modify && change.NewColumn != null)
+                    if (change.NewColumn != null)
                     {
                         newColumns[change.NewColumn.Name.ToLowerInvariant()] = change.NewColumn;
                     }
                 }
+                
+                // Then process Modify operations
+                foreach (ColumnChange change in modifyChanges)
+                {
+                    if (change.NewColumn != null)
+                    {
+                        // For Modify with DROP+ADD (identity/computed changes), the column is effectively
+                        // dropped and re-added, so it goes to the end
+                        newColumns[change.NewColumn.Name.ToLowerInvariant()] = change.NewColumn;
+                    }
+                }
+                
+                // Finally process Drop operations (after Add and Modify, so we don't drop columns that were just added)
+                foreach (ColumnChange change in dropChanges)
+                {
+                    if (change.OldColumn != null)
+                    {
+                        bool removed = newColumns.Remove(change.OldColumn.Name.ToLowerInvariant());
+                        MigrationLogger.Log($"    ApplySchemaDiffToTarget: Removed column '{change.OldColumn.Name}' from {tableDiff.TableName}: {removed}");
+                    }
+                }
+                
+                MigrationLogger.Log($"    ApplySchemaDiffToTarget: After processing changes, {tableDiff.TableName} has columns: [{string.Join(", ", newColumns.Values.OrderBy(c => c.OrdinalPosition).Select(c => c.Name))}]");
+
+                // Update OrdinalPosition to reflect actual SQL Server physical order:
+                // 1. Existing columns (not dropped, not modified with DROP+ADD) keep their relative positions
+                // 2. Modified columns that require DROP+ADD go to the end (like new columns)
+                // 3. New columns go to the end
+                
+                // Identify columns that require DROP+ADD (identity or computed changes)
+                HashSet<string> dropAddColumnNames = tableDiff.ColumnChanges
+                    .Where(c => c.ChangeType == ColumnChangeType.Modify && c.OldColumn != null && c.NewColumn != null &&
+                        ((c.OldColumn.IsIdentity != c.NewColumn.IsIdentity) || (c.OldColumn.IsComputed != c.NewColumn.IsComputed)))
+                    .Select(c => c.NewColumn!.Name.ToLowerInvariant())
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                // Separate columns into: existing (keep order) and new/drop-add (go to end)
+                // Process columns in the order they appear in ColumnChanges to match SQL Server's physical order
+                List<SqlTableColumn> existingColumns = new List<SqlTableColumn>();
+                List<SqlTableColumn> newOrDropAddColumns = new List<SqlTableColumn>();
+                HashSet<string> processedColumnNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                // Get original column order from target schema (before changes)
+                List<SqlTableColumn> originalOrderedColumns = table.Columns.Values
+                    .OrderBy(c => c.OrdinalPosition)
+                    .ToList();
+
+                // First, process existing columns that weren't drop-added (keep their relative positions)
+                foreach (SqlTableColumn originalCol in originalOrderedColumns)
+                {
+                    if (droppedColumnNames.Contains(originalCol.Name.ToLowerInvariant()))
+                    {
+                        // Column was dropped, skip it
+                        continue;
+                    }
+
+                    if (newColumns.TryGetValue(originalCol.Name.ToLowerInvariant(), out SqlTableColumn? updatedCol))
+                    {
+                        if (!dropAddColumnNames.Contains(updatedCol.Name.ToLowerInvariant()))
+                        {
+                            // Column exists and wasn't drop-added, keep its relative position
+                            existingColumns.Add(updatedCol);
+                            processedColumnNames.Add(updatedCol.Name.ToLowerInvariant());
+                        }
+                    }
+                }
+
+                // Then, process columns in the order they appear in ColumnChanges to match SQL Server's physical order
+                // IMPORTANT: Process Add operations first, then Modify operations with DROP+ADD
+                // This ensures that if we Add 'text' then Modify 'id' (DROP+ADD), the order is [text, id]
+                // SQL Server processes operations in the order they appear in the migration script:
+                // 1. Add operations add columns at the end
+                // 2. Modify operations with DROP+ADD drop the column, then add it back at the end
+                
+                // First, process all Add operations
+                foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Add))
+                {
+                    if (change.NewColumn != null && newColumns.TryGetValue(change.NewColumn.Name.ToLowerInvariant(), out SqlTableColumn? newCol))
+                    {
+                        if (!processedColumnNames.Contains(newCol.Name.ToLowerInvariant()))
+                        {
+                            newOrDropAddColumns.Add(newCol);
+                            processedColumnNames.Add(newCol.Name.ToLowerInvariant());
+                        }
+                    }
+                }
+                
+                // Then, process all Modify operations with DROP+ADD (these go after Add operations)
+                foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Modify))
+                {
+                    if (change.NewColumn != null && dropAddColumnNames.Contains(change.NewColumn.Name.ToLowerInvariant()))
+                    {
+                        if (newColumns.TryGetValue(change.NewColumn.Name.ToLowerInvariant(), out SqlTableColumn? modifiedCol))
+                        {
+                            if (!processedColumnNames.Contains(modifiedCol.Name.ToLowerInvariant()))
+                            {
+                                newOrDropAddColumns.Add(modifiedCol);
+                                processedColumnNames.Add(modifiedCol.Name.ToLowerInvariant());
+                            }
+                        }
+                    }
+                }
+
+                // Reassign OrdinalPosition values: existing columns first, then new/drop-add columns
+                int position = 1;
+                Dictionary<string, SqlTableColumn> reorderedColumns = new Dictionary<string, SqlTableColumn>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (SqlTableColumn col in existingColumns)
+                {
+                    reorderedColumns[col.Name.ToLowerInvariant()] = col with { OrdinalPosition = position++ };
+                }
+
+                foreach (SqlTableColumn col in newOrDropAddColumns)
+                {
+                    reorderedColumns[col.Name.ToLowerInvariant()] = col with { OrdinalPosition = position++ };
+                }
+
+                // Replace newColumns with reordered columns
+                newColumns = reorderedColumns;
 
                 // Apply FK changes
                 foreach (ForeignKeyChange fkChange in tableDiff.ForeignKeyChanges)
