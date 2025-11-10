@@ -1337,10 +1337,10 @@ public static class MigrationGenerator
                         else
                         {
                             // Reverse the modification: change from OldColumn (current) to NewColumn (target)
-                            string reverseAlter = MigrationSqlGenerator.GenerateAlterColumnStatement(change.OldColumn, change.NewColumn, tableDiff.TableName);
-                        if (!string.IsNullOrEmpty(reverseAlter))
-                        {
-                            downScript.Append(reverseAlter);
+                            string reverseAlter = MigrationSqlGenerator.GenerateAlterColumnStatement(change.OldColumn, change.NewColumn, tableDiff.TableName, schema);
+                            if (!string.IsNullOrEmpty(reverseAlter))
+                            {
+                                downScript.Append(reverseAlter);
                             }
                         }
                     }
