@@ -129,6 +129,13 @@ public class MigrationIntegrationTests
                 await DropTempDatabase(freshDb2ConnectionString, freshDb2Name);
             }
 
+            // Step 5.5: Verify that generating a migration when there are no changes doesn't create any migration files
+            // Use the temp database which already has migrations applied and recorded
+            Assert.That(stateHistory["Step1"].MigrationName, Is.Not.Null, "Step 5.5: Step1 migration name is null");
+            Assert.That(stateHistory["Step4"].MigrationName, Is.Not.Null, "Step 5.5: Step4 migration name is null");
+            await Step5_5_VerifyNoChangesMigration(tempProjectPath, tempDbConnectionString, tempDbName, 
+                stateHistory["Step1"].MigrationName!, stateHistory["Step4"].MigrationName!);
+
             // Step 6: Make more schema changes (modify column, drop column, modify FK)
             await Step6_MakeMoreSchemaChanges(tempDbConnectionString, tempDbName);
             MigrationTestState step6State = await GetCurrentState(tempDbConnectionString, tempDbName, tempProjectPath, "Step6", null);
@@ -594,6 +601,50 @@ public class MigrationIntegrationTests
         {
             throw new Exception($"Step 3 failed: {result.Exception.Message}", result.Exception);
         }
+    }
+
+    private async Task Step5_5_VerifyNoChangesMigration(string projectPath, string connectionString, string dbName, string initialMigrationName, string migration1Name)
+    {
+        // Ensure migrations are recorded (they may already be recorded from Step 4)
+        // We need to record initial + migration #1 so that GenerateIncrementalMigration knows what the target state is
+        ResultOrException<List<string>> appliedMigrationsResult = await MigrationApplier.GetAppliedMigrations(connectionString, dbName);
+        Assert.That(appliedMigrationsResult.Exception, Is.Null, $"Step 5.5: Failed to get applied migrations: {appliedMigrationsResult.Exception?.Message}");
+        Assert.That(appliedMigrationsResult.Result, Is.Not.Null, "Step 5.5: GetAppliedMigrations returned null result");
+        
+        HashSet<string> appliedSet = appliedMigrationsResult.Result!.ToHashSet();
+        
+        if (!appliedSet.Contains(initialMigrationName))
+        {
+            await RecordMigrationApplied(connectionString, dbName, initialMigrationName);
+        }
+        
+        if (!appliedSet.Contains(migration1Name))
+        {
+            await RecordMigrationApplied(connectionString, dbName, migration1Name);
+        }
+
+        // Get count of migration files before attempting to generate
+        string migrationsPath = MigrationUtilities.GetMigrationsPath(projectPath);
+        int migrationFilesBefore = Directory.Exists(migrationsPath) 
+            ? Directory.GetFiles(migrationsPath, "*.sql").Length 
+            : 0;
+
+        // Attempt to generate a migration when there are no changes
+        ResultOrException<MigrationGenerationResult> result = await MigrationGenerator.GenerateIncrementalMigration(
+            connectionString, dbName, projectPath, "NoChangesTest");
+
+        // Should return an exception indicating no changes
+        Assert.That(result.Exception, Is.Not.Null, "Step 5.5: Expected exception when generating migration with no changes");
+        Assert.That(result.Exception!.Message, Does.Contain("No schema changes detected"), 
+            $"Step 5.5: Expected 'No schema changes detected' message, but got: {result.Exception.Message}");
+        Assert.That(result.Result, Is.Null, "Step 5.5: Expected null result when no changes detected");
+
+        // Verify no migration files were created
+        int migrationFilesAfter = Directory.Exists(migrationsPath) 
+            ? Directory.GetFiles(migrationsPath, "*.sql").Length 
+            : 0;
+        Assert.That(migrationFilesAfter, Is.EqualTo(migrationFilesBefore), 
+            "Step 5.5: No migration files should be created when there are no changes");
     }
 
     private async Task<MigrationTestState> Step4_GenerateIncrementalMigration1(string projectPath, string connectionString, string dbName)
