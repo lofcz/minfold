@@ -27,6 +27,8 @@ public class MigrationIntegrationTests
     [Test]
     public async Task TestMigrationLifecycle()
     {
+        MigrationLogger.SetLogger(Console.WriteLine);
+        
         string tempDbName = $"MinfoldTest_Migration_{Guid.NewGuid():N}";
         string tempProjectPath = Path.Combine(Path.GetTempPath(), $"MinfoldTestProject_{Guid.NewGuid():N}");
         string? tempDbConnectionString = null;
@@ -602,19 +604,14 @@ public class MigrationIntegrationTests
         Assert.That(rollbackResult.Exception, Is.Null, $"Step 2.8 failed: {rollbackResult.Exception?.Message}");
         Assert.That(rollbackResult.Result, Is.Not.Null, "Step 2.8: Rollback migration returned null result");
 
-        // Delete the rolled-back migration files since they're no longer part of the migration history
+        // Delete the rolled-back migration folder since it's no longer part of the migration history
         // This ensures that subsequent migrations don't try to apply it
         string migrationsPath = MigrationUtilities.GetMigrationsPath(projectPath);
-        string upScriptPath = Path.Combine(migrationsPath, $"{migrationName}.sql");
-        string downScriptPath = Path.Combine(migrationsPath, $"{migrationName}.down.sql");
+        string migrationFolder = Path.Combine(migrationsPath, migrationName);
         
-        if (File.Exists(upScriptPath))
+        if (Directory.Exists(migrationFolder))
         {
-            File.Delete(upScriptPath);
-        }
-        if (File.Exists(downScriptPath))
-        {
-            File.Delete(downScriptPath);
+            Directory.Delete(migrationFolder, true);
         }
 
         await VerifySchemaMatches(connectionString, dbName, expectedSchema, new ConcurrentDictionary<string, SqlSequence>(), new ConcurrentDictionary<string, SqlStoredProcedure>());
@@ -700,10 +697,10 @@ public class MigrationIntegrationTests
             await RecordMigrationApplied(connectionString, dbName, migration1Name);
         }
 
-        // Get count of migration files before attempting to generate
+        // Get count of migration folders before attempting to generate
         string migrationsPath = MigrationUtilities.GetMigrationsPath(projectPath);
-        int migrationFilesBefore = Directory.Exists(migrationsPath) 
-            ? Directory.GetFiles(migrationsPath, "*.sql").Length 
+        int migrationFoldersBefore = Directory.Exists(migrationsPath) 
+            ? Directory.GetDirectories(migrationsPath).Length 
             : 0;
 
         // Attempt to generate a migration when there are no changes
@@ -712,16 +709,16 @@ public class MigrationIntegrationTests
 
         // Should return an exception indicating no changes
         Assert.That(result.Exception, Is.Not.Null, "Step 5.5: Expected exception when generating migration with no changes");
-        Assert.That(result.Exception!.Message, Does.Contain("No schema changes detected"), 
-            $"Step 5.5: Expected 'No schema changes detected' message, but got: {result.Exception.Message}");
+        Assert.That(result.Exception, Is.InstanceOf<MinfoldMigrationDbUpToDateException>(),
+            $"Step 5.5: Expected MinfoldMigrationDbUpToDateException, but got: {result.Exception.GetType().Name}");
         Assert.That(result.Result, Is.Null, "Step 5.5: Expected null result when no changes detected");
 
-        // Verify no migration files were created
-        int migrationFilesAfter = Directory.Exists(migrationsPath) 
-            ? Directory.GetFiles(migrationsPath, "*.sql").Length 
+        // Verify no migration folders were created
+        int migrationFoldersAfter = Directory.Exists(migrationsPath) 
+            ? Directory.GetDirectories(migrationsPath).Length 
             : 0;
-        Assert.That(migrationFilesAfter, Is.EqualTo(migrationFilesBefore), 
-            "Step 5.5: No migration files should be created when there are no changes");
+        Assert.That(migrationFoldersAfter, Is.EqualTo(migrationFoldersBefore), 
+            "Step 5.5: No migration folders should be created when there are no changes");
     }
 
     private async Task<MigrationTestState> Step4_GenerateIncrementalMigration1(string projectPath, string connectionString, string dbName)

@@ -7,12 +7,12 @@ using Microsoft.Data.SqlClient;
 
 namespace Minfold;
 
-public record SqlTable(string Name, Dictionary<string, SqlTableColumn> Columns, List<SqlIndex> Indexes);
+public record SqlTable(string Name, Dictionary<string, SqlTableColumn> Columns, List<SqlIndex> Indexes, string Schema = "dbo");
 public record SqlTableColumn(string Name, int OrdinalPosition, bool IsNullable, bool IsIdentity, SqlDbTypeExt SqlType, List<SqlForeignKey> ForeignKeys, bool IsComputed, bool IsPrimaryKey, string? ComputedSql, int? LengthOrPrecision, long? IdentitySeed = null, long? IdentityIncrement = null);
-public record SqlForeignKey(string Name, string Table, string Column, string RefTable, string RefColumn, bool NotEnforced, bool NotForReplication = false, int DeleteAction = 0, int UpdateAction = 0);
-public record SqlIndex(string Name, string Table, List<string> Columns, bool IsUnique);
-public record SqlSequence(string Name, string DataType, long? StartValue, long? Increment, long? MinValue, long? MaxValue, bool Cycle, long? CacheSize, string? Definition);
-public record SqlStoredProcedure(string Name, string Definition);
+public record SqlForeignKey(string Name, string Table, string Column, string RefTable, string RefColumn, bool NotEnforced, bool NotForReplication = false, int DeleteAction = 0, int UpdateAction = 0, string Schema = "dbo", string RefSchema = "dbo");
+public record SqlIndex(string Name, string Table, List<string> Columns, bool IsUnique, string Schema = "dbo");
+public record SqlSequence(string Name, string DataType, long? StartValue, long? Increment, long? MinValue, long? MaxValue, bool Cycle, long? CacheSize, string? Definition, string Schema = "dbo");
+public record SqlStoredProcedure(string Name, string Definition, string Schema = "dbo");
 public record CsModelSource(string Name, string ModelPath, string? DaoPath, string ModelSourceCode, string? DaoSourceCode, SyntaxTree ModelAst, SyntaxTree? DaoAst, string NameLastPart, SqlTable? Table, SyntaxNode ModelRootNode, SyntaxNode? DaoRootNode, ConcurrentDictionary<string, string> Columns, ModelInfo ModelInfo);
 public record CsSource(string DbPath, string DbSource, ConcurrentDictionary<string, CsModelSource> Models, ConcurrentDictionary<string, string> Daos, string ProjectNamespace, string ProjectPath, ConcurrentDictionary<string, CsDbSetDecl> DbSetMap);
 public record ColumnDefaultVal(SqlTableColumn Column, string? DefaultValue, ColumnDefaultValTypes Type, string? Key);
@@ -109,6 +109,7 @@ public record MigrationGenerationResult(string MigrationName, string UpScriptPat
 public record MigrationApplyResult(List<string> AppliedMigrations);
 public record MigrationRollbackResult(string RolledBackMigration);
 public record MigrationGotoResult(List<string> AppliedMigrations, List<string> RolledBackMigrations);
+public record MigrationClaimResult(string ClaimedMigration, bool VerificationPassed, SchemaDiff? Differences);
 public record MigrationInfo(string MigrationName, string Timestamp, string Description, string UpScriptPath, string? DownScriptPath, DateTime? AppliedAt);
 
 // Schema comparison types for incremental migrations

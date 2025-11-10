@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.IO.Compression;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -6,6 +7,8 @@ namespace Minfold;
 
 public static class MigrationSchemaSnapshot
 {
+    private const int CurrentSchemaVersion = 1;
+
     public static async Task SaveSchemaSnapshot(
         ConcurrentDictionary<string, SqlTable> schema, 
         string migrationName, 
@@ -14,24 +17,36 @@ public static class MigrationSchemaSnapshot
         ConcurrentDictionary<string, SqlStoredProcedure>? procedures = null)
     {
         string migrationsPath = MigrationUtilities.GetMigrationsPath(codePath);
-        string snapshotPath = Path.Combine(migrationsPath, $"{migrationName}.schema.json");
+        string migrationFolder = Path.Combine(migrationsPath, migrationName);
+        string snapshotPath = Path.Combine(migrationFolder, "schema.bin");
 
         JsonSerializerOptions options = new JsonSerializerOptions
         {
-            WriteIndented = true,
+            WriteIndented = false, // No indentation for binary format
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
         };
 
-        // Create a snapshot object that includes tables, sequences, and procedures
+        // Create a snapshot object that includes version, tables, sequences, and procedures
         var snapshot = new
         {
+            Version = CurrentSchemaVersion,
             Tables = schema,
             Sequences = sequences ?? new ConcurrentDictionary<string, SqlSequence>(),
             Procedures = procedures ?? new ConcurrentDictionary<string, SqlStoredProcedure>()
         };
 
-        string json = JsonSerializer.Serialize(snapshot, options);
-        await File.WriteAllTextAsync(snapshotPath, json);
+        // Serialize to JSON bytes, then compress with GZip
+        byte[] jsonBytes = JsonSerializer.SerializeToUtf8Bytes(snapshot, options);
+        
+        using (MemoryStream compressedStream = new MemoryStream())
+        {
+            using (GZipStream gzipStream = new GZipStream(compressedStream, CompressionLevel.Optimal))
+            {
+                await gzipStream.WriteAsync(jsonBytes);
+            }
+            byte[] compressedBytes = compressedStream.ToArray();
+            await File.WriteAllBytesAsync(snapshotPath, compressedBytes);
+        }
     }
 
     public static async Task<ResultOrException<(ConcurrentDictionary<string, SqlTable> Tables, ConcurrentDictionary<string, SqlSequence> Sequences, ConcurrentDictionary<string, SqlStoredProcedure> Procedures)>> LoadSchemaSnapshot(string migrationName, string codePath)
@@ -39,7 +54,8 @@ public static class MigrationSchemaSnapshot
         try
         {
             string migrationsPath = MigrationUtilities.GetMigrationsPath(codePath);
-            string snapshotPath = Path.Combine(migrationsPath, $"{migrationName}.schema.json");
+            string migrationFolder = Path.Combine(migrationsPath, migrationName);
+            string snapshotPath = Path.Combine(migrationFolder, "schema.bin");
 
             if (!File.Exists(snapshotPath))
             {
@@ -48,77 +64,74 @@ public static class MigrationSchemaSnapshot
                     new FileNotFoundException($"Schema snapshot not found: {snapshotPath}"));
             }
 
-            string json = await File.ReadAllTextAsync(snapshotPath);
+            // Decompress binary file
+            byte[] compressedBytes = await File.ReadAllBytesAsync(snapshotPath);
+            string json;
             
-            // Try to deserialize as new format (with sequences/procedures) first
-            try
+            using (MemoryStream compressedStream = new MemoryStream(compressedBytes))
+            using (GZipStream gzipStream = new GZipStream(compressedStream, CompressionMode.Decompress))
+            using (MemoryStream decompressedStream = new MemoryStream())
             {
-                var snapshot = JsonSerializer.Deserialize<JsonElement>(json);
-                ConcurrentDictionary<string, SqlTable> tables = new ConcurrentDictionary<string, SqlTable>();
-                ConcurrentDictionary<string, SqlSequence> sequences = new ConcurrentDictionary<string, SqlSequence>(StringComparer.OrdinalIgnoreCase);
-                ConcurrentDictionary<string, SqlStoredProcedure> procedures = new ConcurrentDictionary<string, SqlStoredProcedure>(StringComparer.OrdinalIgnoreCase);
+                await gzipStream.CopyToAsync(decompressedStream);
+                json = System.Text.Encoding.UTF8.GetString(decompressedStream.ToArray());
+            }
+            
+            // Deserialize snapshot
+            var snapshot = JsonSerializer.Deserialize<JsonElement>(json);
+            
+            // Check version for forward compatibility
+            int version = 1; // Default to version 1 for backward compatibility
+            if (snapshot.TryGetProperty("Version", out JsonElement versionElement) && versionElement.ValueKind == JsonValueKind.Number)
+            {
+                version = versionElement.GetInt32();
+            }
 
-                if (snapshot.TryGetProperty("Tables", out JsonElement tablesElement))
-                {
-                    ConcurrentDictionary<string, SqlTable>? deserializedTables = JsonSerializer.Deserialize<ConcurrentDictionary<string, SqlTable>>(tablesElement.GetRawText());
-                    tables = deserializedTables is null
-                        ? new ConcurrentDictionary<string, SqlTable>()
-                        : new ConcurrentDictionary<string, SqlTable>(deserializedTables, StringComparer.OrdinalIgnoreCase);
-                }
-                else
-                {
-                    // Old format - just tables
-                    ConcurrentDictionary<string, SqlTable>? deserializedTables = JsonSerializer.Deserialize<ConcurrentDictionary<string, SqlTable>>(json);
-                    tables = deserializedTables is null
-                        ? new ConcurrentDictionary<string, SqlTable>(StringComparer.OrdinalIgnoreCase)
-                        : new ConcurrentDictionary<string, SqlTable>(deserializedTables, StringComparer.OrdinalIgnoreCase);
-                }
+            // Handle different versions if needed in the future
+            if (version > CurrentSchemaVersion)
+            {
+                return new ResultOrException<(ConcurrentDictionary<string, SqlTable>, ConcurrentDictionary<string, SqlSequence>, ConcurrentDictionary<string, SqlStoredProcedure>)>(
+                    (new ConcurrentDictionary<string, SqlTable>(), new ConcurrentDictionary<string, SqlSequence>(), new ConcurrentDictionary<string, SqlStoredProcedure>()), 
+                    new NotSupportedException($"Schema snapshot version {version} is not supported. Maximum supported version is {CurrentSchemaVersion}."));
+            }
 
-                if (snapshot.TryGetProperty("Sequences", out JsonElement sequencesElement))
+            ConcurrentDictionary<string, SqlTable> tables = new ConcurrentDictionary<string, SqlTable>();
+            ConcurrentDictionary<string, SqlSequence> sequences = new ConcurrentDictionary<string, SqlSequence>(StringComparer.OrdinalIgnoreCase);
+            ConcurrentDictionary<string, SqlStoredProcedure> procedures = new ConcurrentDictionary<string, SqlStoredProcedure>(StringComparer.OrdinalIgnoreCase);
+
+            if (snapshot.TryGetProperty("Tables", out JsonElement tablesElement))
+            {
+                ConcurrentDictionary<string, SqlTable>? deserializedTables = JsonSerializer.Deserialize<ConcurrentDictionary<string, SqlTable>>(tablesElement.GetRawText());
+                tables = deserializedTables is null
+                    ? new ConcurrentDictionary<string, SqlTable>()
+                    : new ConcurrentDictionary<string, SqlTable>(deserializedTables, StringComparer.OrdinalIgnoreCase);
+            }
+
+            if (snapshot.TryGetProperty("Sequences", out JsonElement sequencesElement))
+            {
+                Dictionary<string, SqlSequence>? deserializedSequences = JsonSerializer.Deserialize<Dictionary<string, SqlSequence>>(sequencesElement.GetRawText());
+                if (deserializedSequences is not null)
                 {
-                    Dictionary<string, SqlSequence>? deserializedSequences = JsonSerializer.Deserialize<Dictionary<string, SqlSequence>>(sequencesElement.GetRawText());
-                    sequences = new ConcurrentDictionary<string, SqlSequence>(StringComparer.OrdinalIgnoreCase);
-                    if (deserializedSequences is not null)
+                    foreach (KeyValuePair<string, SqlSequence> kvp in deserializedSequences)
                     {
-                        foreach (KeyValuePair<string, SqlSequence> kvp in deserializedSequences)
-                        {
-                            sequences[kvp.Key] = kvp.Value;
-                        }
+                        sequences[kvp.Key] = kvp.Value;
                     }
                 }
+            }
 
-                if (snapshot.TryGetProperty("Procedures", out JsonElement proceduresElement))
+            if (snapshot.TryGetProperty("Procedures", out JsonElement proceduresElement))
+            {
+                Dictionary<string, SqlStoredProcedure>? deserializedProcedures = JsonSerializer.Deserialize<Dictionary<string, SqlStoredProcedure>>(proceduresElement.GetRawText());
+                if (deserializedProcedures is not null)
                 {
-                    Dictionary<string, SqlStoredProcedure>? deserializedProcedures = JsonSerializer.Deserialize<Dictionary<string, SqlStoredProcedure>>(proceduresElement.GetRawText());
-                    procedures = new ConcurrentDictionary<string, SqlStoredProcedure>(StringComparer.OrdinalIgnoreCase);
-                    if (deserializedProcedures is not null)
+                    foreach (KeyValuePair<string, SqlStoredProcedure> kvp in deserializedProcedures)
                     {
-                        foreach (KeyValuePair<string, SqlStoredProcedure> kvp in deserializedProcedures)
-                        {
-                            procedures[kvp.Key] = kvp.Value;
-                        }
+                        procedures[kvp.Key] = kvp.Value;
                     }
                 }
-
-                return new ResultOrException<(ConcurrentDictionary<string, SqlTable>, ConcurrentDictionary<string, SqlSequence>, ConcurrentDictionary<string, SqlStoredProcedure>)>(
-                    (tables, sequences, procedures), null);
             }
-            catch
-            {
-                // Fallback to old format (just tables)
-                ConcurrentDictionary<string, SqlTable>? schema = JsonSerializer.Deserialize<ConcurrentDictionary<string, SqlTable>>(json);
-                if (schema is null)
-                {
-                    return new ResultOrException<(ConcurrentDictionary<string, SqlTable>, ConcurrentDictionary<string, SqlSequence>, ConcurrentDictionary<string, SqlStoredProcedure>)>(
-                        (new ConcurrentDictionary<string, SqlTable>(), new ConcurrentDictionary<string, SqlSequence>(), new ConcurrentDictionary<string, SqlStoredProcedure>()), 
-                        new Exception("Failed to deserialize schema snapshot"));
-                }
 
-                return new ResultOrException<(ConcurrentDictionary<string, SqlTable>, ConcurrentDictionary<string, SqlSequence>, ConcurrentDictionary<string, SqlStoredProcedure>)>(
-                    (new ConcurrentDictionary<string, SqlTable>(schema, StringComparer.OrdinalIgnoreCase),
-                     new ConcurrentDictionary<string, SqlSequence>(StringComparer.OrdinalIgnoreCase),
-                     new ConcurrentDictionary<string, SqlStoredProcedure>(StringComparer.OrdinalIgnoreCase)), null);
-            }
+            return new ResultOrException<(ConcurrentDictionary<string, SqlTable>, ConcurrentDictionary<string, SqlSequence>, ConcurrentDictionary<string, SqlStoredProcedure>)>(
+                (tables, sequences, procedures), null);
         }
         catch (Exception ex)
         {

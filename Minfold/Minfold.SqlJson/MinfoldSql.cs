@@ -414,6 +414,7 @@ public static class Extensions
             SqlDataTypeOption.DateTime2 => SqlDbTypeExt.DateTime2,
             SqlDataTypeOption.DateTimeOffset => SqlDbTypeExt.DateTimeOffset,
             SqlDataTypeOption.Rowversion => SqlDbTypeExt.Unknown,
+            SqlDataTypeOption.Json => SqlDbTypeExt.Json,
             _ => SqlDbTypeExt.Unknown
         };
     }

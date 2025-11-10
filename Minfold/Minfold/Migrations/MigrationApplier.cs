@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Text;
 using Microsoft.Data.SqlClient;
 
 namespace Minfold;
@@ -95,25 +97,24 @@ public class MigrationApplier
             return new List<MigrationInfo>();
         }
 
-        string[] migrationFiles = Directory.GetFiles(migrationsPath, "*.sql", SearchOption.TopDirectoryOnly)
-            .Where(f => !f.EndsWith(".down.sql"))
-            .ToArray();
+        string[] migrationFolders = Directory.GetDirectories(migrationsPath);
 
         List<MigrationInfo> migrations = new List<MigrationInfo>();
 
-        foreach (string filePath in migrationFiles)
+        foreach (string folderPath in migrationFolders)
         {
-            string fileName = Path.GetFileName(filePath);
-            (string timestamp, string description) = ParseMigrationName(fileName);
+            string folderName = Path.GetFileName(folderPath);
+            (string timestamp, string description) = ParseMigrationName(folderName);
 
-            string downScriptPath = filePath.Replace(".sql", ".down.sql");
+            string upScriptPath = Path.Combine(folderPath, "up.sql");
+            string downScriptPath = Path.Combine(folderPath, "down.sql");
             string? downScriptPathIfExists = File.Exists(downScriptPath) ? downScriptPath : null;
 
             migrations.Add(new MigrationInfo(
-                fileName.Replace(".sql", ""),
+                folderName,
                 timestamp,
                 description,
-                filePath,
+                upScriptPath,
                 downScriptPathIfExists,
                 null
             ));
@@ -122,21 +123,20 @@ public class MigrationApplier
         return migrations.OrderBy(m => m.Timestamp).ToList();
     }
 
-    public static (string Timestamp, string Description) ParseMigrationName(string filename)
+    public static (string Timestamp, string Description) ParseMigrationName(string folderName)
     {
-        // Format: YYYYMMDDHHMMSS_Description.sql
-        string nameWithoutExtension = Path.GetFileNameWithoutExtension(filename);
-        int underscoreIndex = nameWithoutExtension.IndexOf('_');
+        // Format: YYYYMMDDHHMMSS_Description
+        int underscoreIndex = folderName.IndexOf('_');
 
         if (underscoreIndex == -1 || underscoreIndex < 14)
         {
-            return (nameWithoutExtension.Length >= 14 ? nameWithoutExtension[..14] : nameWithoutExtension, 
-                    underscoreIndex == -1 ? "" : nameWithoutExtension[(underscoreIndex + 1)..]);
+            return (folderName.Length >= 14 ? folderName[..14] : folderName, 
+                    underscoreIndex == -1 ? "" : folderName[(underscoreIndex + 1)..]);
         }
 
-        string timestamp = nameWithoutExtension[..14];
-        string description = underscoreIndex < nameWithoutExtension.Length - 1 
-            ? nameWithoutExtension[(underscoreIndex + 1)..] 
+        string timestamp = folderName[..14];
+        string description = underscoreIndex < folderName.Length - 1 
+            ? folderName[(underscoreIndex + 1)..] 
             : "";
 
         return (timestamp, description);
@@ -147,10 +147,10 @@ public class MigrationApplier
         try
         {
             // Log the script being executed
-            Console.WriteLine("=== Executing Migration Script ===");
-            Console.WriteLine(script);
-            Console.WriteLine("=== End of Script ===");
-            Console.WriteLine();
+            MigrationLogger.Log("=== Executing Migration Script ===");
+            MigrationLogger.Log(script);
+            MigrationLogger.Log("=== End of Script ===");
+            MigrationLogger.Log("");
             
             // Split script into batches on GO statements (case-insensitive, handles GO on its own line)
             // GO is a batch separator in SQL Server - it's not a SQL statement, so we need to split manually
@@ -249,7 +249,7 @@ public class MigrationApplier
                     continue;
                 }
 
-                Console.WriteLine($">>> Applying migration: {migrationName}");
+                MigrationLogger.Log($">>> Applying migration: {migrationName}");
                 string upScript = await File.ReadAllTextAsync(migration.UpScriptPath);
                 ResultOrException<int> executeResult = await ExecuteMigrationScript(sqlConn, upScript);
 
@@ -260,7 +260,7 @@ public class MigrationApplier
                 }
 
                 // Record migration as applied
-                await RecordMigrationApplied(sqlConn, migrationName);
+                await RecordMigrationApplied(sqlConn, migrationName, dbName);
 
                 successfullyApplied.Add(migrationName);
             }
@@ -295,7 +295,7 @@ public class MigrationApplier
                 return new ResultOrException<MigrationRollbackResult>(new MigrationRollbackResult(migrationName), null);
             }
 
-            Console.WriteLine($">>> Rolling back migration: {migrationName}");
+            MigrationLogger.Log($">>> Rolling back migration: {migrationName}");
             string downScript = await File.ReadAllTextAsync(migration.DownScriptPath);
             ResultOrException<int> executeResult = await ExecuteMigrationScript(sqlConn, downScript);
 
@@ -394,7 +394,7 @@ public class MigrationApplier
                     continue;
                 }
 
-                Console.WriteLine($">>> Applying migration: {migrationName}");
+                MigrationLogger.Log($">>> Applying migration: {migrationName}");
                 string upScript = await File.ReadAllTextAsync(migration.UpScriptPath);
                 ResultOrException<int> executeResult = await ExecuteMigrationScript(sqlConn, upScript);
 
@@ -405,7 +405,7 @@ public class MigrationApplier
                 }
 
                 // Record migration as applied
-                await RecordMigrationApplied(sqlConn, migrationName);
+                await RecordMigrationApplied(sqlConn, migrationName, dbName);
                 applied.Add(migrationName);
             }
 
@@ -420,8 +420,12 @@ public class MigrationApplier
         }
     }
 
-    private static async Task RecordMigrationApplied(string sqlConn, string migrationName)
+    public static async Task RecordMigrationApplied(string sqlConn, string migrationName, string? dbName = null)
     {
+        if (dbName is not null)
+        {
+            await EnsureMigrationsTableExists(sqlConn, dbName);
+        }
         await using SqlConnection conn = new SqlConnection(sqlConn);
         await conn.OpenAsync();
 
@@ -440,6 +444,230 @@ public class MigrationApplier
         SqlCommand command = new SqlCommand(sql, conn);
         command.Parameters.AddWithValue("@MigrationName", migrationName);
         await command.ExecuteNonQueryAsync();
+    }
+
+    public static async Task<ResultOrException<MigrationClaimResult>> ClaimMigration(string sqlConn, string dbName, string codePath, string migrationNameOrLatest, bool force = false)
+    {
+        try
+        {
+            // Ensure migrations table exists
+            ResultOrException<bool> ensureTableResult = await EnsureMigrationsTableExists(sqlConn, dbName);
+            if (ensureTableResult.Exception is not null)
+            {
+                return new ResultOrException<MigrationClaimResult>(null, ensureTableResult.Exception);
+            }
+
+            // Get all migrations
+            List<MigrationInfo> allMigrations = GetMigrationFiles(codePath);
+            if (allMigrations.Count == 0)
+            {
+                return new ResultOrException<MigrationClaimResult>(null, new Exception("No migrations found"));
+            }
+
+            // Resolve migration name (handle "latest")
+            string targetMigrationName;
+            if (migrationNameOrLatest.Equals("latest", StringComparison.OrdinalIgnoreCase))
+            {
+                // Get the latest migration by timestamp
+                targetMigrationName = allMigrations[allMigrations.Count - 1].MigrationName;
+            }
+            else
+            {
+                targetMigrationName = migrationNameOrLatest;
+            }
+
+            // Validate migration exists
+            MigrationInfo? targetMigration = allMigrations.FirstOrDefault(m => m.MigrationName == targetMigrationName);
+            if (targetMigration is null)
+            {
+                return new ResultOrException<MigrationClaimResult>(null, new Exception($"Migration {targetMigrationName} not found"));
+            }
+
+            // Load expected schema from migration snapshot
+            ResultOrException<(ConcurrentDictionary<string, SqlTable> Tables, ConcurrentDictionary<string, SqlSequence> Sequences, ConcurrentDictionary<string, SqlStoredProcedure> Procedures)> snapshotResult = 
+                await MigrationSchemaSnapshot.LoadSchemaSnapshot(targetMigrationName, codePath);
+
+            if (snapshotResult.Exception is not null)
+            {
+                return new ResultOrException<MigrationClaimResult>(null, 
+                    new Exception($"Failed to load schema snapshot for migration {targetMigrationName}: {snapshotResult.Exception.Message}", snapshotResult.Exception));
+            }
+
+            ConcurrentDictionary<string, SqlTable> expectedTables = snapshotResult.Result.Tables;
+            ConcurrentDictionary<string, SqlSequence> expectedSequences = snapshotResult.Result.Sequences;
+            ConcurrentDictionary<string, SqlStoredProcedure> expectedProcedures = snapshotResult.Result.Procedures;
+
+            // Get current database schema
+            SqlService sqlService = new SqlService(sqlConn);
+            
+            // Get current tables
+            ResultOrException<ConcurrentDictionary<string, SqlTable>> currentSchemaResult = await sqlService.GetSchema(dbName, null, ["__MinfoldMigrations"]);
+            if (currentSchemaResult.Exception is not null || currentSchemaResult.Result is null)
+            {
+                return new ResultOrException<MigrationClaimResult>(null, 
+                    currentSchemaResult.Exception ?? new Exception("Failed to get current database schema"));
+            }
+
+            // Get foreign keys and attach to tables
+            ResultOrException<Dictionary<string, List<SqlForeignKey>>> fksResult = await sqlService.GetForeignKeys(currentSchemaResult.Result.Keys.ToList());
+            if (fksResult.Exception is not null)
+            {
+                return new ResultOrException<MigrationClaimResult>(null, fksResult.Exception);
+            }
+
+            foreach (KeyValuePair<string, List<SqlForeignKey>> fkList in fksResult.Result ?? new Dictionary<string, List<SqlForeignKey>>())
+            {
+                if (currentSchemaResult.Result.TryGetValue(fkList.Key, out SqlTable? table))
+                {
+                    foreach (SqlForeignKey fk in fkList.Value)
+                    {
+                        if (table.Columns.TryGetValue(fk.Column.ToLowerInvariant(), out SqlTableColumn? column))
+                        {
+                            column.ForeignKeys.Add(fk);
+                        }
+                    }
+                }
+            }
+
+            // Get current sequences
+            ResultOrException<ConcurrentDictionary<string, SqlSequence>> currentSequencesResult = await sqlService.GetSequences(dbName);
+            if (currentSequencesResult.Exception is not null)
+            {
+                return new ResultOrException<MigrationClaimResult>(null, currentSequencesResult.Exception);
+            }
+
+            // Get current procedures
+            ResultOrException<ConcurrentDictionary<string, SqlStoredProcedure>> currentProceduresResult = await sqlService.GetStoredProcedures(dbName);
+            if (currentProceduresResult.Exception is not null)
+            {
+                return new ResultOrException<MigrationClaimResult>(null, currentProceduresResult.Exception);
+            }
+
+            ConcurrentDictionary<string, SqlTable> currentTables = currentSchemaResult.Result;
+            ConcurrentDictionary<string, SqlSequence> currentSequences = currentSequencesResult.Result ?? new ConcurrentDictionary<string, SqlSequence>();
+            ConcurrentDictionary<string, SqlStoredProcedure> currentProcedures = currentProceduresResult.Result ?? new ConcurrentDictionary<string, SqlStoredProcedure>();
+
+            // Compare schemas
+            SchemaDiff diff = MigrationSchemaComparer.CompareSchemas(
+                currentTables,
+                expectedTables,
+                currentSequences,
+                expectedSequences,
+                currentProcedures,
+                expectedProcedures);
+
+            // Check if there are any differences
+            bool hasDifferences = diff.NewTables.Count > 0 ||
+                                  diff.DroppedTableNames.Count > 0 ||
+                                  diff.ModifiedTables.Count > 0 ||
+                                  diff.NewSequences.Count > 0 ||
+                                  diff.DroppedSequenceNames.Count > 0 ||
+                                  diff.ModifiedSequences.Count > 0 ||
+                                  diff.NewProcedures.Count > 0 ||
+                                  diff.DroppedProcedureNames.Count > 0 ||
+                                  diff.ModifiedProcedures.Count > 0;
+
+            if (hasDifferences && !force)
+            {
+                // Build error message with diff details
+                StringBuilder errorMsg = new StringBuilder();
+                errorMsg.AppendLine($"Schema verification failed for migration {targetMigrationName}. The database schema does not match the expected schema.");
+                errorMsg.AppendLine();
+                
+                if (diff.NewTables.Count > 0)
+                {
+                    errorMsg.AppendLine($"Found {diff.NewTables.Count} unexpected new table(s):");
+                    foreach (SqlTable table in diff.NewTables)
+                    {
+                        errorMsg.AppendLine($"  - {table.Name}");
+                    }
+                    errorMsg.AppendLine();
+                }
+
+                if (diff.DroppedTableNames.Count > 0)
+                {
+                    errorMsg.AppendLine($"Found {diff.DroppedTableNames.Count} missing table(s):");
+                    foreach (string tableName in diff.DroppedTableNames)
+                    {
+                        errorMsg.AppendLine($"  - {tableName}");
+                    }
+                    errorMsg.AppendLine();
+                }
+
+                if (diff.ModifiedTables.Count > 0)
+                {
+                    errorMsg.AppendLine($"Found {diff.ModifiedTables.Count} modified table(s):");
+                    foreach (TableDiff tableDiff in diff.ModifiedTables)
+                    {
+                        errorMsg.AppendLine($"  - {tableDiff.TableName} ({tableDiff.ColumnChanges.Count} column changes, {tableDiff.ForeignKeyChanges.Count} FK changes, {tableDiff.IndexChanges.Count} index changes)");
+                    }
+                    errorMsg.AppendLine();
+                }
+
+                if (diff.NewSequences.Count > 0 || diff.DroppedSequenceNames.Count > 0 || diff.ModifiedSequences.Count > 0)
+                {
+                    errorMsg.AppendLine("Sequence differences found.");
+                    errorMsg.AppendLine();
+                }
+
+                if (diff.NewProcedures.Count > 0 || diff.DroppedProcedureNames.Count > 0 || diff.ModifiedProcedures.Count > 0)
+                {
+                    errorMsg.AppendLine("Stored procedure differences found.");
+                    errorMsg.AppendLine();
+                }
+
+                errorMsg.AppendLine("Use --force to override this verification and claim the migration anyway.");
+
+                return new ResultOrException<MigrationClaimResult>(null, new Exception(errorMsg.ToString()));
+            }
+
+            // Get already applied migrations
+            ResultOrException<List<string>> appliedMigrationsResult = await GetAppliedMigrations(sqlConn, dbName);
+            if (appliedMigrationsResult.Exception is not null)
+            {
+                return new ResultOrException<MigrationClaimResult>(null, appliedMigrationsResult.Exception);
+            }
+
+            HashSet<string> appliedSet = appliedMigrationsResult.Result?.ToHashSet() ?? new HashSet<string>();
+
+            // Find target migration index
+            int targetIndex = allMigrations.FindIndex(m => m.MigrationName == targetMigrationName);
+            if (targetIndex == -1)
+            {
+                return new ResultOrException<MigrationClaimResult>(null, new Exception($"Migration {targetMigrationName} not found"));
+            }
+
+            // Mark all migrations up to and including the target as applied
+            List<string> claimedMigrations = new List<string>();
+            for (int i = 0; i <= targetIndex; i++)
+            {
+                string migrationName = allMigrations[i].MigrationName;
+                if (!appliedSet.Contains(migrationName))
+                {
+                    await RecordMigrationApplied(sqlConn, migrationName, dbName);
+                    claimedMigrations.Add(migrationName);
+                }
+            }
+
+            // Remove migrations that come after the target (they shouldn't be applied)
+            for (int i = targetIndex + 1; i < allMigrations.Count; i++)
+            {
+                string migrationName = allMigrations[i].MigrationName;
+                if (appliedSet.Contains(migrationName))
+                {
+                    await RemoveMigrationRecord(sqlConn, migrationName);
+                }
+            }
+
+            SchemaDiff? differencesForResult = hasDifferences ? diff : null;
+            return new ResultOrException<MigrationClaimResult>(
+                new MigrationClaimResult(targetMigrationName, !hasDifferences, differencesForResult),
+                null);
+        }
+        catch (Exception ex)
+        {
+            return new ResultOrException<MigrationClaimResult>(null, ex);
+        }
     }
 }
 

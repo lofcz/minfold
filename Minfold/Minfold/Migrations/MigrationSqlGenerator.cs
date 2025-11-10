@@ -18,7 +18,7 @@ public static class MigrationSqlGenerator
     public static string GenerateCreateTableStatement(SqlTable table)
     {
         StringBuilder sb = new StringBuilder();
-        sb.Append($"CREATE TABLE [dbo].[{table.Name}]");
+        sb.Append($"CREATE TABLE [{table.Schema}].[{table.Name}]");
         sb.AppendLine("(");
 
         List<KeyValuePair<string, SqlTableColumn>> orderedColumns = table.Columns.OrderBy(x => x.Value.OrdinalPosition).ToList();
@@ -115,10 +115,10 @@ public static class MigrationSqlGenerator
         return sb.ToString();
     }
 
-    public static string GenerateAddColumnStatement(SqlTableColumn column, string tableName)
+    public static string GenerateAddColumnStatement(SqlTableColumn column, string tableName, string schema = "dbo")
     {
         StringBuilder sb = new StringBuilder();
-        sb.Append($"ALTER TABLE [dbo].[{tableName}] ADD [");
+        sb.Append($"ALTER TABLE [{schema}].[{tableName}] ADD [");
         sb.Append(column.Name);
         sb.Append("] ");
 
@@ -184,7 +184,7 @@ public static class MigrationSqlGenerator
     /// Generates SQL to drop a default constraint for a column, if one exists.
     /// Returns empty string if no constraint exists.
     /// </summary>
-    public static string GenerateDropDefaultConstraintStatement(string columnName, string tableName, string? variableSuffix = null)
+    public static string GenerateDropDefaultConstraintStatement(string columnName, string tableName, string? variableSuffix = null, string schema = "dbo")
     {
         // Use provided suffix or generate a GUID-based one to avoid conflicts
         string varSuffix = variableSuffix ?? Guid.NewGuid().ToString("N");
@@ -192,29 +192,29 @@ public static class MigrationSqlGenerator
         StringBuilder sb = new StringBuilder();
         sb.AppendLine($"DECLARE @constraintName_{varSuffix} NVARCHAR(128);");
         sb.AppendLine($"SELECT @constraintName_{varSuffix} = name FROM sys.default_constraints ");
-        sb.AppendLine($"WHERE parent_object_id = OBJECT_ID('[dbo].[{tableName}]') ");
-        sb.AppendLine($"AND parent_column_id = COLUMNPROPERTY(OBJECT_ID('[dbo].[{tableName}]'), '{columnName}', 'ColumnId');");
+        sb.AppendLine($"WHERE parent_object_id = OBJECT_ID('[{schema}].[{tableName}]') ");
+        sb.AppendLine($"AND parent_column_id = COLUMNPROPERTY(OBJECT_ID('[{schema}].[{tableName}]'), '{columnName}', 'ColumnId');");
         sb.AppendLine($"IF @constraintName_{varSuffix} IS NOT NULL");
-        sb.AppendLine($"    EXEC('ALTER TABLE [dbo].[{tableName}] DROP CONSTRAINT [' + @constraintName_{varSuffix} + ']');");
+        sb.AppendLine($"    EXEC('ALTER TABLE [{schema}].[{tableName}] DROP CONSTRAINT [' + @constraintName_{varSuffix} + ']');");
         return sb.ToString();
     }
 
-    public static string GenerateDropColumnStatement(string columnName, string tableName)
+    public static string GenerateDropColumnStatement(string columnName, string tableName, string schema = "dbo")
     {
         // SQL Server requires dropping default constraints before dropping columns
         // Use a GUID-based variable name to avoid conflicts when multiple columns are dropped in the same batch
         string varSuffix = Guid.NewGuid().ToString("N"); // GUID without dashes
         
         StringBuilder sb = new StringBuilder();
-        sb.Append(GenerateDropDefaultConstraintStatement(columnName, tableName, varSuffix));
-        sb.AppendLine($"ALTER TABLE [dbo].[{tableName}] DROP COLUMN [{columnName}];");
+        sb.Append(GenerateDropDefaultConstraintStatement(columnName, tableName, varSuffix, schema));
+        sb.AppendLine($"ALTER TABLE [{schema}].[{tableName}] DROP COLUMN [{columnName}];");
         return sb.ToString();
     }
 
-    public static string GenerateAlterColumnStatement(SqlTableColumn oldColumn, SqlTableColumn newColumn, string tableName)
+    public static string GenerateAlterColumnStatement(SqlTableColumn oldColumn, SqlTableColumn newColumn, string tableName, string schema = "dbo")
     {
         StringBuilder sb = new StringBuilder();
-        sb.Append($"ALTER TABLE [dbo].[{tableName}] ALTER COLUMN [");
+        sb.Append($"ALTER TABLE [{schema}].[{tableName}] ALTER COLUMN [");
         sb.Append(newColumn.Name);
         sb.Append("] ");
 
@@ -269,9 +269,212 @@ public static class MigrationSqlGenerator
         return sb.ToString();
     }
 
+    private static HashSet<string> CalculateRemainingColumns(TableDiff tableDiff, ConcurrentDictionary<string, SqlTable>? currentSchema)
+    {
+        HashSet<string> remainingColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        
+        // Start with all current columns
+        if (currentSchema != null && currentSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? currentTable))
+        {
+            foreach (string columnName in currentTable.Columns.Keys)
+            {
+                remainingColumns.Add(columnName);
+            }
+        }
+        
+        // Remove columns being dropped
+        foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Drop && c.OldColumn != null))
+        {
+            remainingColumns.Remove(change.OldColumn!.Name);
+        }
+        
+        // Remove columns being modified (they'll be re-added if needed)
+        foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Modify && c.OldColumn != null))
+        {
+            // Only remove if it's a DROP+ADD scenario (not ALTER COLUMN)
+            if (change.OldColumn != null && change.NewColumn != null)
+            {
+                bool requiresDropAdd = (change.OldColumn.IsComputed || change.NewColumn.IsComputed) ||
+                                      (change.OldColumn.IsIdentity != change.NewColumn.IsIdentity);
+                
+                if (requiresDropAdd)
+                {
+                    remainingColumns.Remove(change.OldColumn.Name);
+                }
+            }
+        }
+        
+        // Add columns being added
+        foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Add && c.NewColumn != null))
+        {
+            remainingColumns.Add(change.NewColumn!.Name);
+        }
+        
+        // Add columns being modified (they'll be re-added)
+        foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Modify && c.NewColumn != null))
+        {
+            if (change.OldColumn != null && change.NewColumn != null)
+            {
+                bool requiresDropAdd = (change.OldColumn.IsComputed || change.NewColumn.IsComputed) ||
+                                      (change.OldColumn.IsIdentity != change.NewColumn.IsIdentity);
+                
+                if (requiresDropAdd)
+                {
+                    remainingColumns.Add(change.NewColumn.Name);
+                }
+            }
+        }
+        
+        return remainingColumns;
+    }
+    
+    private static bool WouldReduceToZeroColumns(TableDiff tableDiff, ConcurrentDictionary<string, SqlTable>? currentSchema)
+    {
+        HashSet<string> remainingColumns = CalculateRemainingColumns(tableDiff, currentSchema);
+        return remainingColumns.Count == 0;
+    }
+    
+    private static bool IsOnlyColumnInTable(string columnName, TableDiff tableDiff, ConcurrentDictionary<string, SqlTable>? currentSchema)
+    {
+        if (currentSchema == null)
+        {
+            return false;
+        }
+        
+        if (!currentSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? currentTable))
+        {
+            return false;
+        }
+        
+        // Count columns that will remain after drops (excluding this column if it's being modified)
+        HashSet<string> remainingColumns = CalculateRemainingColumns(tableDiff, currentSchema);
+        
+        // If this column is being modified with DROP+ADD, temporarily exclude it from count
+        ColumnChange? modifyChange = tableDiff.ColumnChanges.FirstOrDefault(c => 
+            c.ChangeType == ColumnChangeType.Modify && 
+            c.OldColumn != null && 
+            string.Equals(c.OldColumn.Name, columnName, StringComparison.OrdinalIgnoreCase));
+        
+        if (modifyChange != null && modifyChange.OldColumn != null && modifyChange.NewColumn != null)
+        {
+            bool requiresDropAdd = (modifyChange.OldColumn.IsComputed || modifyChange.NewColumn.IsComputed) ||
+                                  (modifyChange.OldColumn.IsIdentity != modifyChange.NewColumn.IsIdentity);
+            
+            if (requiresDropAdd)
+            {
+                // Temporarily remove this column from count to check if it's the only one
+                HashSet<string> tempRemaining = new HashSet<string>(remainingColumns, StringComparer.OrdinalIgnoreCase);
+                tempRemaining.Remove(columnName);
+                return tempRemaining.Count == 0;
+            }
+        }
+        
+        return remainingColumns.Count == 1 && remainingColumns.Contains(columnName, StringComparer.OrdinalIgnoreCase);
+    }
+    
+    public static string GenerateRenameColumnStatement(string tableName, string oldColumnName, string newColumnName, string schema = "dbo")
+    {
+        return $"EXEC sp_rename '[{schema}].[{tableName}].[{oldColumnName}]', '{newColumnName}', 'COLUMN';";
+    }
+    
+    public static string GenerateSafeColumnDropAndAdd(
+        SqlTableColumn oldColumn, 
+        SqlTableColumn newColumn, 
+        string tableName, 
+        string schema,
+        TableDiff tableDiff,
+        ConcurrentDictionary<string, SqlTable>? currentSchema)
+    {
+        StringBuilder sb = new StringBuilder();
+        
+        // Check if this is the only column by directly checking current schema
+        // This is more reliable than using CalculateRemainingColumns with a partial TableDiff
+        bool isOnlyColumn = false;
+        if (currentSchema != null && currentSchema.TryGetValue(tableName.ToLowerInvariant(), out SqlTable? currentTable))
+        {
+            // Count non-computed columns (computed columns don't count as "data columns" for SQL Server's requirement)
+            int dataColumnCount = currentTable.Columns.Values.Count(c => !c.IsComputed);
+            // Check if the column we're dropping is the only data column
+            isOnlyColumn = dataColumnCount == 1 && 
+                          currentTable.Columns.TryGetValue(oldColumn.Name.ToLowerInvariant(), out SqlTableColumn? col) &&
+                          !col.IsComputed;
+        }
+        
+        // Also check using TableDiff logic (for up script scenarios where we have full context)
+        // Only use this if TableDiff has multiple changes (full context), otherwise rely on direct check
+        bool isOnlyColumnByDiff = false;
+        bool wouldReduceToZero = false;
+        
+        // Only use diff-based checks if we have full context (multiple changes or non-modify changes)
+        // For single-change reversed diffs (like in down scripts), rely on direct schema check
+        if (tableDiff.ColumnChanges.Count > 1 || tableDiff.ColumnChanges.Any(c => c.ChangeType != ColumnChangeType.Modify))
+        {
+            isOnlyColumnByDiff = IsOnlyColumnInTable(oldColumn.Name, tableDiff, currentSchema);
+            wouldReduceToZero = WouldReduceToZeroColumns(tableDiff, currentSchema);
+        }
+        // For single-change scenarios, verify we're not incorrectly using safe wrapper
+        else if (currentSchema != null && currentSchema.TryGetValue(tableName.ToLowerInvariant(), out SqlTable? tableForCheck))
+        {
+            // Double-check: if table has multiple columns, don't use safe wrapper
+            int totalDataColumns = tableForCheck.Columns.Values.Count(c => !c.IsComputed);
+            if (totalDataColumns > 1)
+            {
+                // Table has multiple columns, safe to use normal DROP+ADD
+                isOnlyColumnByDiff = false;
+                wouldReduceToZero = false;
+            }
+        }
+        
+        bool sameName = string.Equals(oldColumn.Name, newColumn.Name, StringComparison.OrdinalIgnoreCase);
+        
+        // Use direct check if available, otherwise fall back to diff-based check
+        bool needsSafeHandling = isOnlyColumn || isOnlyColumnByDiff || wouldReduceToZero;
+        
+        if (needsSafeHandling)
+        {
+            // Unsafe scenario: need to add first, then drop, then rename if needed
+            if (sameName)
+            {
+                // Same name: add with temporary name, drop old, rename
+                string tempColumnName = $"{newColumn.Name}_tmp_{Guid.NewGuid():N}";
+                SqlTableColumn tempColumn = newColumn with { Name = tempColumnName };
+                
+                // Add new column with temporary name
+                sb.Append(GenerateAddColumnStatement(tempColumn, tableName, schema));
+                
+                // Drop old column
+                sb.AppendLine(GenerateDropColumnStatement(oldColumn.Name, tableName, schema));
+                
+                // Rename temporary column to final name
+                sb.AppendLine(GenerateRenameColumnStatement(tableName, tempColumnName, newColumn.Name, schema));
+            }
+            else
+            {
+                // Different name: add new column first, then drop old
+                sb.Append(GenerateAddColumnStatement(newColumn, tableName, schema));
+                sb.AppendLine(GenerateDropColumnStatement(oldColumn.Name, tableName, schema));
+            }
+        }
+        else
+        {
+            // Safe scenario: can drop then add (existing behavior)
+            sb.AppendLine(GenerateDropColumnStatement(oldColumn.Name, tableName, schema));
+            sb.Append(GenerateAddColumnStatement(newColumn, tableName, schema));
+        }
+        
+        return sb.ToString();
+    }
+
     public static string GenerateColumnModifications(TableDiff tableDiff, ConcurrentDictionary<string, SqlTable>? currentSchema = null)
     {
         StringBuilder sb = new StringBuilder();
+
+        // Get schema from current schema or default to dbo
+        string schema = "dbo";
+        if (currentSchema != null && currentSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? currentTable))
+        {
+            schema = currentTable.Schema;
+        }
 
         // Order operations: DROP INDEXES (on columns being dropped), DROP COLUMN, then ALTER COLUMN, then ADD COLUMN
         // This ensures we don't have dependency issues
@@ -279,13 +482,13 @@ public static class MigrationSqlGenerator
         // Drop indexes that reference columns being dropped (must happen before dropping columns)
         if (currentSchema != null)
         {
-            if (currentSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? currentTable))
+            if (currentSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? tableForIndexes))
             {
                 HashSet<string> columnsBeingDropped = new HashSet<string>(tableDiff.ColumnChanges
                     .Where(c => c.ChangeType == ColumnChangeType.Drop && c.OldColumn != null)
                     .Select(c => c.OldColumn!.Name), StringComparer.OrdinalIgnoreCase);
 
-                foreach (SqlIndex index in currentTable.Indexes)
+                foreach (SqlIndex index in tableForIndexes.Indexes)
                 {
                     // If any column in this index is being dropped, drop the index
                     if (index.Columns.Any(col => columnsBeingDropped.Contains(col)))
@@ -296,41 +499,67 @@ public static class MigrationSqlGenerator
             }
         }
 
-        // Drop columns
-        foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Drop))
+        // Pre-calculate lists for processing
+        List<ColumnChange> dropChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Drop).ToList();
+        List<ColumnChange> addChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Add).ToList();
+        List<ColumnChange> modifyChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Modify).ToList();
+        
+        // Check if dropping columns would reduce table to 0 columns
+        // If so, we need to ensure at least one column is added first (from Add operations)
+        bool wouldReduceToZero = WouldReduceToZeroColumns(tableDiff, currentSchema);
+        
+        if (wouldReduceToZero && dropChanges.Count > 0)
+        {
+            // Need to add columns first before dropping to avoid zero-column state
+            // Add columns from Add operations first
+            foreach (ColumnChange change in addChanges)
+            {
+                if (change.NewColumn != null)
+                {
+                    sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName, schema));
+                }
+            }
+        }
+
+        // Drop columns (safe to drop now if we've added replacement columns above, or if not zero-column scenario)
+        foreach (ColumnChange change in dropChanges)
         {
             if (change.OldColumn != null)
             {
-                sb.AppendLine(GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName));
+                sb.AppendLine(GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName, schema));
             }
         }
 
         // Alter columns (excluding computed columns, identity changes, and PK changes which need special handling)
-        foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Modify))
+        foreach (ColumnChange change in modifyChanges)
         {
             if (change.OldColumn != null && change.NewColumn != null)
             {
                 // Check if it's a computed column change - these need DROP + ADD
                 if (change.OldColumn.IsComputed || change.NewColumn.IsComputed)
                 {
-                    // Drop old computed column
-                    if (change.OldColumn.IsComputed)
+                    // Use safe wrapper for computed column changes
+                    if (change.OldColumn.IsComputed && change.NewColumn.IsComputed)
                     {
-                        sb.AppendLine(GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName));
+                        // Both computed - use safe wrapper
+                        sb.Append(GenerateSafeColumnDropAndAdd(change.OldColumn, change.NewColumn, tableDiff.TableName, schema, tableDiff, currentSchema));
                     }
-                    // Add new computed column
-                    if (change.NewColumn.IsComputed)
+                    else if (change.OldColumn.IsComputed)
                     {
-                        sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName));
+                        // Old is computed, new is not - drop computed, add regular
+                        sb.Append(GenerateSafeColumnDropAndAdd(change.OldColumn, change.NewColumn, tableDiff.TableName, schema, tableDiff, currentSchema));
+                    }
+                    else
+                    {
+                        // New is computed, old is not - drop regular, add computed
+                        sb.Append(GenerateSafeColumnDropAndAdd(change.OldColumn, change.NewColumn, tableDiff.TableName, schema, tableDiff, currentSchema));
                     }
                 }
                 // Check if identity property changed - SQL Server requires DROP + ADD
                 else if (change.OldColumn.IsIdentity != change.NewColumn.IsIdentity)
                 {
-                    // Drop old column
-                    sb.AppendLine(GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName));
-                    // Add new column with new identity setting
-                    sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName));
+                    // Use safe wrapper for identity changes
+                    sb.Append(GenerateSafeColumnDropAndAdd(change.OldColumn, change.NewColumn, tableDiff.TableName, schema, tableDiff, currentSchema));
                 }
                 // Check if only PK property changed (and no other significant changes) - handle via PK constraint changes
                 // Note: PK changes are also handled via FK changes, but we need to ensure column is recreated if needed
@@ -342,7 +571,7 @@ public static class MigrationSqlGenerator
                 {
                     // Only PK changed, no other changes - PK constraint will be handled separately
                     // But we still need to handle the column if there are other changes
-                    string alterSql = GenerateAlterColumnStatement(change.OldColumn, change.NewColumn, tableDiff.TableName);
+                    string alterSql = GenerateAlterColumnStatement(change.OldColumn, change.NewColumn, tableDiff.TableName, schema);
                     if (!string.IsNullOrEmpty(alterSql))
                     {
                         sb.Append(alterSql);
@@ -350,7 +579,7 @@ public static class MigrationSqlGenerator
                 }
                 else
                 {
-                    string alterSql = GenerateAlterColumnStatement(change.OldColumn, change.NewColumn, tableDiff.TableName);
+                    string alterSql = GenerateAlterColumnStatement(change.OldColumn, change.NewColumn, tableDiff.TableName, schema);
                     if (!string.IsNullOrEmpty(alterSql))
                     {
                         sb.Append(alterSql);
@@ -359,12 +588,15 @@ public static class MigrationSqlGenerator
             }
         }
 
-        // Add columns
-        foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Add))
+        // Add columns (skip if we already added them above for zero-column scenario)
+        if (!wouldReduceToZero || dropChanges.Count == 0)
         {
-            if (change.NewColumn != null)
+            foreach (ColumnChange change in addChanges)
             {
-                sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName));
+                if (change.NewColumn != null)
+                {
+                    sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName, schema));
+                }
             }
         }
 
@@ -381,9 +613,7 @@ public static class MigrationSqlGenerator
         SqlForeignKey firstFk = fkGroup[0];
         StringBuilder sb = new StringBuilder();
 
-        sb.Append("ALTER TABLE [dbo].[");
-        sb.Append(firstFk.Table);
-        sb.Append("] WITH ");
+        sb.Append($"ALTER TABLE [{firstFk.Schema}].[{firstFk.Table}] WITH ");
         sb.Append(firstFk.NotEnforced ? "NOCHECK" : "CHECK");
         sb.Append(" ADD CONSTRAINT [");
         sb.Append(firstFk.Name);
@@ -394,9 +624,7 @@ public static class MigrationSqlGenerator
         List<string> refColumns = fkGroup.OrderBy(f => f.Column).Select(f => $"[{f.RefColumn}]").ToList();
 
         sb.Append(string.Join(", ", columns));
-        sb.Append(") REFERENCES [dbo].[");
-        sb.Append(firstFk.RefTable);
-        sb.Append("](");
+        sb.Append($") REFERENCES [{firstFk.RefSchema}].[{firstFk.RefTable}](");
         sb.Append(string.Join(", ", refColumns));
         sb.Append(")");
 
@@ -438,11 +666,8 @@ public static class MigrationSqlGenerator
         // Enable constraint if it was enforced
         if (!firstFk.NotEnforced)
         {
-            sb.Append("ALTER TABLE [dbo].[");
-            sb.Append(firstFk.Table);
-            sb.Append("] CHECK CONSTRAINT [");
-            sb.Append(firstFk.Name);
-            sb.AppendLine("];");
+            sb.Append($"ALTER TABLE [{firstFk.Schema}].[{firstFk.Table}] CHECK CONSTRAINT [{firstFk.Name}];");
+            sb.AppendLine();
         }
 
         return sb.ToString();
@@ -450,18 +675,30 @@ public static class MigrationSqlGenerator
 
     public static string GenerateDropForeignKeyStatement(SqlForeignKey fk)
     {
-        return $"ALTER TABLE [dbo].[{fk.Table}] DROP CONSTRAINT [{fk.Name}];";
+        return $"ALTER TABLE [{fk.Schema}].[{fk.Table}] DROP CONSTRAINT [{fk.Name}];";
     }
 
-    public static string GenerateDropPrimaryKeyStatement(string tableName, string constraintName)
+    public static string GenerateDropPrimaryKeyStatement(string tableName, string constraintName, string schema = "dbo", string? variableSuffix = null)
     {
-        return $"ALTER TABLE [dbo].[{tableName}] DROP CONSTRAINT [{constraintName}];";
+        // Use provided suffix or generate a GUID-based one to avoid conflicts
+        string varSuffix = variableSuffix ?? Guid.NewGuid().ToString("N");
+        
+        // Use dynamic SQL to check if constraint exists before dropping
+        return $"""
+            DECLARE @pkConstraintName_{varSuffix} NVARCHAR(128);
+            SELECT @pkConstraintName_{varSuffix} = name FROM sys.key_constraints 
+            WHERE parent_object_id = OBJECT_ID('[{schema}].[{tableName}]') 
+            AND type = 'PK'
+            AND name = '{constraintName}';
+            IF @pkConstraintName_{varSuffix} IS NOT NULL
+                EXEC('ALTER TABLE [{schema}].[{tableName}] DROP CONSTRAINT [' + @pkConstraintName_{varSuffix} + ']');
+            """;
     }
 
-    public static string GenerateAddPrimaryKeyStatement(string tableName, List<string> columnNames, string constraintName)
+    public static string GenerateAddPrimaryKeyStatement(string tableName, List<string> columnNames, string constraintName, string schema = "dbo")
     {
         StringBuilder sb = new StringBuilder();
-        sb.Append($"ALTER TABLE [dbo].[{tableName}] ADD CONSTRAINT [{constraintName}] PRIMARY KEY (");
+        sb.Append($"ALTER TABLE [{schema}].[{tableName}] ADD CONSTRAINT [{constraintName}] PRIMARY KEY (");
         sb.Append(string.Join(", ", columnNames.Select(c => $"[{c}]")));
         sb.AppendLine(");");
         return sb.ToString();
@@ -471,9 +708,9 @@ public static class MigrationSqlGenerator
     {
         // Use dynamic SQL to check if index exists before dropping
         return $"""
-            IF EXISTS (SELECT * FROM sys.indexes WHERE name = '{index.Name}' AND object_id = OBJECT_ID('[dbo].[{index.Table}]'))
+            IF EXISTS (SELECT * FROM sys.indexes WHERE name = '{index.Name}' AND object_id = OBJECT_ID('[{index.Schema}].[{index.Table}]'))
             BEGIN
-                DROP INDEX [{index.Name}] ON [dbo].[{index.Table}];
+                DROP INDEX [{index.Name}] ON [{index.Schema}].[{index.Table}];
             END
             """;
     }
@@ -483,9 +720,9 @@ public static class MigrationSqlGenerator
         StringBuilder sb = new StringBuilder();
         // Use dynamic SQL to check if index doesn't exist before creating
         sb.AppendLine($"""
-            IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = '{index.Name}' AND object_id = OBJECT_ID('[dbo].[{index.Table}]'))
+            IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = '{index.Name}' AND object_id = OBJECT_ID('[{index.Schema}].[{index.Table}]'))
             BEGIN
-                CREATE {(index.IsUnique ? "UNIQUE " : "")}NONCLUSTERED INDEX [{index.Name}] ON [dbo].[{index.Table}] ({string.Join(", ", index.Columns.Select(c => $"[{c}]"))});
+                CREATE {(index.IsUnique ? "UNIQUE " : "")}NONCLUSTERED INDEX [{index.Name}] ON [{index.Schema}].[{index.Table}] ({string.Join(", ", index.Columns.Select(c => $"[{c}]"))});
             END
             """);
         return sb.ToString();
@@ -494,7 +731,7 @@ public static class MigrationSqlGenerator
     public static string GenerateCreateSequenceStatement(SqlSequence sequence)
     {
         StringBuilder sb = new StringBuilder();
-        sb.Append($"CREATE SEQUENCE [dbo].[{sequence.Name}] AS {sequence.DataType}");
+        sb.Append($"CREATE SEQUENCE [{sequence.Schema}].[{sequence.Name}] AS {sequence.DataType}");
         
         if (sequence.StartValue.HasValue)
         {
@@ -546,13 +783,13 @@ public static class MigrationSqlGenerator
         return sb.ToString();
     }
 
-    public static string GenerateDropSequenceStatement(string sequenceName)
+    public static string GenerateDropSequenceStatement(string sequenceName, string schema = "dbo")
     {
         // Use dynamic SQL to check if sequence exists before dropping
         return $"""
-            IF EXISTS (SELECT * FROM sys.sequences WHERE name = '{sequenceName}' AND schema_id = SCHEMA_ID('dbo'))
+            IF EXISTS (SELECT * FROM sys.sequences WHERE name = '{sequenceName}' AND schema_id = SCHEMA_ID('{schema}'))
             BEGIN
-                DROP SEQUENCE [dbo].[{sequenceName}];
+                DROP SEQUENCE [{schema}].[{sequenceName}];
             END
             """;
     }
@@ -563,7 +800,7 @@ public static class MigrationSqlGenerator
         // But for incremental changes, we can try ALTER for some properties
         // For simplicity and reliability, we'll use DROP + CREATE
         StringBuilder sb = new StringBuilder();
-        sb.AppendLine(GenerateDropSequenceStatement(oldSequence.Name));
+        sb.AppendLine(GenerateDropSequenceStatement(oldSequence.Name, oldSequence.Schema));
         sb.Append(GenerateCreateSequenceStatement(newSequence));
         return sb.ToString();
     }
@@ -574,21 +811,21 @@ public static class MigrationSqlGenerator
         // This ensures idempotency and proper batching
         return $"""
             GO
-            IF EXISTS (SELECT * FROM sys.procedures WHERE name = '{procedure.Name}' AND schema_id = SCHEMA_ID('dbo'))
-                DROP PROCEDURE [dbo].[{procedure.Name}];
+            IF EXISTS (SELECT * FROM sys.procedures WHERE name = '{procedure.Name}' AND schema_id = SCHEMA_ID('{procedure.Schema}'))
+                DROP PROCEDURE [{procedure.Schema}].[{procedure.Name}];
             GO
             {procedure.Definition}
             GO
             """;
     }
 
-    public static string GenerateDropProcedureStatement(string procedureName)
+    public static string GenerateDropProcedureStatement(string procedureName, string schema = "dbo")
     {
         // DROP PROCEDURE can be in a batch, but we add GO for consistency and to ensure proper batching
         return $"""
             GO
-            IF EXISTS (SELECT * FROM sys.procedures WHERE name = '{procedureName}' AND schema_id = SCHEMA_ID('dbo'))
-                DROP PROCEDURE [dbo].[{procedureName}];
+            IF EXISTS (SELECT * FROM sys.procedures WHERE name = '{procedureName}' AND schema_id = SCHEMA_ID('{schema}'))
+                DROP PROCEDURE [{schema}].[{procedureName}];
             GO
             """;
     }

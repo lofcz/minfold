@@ -55,3 +55,18 @@ public static class MigrationUtilities
     }
 }
 
+public static class MigrationLogger
+{
+    private static Action<string>? _logCallback;
+
+    public static void SetLogger(Action<string>? callback)
+    {
+        _logCallback = callback;
+    }
+
+    public static void Log(string message)
+    {
+        _logCallback?.Invoke(message);
+    }
+}
+

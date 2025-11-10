@@ -231,7 +231,7 @@ public class SqlService
                  """;
     }
     
-    static string SqlSchema(string dbName, List<string>? tables)
+    static string SqlSchema(string dbName, List<string>? tables, List<string> schemas)
     {
         StringBuilder? sb = null;
 
@@ -251,9 +251,24 @@ public class SqlService
             }
         }
 
+        // Build schema filter
+        StringBuilder schemaFilter = new StringBuilder();
+        for (int i = 0; i < schemas.Count; i++)
+        {
+            if (i == 0)
+            {
+                schemaFilter.Append($"col.TABLE_SCHEMA = '{schemas[i]}'");
+            }
+            else
+            {
+                schemaFilter.Append($" OR col.TABLE_SCHEMA = '{schemas[i]}'");
+            }
+        }
+
         return $$"""
                    use [{{dbName}}]
-                   select col.TABLE_NAME, 
+                   select col.TABLE_SCHEMA,
+                   col.TABLE_NAME, 
                    col.COLUMN_NAME, 
                    col.ORDINAL_POSITION, 
                    col.IS_NULLABLE, 
@@ -303,7 +318,7 @@ public class SqlService
                             and c.CONSTRAINT_NAME = k.CONSTRAINT_NAME
                         where c.CONSTRAINT_TYPE = 'PRIMARY KEY'
                     ) j on col.COLUMN_NAME = j.COLUMN_NAME and j.TABLE_NAME = col.TABLE_NAME
-                    where TABLE_SCHEMA = 'dbo' 
+                    where ({{schemaFilter}})
                         {{(tables is null ? string.Empty : $"and col.TABLE_NAME in ({sb})")}}
                     order by col.TABLE_NAME, col.COLUMN_NAME
                  """;
@@ -399,7 +414,7 @@ public class SqlService
         return new ResultOrException<ConcurrentDictionary<string, int>>(tablesMap, null);
     }
 
-    public async Task<ResultOrException<ConcurrentDictionary<string, SqlSequence>>> GetSequences(string dbName)
+    public async Task<ResultOrException<ConcurrentDictionary<string, SqlSequence>>> GetSequences(string dbName, List<string>? schemas = null)
     {
         await using SqlConnectionResult conn = await Connect();
 
@@ -408,9 +423,24 @@ public class SqlService
             return new ResultOrException<ConcurrentDictionary<string, SqlSequence>>(null, conn.Exception);
         }
 
+        List<string> allowedSchemas = schemas ?? ["dbo"];
+        StringBuilder schemaFilter = new StringBuilder();
+        for (int i = 0; i < allowedSchemas.Count; i++)
+        {
+            if (i == 0)
+            {
+                schemaFilter.Append($"SCHEMA_NAME(s.schema_id) = '{allowedSchemas[i]}'");
+            }
+            else
+            {
+                schemaFilter.Append($" OR SCHEMA_NAME(s.schema_id) = '{allowedSchemas[i]}'");
+            }
+        }
+
         string sql = $"""
             USE [{dbName}];
             SELECT 
+                SCHEMA_NAME(s.schema_id) AS SEQUENCE_SCHEMA,
                 s.name AS SEQUENCE_NAME,
                 t.name AS DATA_TYPE,
                 s.start_value AS START_VALUE,
@@ -423,6 +453,7 @@ public class SqlService
             FROM sys.sequences s
             INNER JOIN sys.types t ON s.user_type_id = t.user_type_id
             WHERE s.is_ms_shipped = 0
+                AND ({schemaFilter})
             ORDER BY s.name
             """;
 
@@ -433,25 +464,26 @@ public class SqlService
 
         while (await reader.ReadAsync())
         {
-            string sequenceName = reader.GetString(0);
-            string dataType = reader.GetString(1);
+            string sequenceSchema = reader.GetString(0);
+            string sequenceName = reader.GetString(1);
+            string dataType = reader.GetString(2);
             // Sequence values can be int or bigint depending on sequence type, so use Convert.ToInt64 to handle both
-            long? startValue = reader.IsDBNull(2) ? null : Convert.ToInt64(reader.GetValue(2));
-            long? increment = reader.IsDBNull(3) ? null : Convert.ToInt64(reader.GetValue(3));
-            long? minValue = reader.IsDBNull(4) ? null : Convert.ToInt64(reader.GetValue(4));
-            long? maxValue = reader.IsDBNull(5) ? null : Convert.ToInt64(reader.GetValue(5));
-            bool cycle = reader.GetBoolean(6);
-            long? cacheSize = reader.IsDBNull(7) ? null : Convert.ToInt64(reader.GetValue(7));
-            string? definition = reader.IsDBNull(8) ? null : reader.GetString(8);
+            long? startValue = reader.IsDBNull(3) ? null : Convert.ToInt64(reader.GetValue(3));
+            long? increment = reader.IsDBNull(4) ? null : Convert.ToInt64(reader.GetValue(4));
+            long? minValue = reader.IsDBNull(5) ? null : Convert.ToInt64(reader.GetValue(5));
+            long? maxValue = reader.IsDBNull(6) ? null : Convert.ToInt64(reader.GetValue(6));
+            bool cycle = reader.GetBoolean(7);
+            long? cacheSize = reader.IsDBNull(8) ? null : Convert.ToInt64(reader.GetValue(8));
+            string? definition = reader.IsDBNull(9) ? null : reader.GetString(9);
 
-            SqlSequence sequence = new SqlSequence(sequenceName, dataType, startValue, increment, minValue, maxValue, cycle, cacheSize, definition);
+            SqlSequence sequence = new SqlSequence(sequenceName, dataType, startValue, increment, minValue, maxValue, cycle, cacheSize, definition, sequenceSchema);
             sequences.TryAdd(sequenceName.ToLowerInvariant(), sequence);
         }
 
         return new ResultOrException<ConcurrentDictionary<string, SqlSequence>>(sequences, null);
     }
 
-    public async Task<ResultOrException<ConcurrentDictionary<string, SqlStoredProcedure>>> GetStoredProcedures(string dbName)
+    public async Task<ResultOrException<ConcurrentDictionary<string, SqlStoredProcedure>>> GetStoredProcedures(string dbName, List<string>? schemas = null)
     {
         await using SqlConnectionResult conn = await Connect();
 
@@ -460,16 +492,31 @@ public class SqlService
             return new ResultOrException<ConcurrentDictionary<string, SqlStoredProcedure>>(null, conn.Exception);
         }
 
+        List<string> allowedSchemas = schemas ?? ["dbo"];
+        StringBuilder schemaFilter = new StringBuilder();
+        for (int i = 0; i < allowedSchemas.Count; i++)
+        {
+            if (i == 0)
+            {
+                schemaFilter.Append($"s.name = '{allowedSchemas[i]}'");
+            }
+            else
+            {
+                schemaFilter.Append($" OR s.name = '{allowedSchemas[i]}'");
+            }
+        }
+
         string sql = $"""
             USE [{dbName}];
             SELECT 
+                s.name AS PROCEDURE_SCHEMA,
                 p.name AS PROCEDURE_NAME,
                 OBJECT_DEFINITION(p.object_id) AS DEFINITION
             FROM sys.procedures p
             INNER JOIN sys.schemas s ON p.schema_id = s.schema_id
             WHERE p.type = 'P'
                 AND p.is_ms_shipped = 0
-                AND s.name = 'dbo'
+                AND ({schemaFilter})
             ORDER BY p.name
             """;
 
@@ -480,17 +527,18 @@ public class SqlService
 
         while (await reader.ReadAsync())
         {
-            string procedureName = reader.GetString(0);
-            string definition = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
+            string procedureSchema = reader.GetString(0);
+            string procedureName = reader.GetString(1);
+            string definition = reader.IsDBNull(2) ? string.Empty : reader.GetString(2);
 
-            SqlStoredProcedure procedure = new SqlStoredProcedure(procedureName, definition);
+            SqlStoredProcedure procedure = new SqlStoredProcedure(procedureName, definition, procedureSchema);
             procedures.TryAdd(procedureName.ToLowerInvariant(), procedure);
         }
 
         return new ResultOrException<ConcurrentDictionary<string, SqlStoredProcedure>>(procedures, null);
     }
 
-    public async Task<ResultOrException<ConcurrentDictionary<string, SqlTable>>> GetSchema(string dbName, List<string>? selectTables = null, List<string>? excludeTables = null)
+    public async Task<ResultOrException<ConcurrentDictionary<string, SqlTable>>> GetSchema(string dbName, List<string>? selectTables = null, List<string>? excludeTables = null, List<string>? schemas = null)
     {
         await using SqlConnectionResult conn = await Connect();
 
@@ -499,7 +547,8 @@ public class SqlService
             return new ResultOrException<ConcurrentDictionary<string, SqlTable>>(null, conn.Exception);
         }
 
-        string sql = SqlSchema(dbName, selectTables);
+        List<string> allowedSchemas = schemas ?? ["dbo"];
+        string sql = SqlSchema(dbName, selectTables, allowedSchemas);
         SqlCommand command = new SqlCommand(sql, conn.Connection);
    
         if (selectTables is not null)
@@ -517,7 +566,8 @@ public class SqlService
         
         while (reader.Read())
         {
-            string tableName = reader.GetString(0);
+            string tableSchema = reader.GetString(0);
+            string tableName = reader.GetString(1);
             
             // Skip excluded tables
             if (excludeSet.Contains(tableName.ToLowerInvariant()))
@@ -525,23 +575,23 @@ public class SqlService
                 continue;
             }
             
-            string columnName = reader.GetString(1);
-            int ordinalPosition = reader.GetInt32(2);
-            bool isNullable = reader.GetString(3) is "YES";
-            string dataType = reader.GetString(4);
-            bool isIdentity = reader.GetInt32(5) is 1;
-            bool isComputed = reader.GetInt32(6) is 1;
-            bool isPk = reader.GetInt32(7) is 1;
-            string? computedSql = reader.GetValue(8) as string;
-            int? lengthOrPrecision = reader.GetValue(9) as int?;
+            string columnName = reader.GetString(2);
+            int ordinalPosition = reader.GetInt32(3);
+            bool isNullable = reader.GetString(4) is "YES";
+            string dataType = reader.GetString(5);
+            bool isIdentity = reader.GetInt32(6) is 1;
+            bool isComputed = reader.GetInt32(7) is 1;
+            bool isPk = reader.GetInt32(8) is 1;
+            string? computedSql = reader.GetValue(9) as string;
+            int? lengthOrPrecision = reader.GetValue(10) as int?;
             
             // Read identity seed and increment (sql_variant, need to convert)
             long? identitySeed = null;
             long? identityIncrement = null;
             if (isIdentity)
             {
-                object? seedValue = reader.GetValue(10);
-                object? incrementValue = reader.GetValue(11);
+                object? seedValue = reader.GetValue(11);
+                object? incrementValue = reader.GetValue(12);
                 
                 if (seedValue != null && seedValue != DBNull.Value)
                 {
@@ -555,12 +605,22 @@ public class SqlService
                 }
             }
             
-            if (!(Enum.TryParse(typeof(SqlDbType), dataType, true, out object? dataTypeObject) && dataTypeObject is SqlDbType dt))
+            SqlDbTypeExt sqlDbTypeExt;
+            if (Enum.TryParse(typeof(SqlDbType), dataType, true, out object? dataTypeObject) && dataTypeObject is SqlDbType dt)
             {
-                continue;
+                sqlDbTypeExt = (SqlDbTypeExt)dt;
+            }
+            else
+            {
+                // Fallback for types not in SqlDbType enum (e.g., Json in SQL Server 2025)
+                sqlDbTypeExt = dataType.ToSqlDbType();
+                if (sqlDbTypeExt == SqlDbTypeExt.Unknown)
+                {
+                    continue;
+                }
             }
             
-            SqlTableColumn column = new SqlTableColumn(columnName, ordinalPosition, isNullable, isIdentity, (SqlDbTypeExt)dt, [], isComputed, isPk, computedSql, lengthOrPrecision, identitySeed, identityIncrement);
+            SqlTableColumn column = new SqlTableColumn(columnName, ordinalPosition, isNullable, isIdentity, sqlDbTypeExt, [], isComputed, isPk, computedSql, lengthOrPrecision, identitySeed, identityIncrement);
             
             if (tables.TryGetValue(tableName.ToLowerInvariant(), out SqlTable? table))
             {
@@ -568,14 +628,17 @@ public class SqlService
             }
             else
             {
-                tables.TryAdd(tableName.ToLowerInvariant(), new SqlTable(tableName, new Dictionary<string, SqlTableColumn> { {column.Name.ToLowerInvariant(), column} }, new List<SqlIndex>()));
+                tables.TryAdd(tableName.ToLowerInvariant(), new SqlTable(tableName, new Dictionary<string, SqlTableColumn> { {column.Name.ToLowerInvariant(), column} }, new List<SqlIndex>(), tableSchema));
             }
         }
         
         // Query indexes for all tables
         await reader.CloseAsync();
-        foreach (string tableName in tables.Keys)
+        foreach (KeyValuePair<string, SqlTable> tablePair in tables)
         {
+            string tableName = tablePair.Key;
+            SqlTable table = tablePair.Value;
+            
             if (excludeSet.Contains(tableName.ToLowerInvariant()))
             {
                 continue;
@@ -589,7 +652,7 @@ public class SqlService
                 FROM sys.indexes i
                 INNER JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
                 INNER JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-                WHERE i.object_id = OBJECT_ID('[dbo].[{tableName}]')
+                WHERE i.object_id = OBJECT_ID('[{table.Schema}].[{tableName}]')
                     AND i.is_primary_key = 0
                     AND i.type = 2
                 GROUP BY i.name, i.is_unique
@@ -606,14 +669,14 @@ public class SqlService
                 string columnNamesStr = indexReader.GetString(2);
                 List<string> columnNames = columnNamesStr.Split(',').ToList();
                 
-                indexes.Add(new SqlIndex(indexName, tableName, columnNames, isUnique));
+                indexes.Add(new SqlIndex(indexName, tableName, columnNames, isUnique, table.Schema));
             }
             
             await indexReader.CloseAsync();
             
-            if (tables.TryGetValue(tableName.ToLowerInvariant(), out SqlTable? table))
+            if (tables.TryGetValue(tableName.ToLowerInvariant(), out SqlTable? tableToUpdate))
             {
-                tables[tableName.ToLowerInvariant()] = table with { Indexes = indexes };
+                tables[tableName.ToLowerInvariant()] = tableToUpdate with { Indexes = indexes };
             }
         }
 

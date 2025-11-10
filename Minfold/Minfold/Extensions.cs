@@ -117,6 +117,7 @@ public static class Extensions
         { "nvarchar", SqlDbTypeExt.NVarChar },
         { "nchar", SqlDbTypeExt.NChar },
         { "xml", SqlDbTypeExt.Xml },
+        { "json", SqlDbTypeExt.Json },
         { "sysname", SqlDbTypeExt.Sysname }
     };
 
@@ -159,6 +160,7 @@ public static class Extensions
         { SqlDbTypeExt.NVarChar, "string" },
         { SqlDbTypeExt.SmallDateTime, "DateTime" },
         { SqlDbTypeExt.Xml, "string" },
+        { SqlDbTypeExt.Json, "string" },
         { SqlDbTypeExt.BigInt, "long" },
         { SqlDbTypeExt.Unknown, "object" }
     };
