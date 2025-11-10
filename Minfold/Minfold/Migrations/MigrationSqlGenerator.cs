@@ -83,7 +83,10 @@ public static class MigrationSqlGenerator
                 // Identity
                 if (col.IsIdentity)
                 {
-                    sb.Append(" IDENTITY(1,1)");
+                    // Use actual seed and increment values from scripted SQL, default to (1,1) if not available
+                    long seed = col.IdentitySeed ?? 1;
+                    long increment = col.IdentityIncrement ?? 1;
+                    sb.Append($" IDENTITY({seed},{increment})");
                 }
             }
 
@@ -166,7 +169,10 @@ public static class MigrationSqlGenerator
             // Identity
             if (column.IsIdentity)
             {
-                sb.Append(" IDENTITY(1,1)");
+                // Use actual seed and increment values from scripted SQL, default to (1,1) if not available
+                long seed = column.IdentitySeed ?? 1;
+                long increment = column.IdentityIncrement ?? 1;
+                sb.Append($" IDENTITY({seed},{increment})");
             }
         }
 
@@ -483,6 +489,108 @@ public static class MigrationSqlGenerator
             END
             """);
         return sb.ToString();
+    }
+
+    public static string GenerateCreateSequenceStatement(SqlSequence sequence)
+    {
+        StringBuilder sb = new StringBuilder();
+        sb.Append($"CREATE SEQUENCE [dbo].[{sequence.Name}] AS {sequence.DataType}");
+        
+        if (sequence.StartValue.HasValue)
+        {
+            sb.Append($" START WITH {sequence.StartValue.Value}");
+        }
+        
+        if (sequence.Increment.HasValue)
+        {
+            sb.Append($" INCREMENT BY {sequence.Increment.Value}");
+        }
+        
+        if (sequence.MinValue.HasValue)
+        {
+            sb.Append($" MINVALUE {sequence.MinValue.Value}");
+        }
+        else
+        {
+            sb.Append(" NO MINVALUE");
+        }
+        
+        if (sequence.MaxValue.HasValue)
+        {
+            sb.Append($" MAXVALUE {sequence.MaxValue.Value}");
+        }
+        else
+        {
+            sb.Append(" NO MAXVALUE");
+        }
+        
+        if (sequence.Cycle)
+        {
+            sb.Append(" CYCLE");
+        }
+        else
+        {
+            sb.Append(" NO CYCLE");
+        }
+        
+        if (sequence.CacheSize.HasValue)
+        {
+            sb.Append($" CACHE {sequence.CacheSize.Value}");
+        }
+        else
+        {
+            sb.Append(" NO CACHE");
+        }
+        
+        sb.AppendLine(";");
+        return sb.ToString();
+    }
+
+    public static string GenerateDropSequenceStatement(string sequenceName)
+    {
+        // Use dynamic SQL to check if sequence exists before dropping
+        return $"""
+            IF EXISTS (SELECT * FROM sys.sequences WHERE name = '{sequenceName}' AND schema_id = SCHEMA_ID('dbo'))
+            BEGIN
+                DROP SEQUENCE [dbo].[{sequenceName}];
+            END
+            """;
+    }
+
+    public static string GenerateAlterSequenceStatement(SqlSequence oldSequence, SqlSequence newSequence)
+    {
+        // SQL Server doesn't support ALTER SEQUENCE for all properties, so we'll use DROP + CREATE
+        // But for incremental changes, we can try ALTER for some properties
+        // For simplicity and reliability, we'll use DROP + CREATE
+        StringBuilder sb = new StringBuilder();
+        sb.AppendLine(GenerateDropSequenceStatement(oldSequence.Name));
+        sb.Append(GenerateCreateSequenceStatement(newSequence));
+        return sb.ToString();
+    }
+
+    public static string GenerateCreateProcedureStatement(SqlStoredProcedure procedure)
+    {
+        // CREATE PROCEDURE must be the first statement in a batch, so we use DROP IF EXISTS + GO + CREATE pattern
+        // This ensures idempotency and proper batching
+        return $"""
+            GO
+            IF EXISTS (SELECT * FROM sys.procedures WHERE name = '{procedure.Name}' AND schema_id = SCHEMA_ID('dbo'))
+                DROP PROCEDURE [dbo].[{procedure.Name}];
+            GO
+            {procedure.Definition}
+            GO
+            """;
+    }
+
+    public static string GenerateDropProcedureStatement(string procedureName)
+    {
+        // DROP PROCEDURE can be in a batch, but we add GO for consistency and to ensure proper batching
+        return $"""
+            GO
+            IF EXISTS (SELECT * FROM sys.procedures WHERE name = '{procedureName}' AND schema_id = SCHEMA_ID('dbo'))
+                DROP PROCEDURE [dbo].[{procedureName}];
+            GO
+            """;
     }
 }
 

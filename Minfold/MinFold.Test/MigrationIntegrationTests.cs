@@ -86,9 +86,10 @@ public class MigrationIntegrationTests
             // Step 2.8: Rollback complex migration and verify schema restored
             await Step2_8_RollbackComplexMigration(tempProjectPath, tempDbConnectionString, tempDbName, step1State.Schema, step2_6State.MigrationName!);
 
-            // Step 3: Make schema changes (add column, add table, add FK)
+            // Step 3: Make schema changes (add column, add table, add FK, add sequences, add procedures)
             await Step3_MakeSchemaChanges(tempDbConnectionString, tempDbName);
             MigrationTestState step3State = await GetCurrentState(tempDbConnectionString, tempDbName, tempProjectPath, "Step3", null);
+            (ConcurrentDictionary<string, SqlSequence> step3Sequences, ConcurrentDictionary<string, SqlStoredProcedure> step3Procedures) = await GetCurrentSequencesAndProcedures(tempDbConnectionString, tempDbName);
             stateHistory["Step3"] = step3State;
 
             // Step 4: Generate incremental migration #1
@@ -116,8 +117,8 @@ public class MigrationIntegrationTests
                 Assert.That(applyResult.Result, Is.Not.Null, "Step 5: Apply migrations returned null result");
                 Assert.That(applyResult.Result!.AppliedMigrations.Count, Is.EqualTo(2), "Step 5: Expected exactly 2 migrations to be applied (initial + migration #1)");
                 
-                // Verify schema matches Step 3 state
-                await VerifySchemaMatches(freshDb2ConnectionString, freshDb2Name, step3State.Schema);
+                // Verify schema matches Step 3 state (including sequences and procedures)
+                await VerifySchemaMatches(freshDb2ConnectionString, freshDb2Name, step3State.Schema, step3Sequences, step3Procedures);
                 
                 // Get migration #1 name for state tracking
                 Assert.That(stateHistory["Step4"].MigrationName, Is.Not.Null, "Step 5: Step4 migration name is null");
@@ -136,32 +137,34 @@ public class MigrationIntegrationTests
             await Step5_5_VerifyNoChangesMigration(tempProjectPath, tempDbConnectionString, tempDbName, 
                 stateHistory["Step1"].MigrationName!, stateHistory["Step4"].MigrationName!);
 
-            // Step 6: Make more schema changes (modify column, drop column, modify FK)
+            // Step 6: Make more schema changes (modify column, drop column, modify FK, modify/drop sequences, modify/drop procedures)
             await Step6_MakeMoreSchemaChanges(tempDbConnectionString, tempDbName);
             MigrationTestState step6State = await GetCurrentState(tempDbConnectionString, tempDbName, tempProjectPath, "Step6", null);
+            (ConcurrentDictionary<string, SqlSequence> step6Sequences, ConcurrentDictionary<string, SqlStoredProcedure> step6Procedures) = await GetCurrentSequencesAndProcedures(tempDbConnectionString, tempDbName);
             stateHistory["Step6"] = step6State;
 
             // Step 7: Generate incremental migration #2
             MigrationTestState step7State = await Step7_GenerateIncrementalMigration2(tempProjectPath, tempDbConnectionString, tempDbName);
             stateHistory["Step7"] = step7State;
 
-            // Step 8: Apply migration #2, verify schema
-            MigrationTestState step8State = await Step8_ApplyMigration2AndVerify(tempProjectPath, tempDbConnectionString, tempDbName, step6State.Schema);
+            // Step 8: Apply migration #2, verify schema (including sequences and procedures)
+            MigrationTestState step8State = await Step8_ApplyMigration2AndVerify(tempProjectPath, tempDbConnectionString, tempDbName, step6State.Schema, step6Sequences, step6Procedures);
             stateHistory["Step8"] = step8State;
 
             // Step 9: Rollback to migration #1, verify schema matches Step 5 state
             Assert.That(stateHistory["Step5"].MigrationName, Is.Not.Null, "Step 9: Step5 migration name is null");
-            await Step9_RollbackToMigration1(tempProjectPath, tempDbConnectionString, tempDbName, stateHistory["Step5"].Schema, stateHistory["Step5"].MigrationName!);
+            await Step9_RollbackToMigration1(tempProjectPath, tempDbConnectionString, tempDbName, stateHistory["Step5"].Schema, step3Sequences, step3Procedures, stateHistory["Step5"].MigrationName!);
 
-            // Step 10: Reapply migration #2, verify schema matches Step 8 state
-            await Step10_ReapplyMigration2(tempProjectPath, tempDbConnectionString, tempDbName, stateHistory["Step8"].Schema);
+            // Step 10: Reapply migration #2, verify schema matches Step 8 state (including sequences and procedures)
+            // step6Sequences should only contain Seq_OrderNumber (modified), not Seq_InvoiceNumber (dropped by Step 6)
+            await Step10_ReapplyMigration2(tempProjectPath, tempDbConnectionString, tempDbName, stateHistory["Step8"].Schema, step6Sequences, step6Procedures);
 
             // Step 11: Rollback to initial migration, verify schema matches Step 2 state
             Assert.That(stateHistory["Step2"].MigrationName, Is.Not.Null, "Step 11: Step2 migration name is null");
             await Step11_RollbackToInitial(tempProjectPath, tempDbConnectionString, tempDbName, stateHistory["Step2"].Schema, stateHistory["Step2"].MigrationName!);
 
-            // Step 12: Reapply all migrations, verify final schema matches Step 8 state
-            await Step12_ReapplyAllMigrations(tempProjectPath, tempDbConnectionString, tempDbName, stateHistory["Step8"].Schema);
+            // Step 12: Reapply all migrations, verify final schema matches Step 8 state (including sequences and procedures)
+            await Step12_ReapplyAllMigrations(tempProjectPath, tempDbConnectionString, tempDbName, stateHistory["Step8"].Schema, step6Sequences, step6Procedures);
         }
         finally
         {
@@ -311,14 +314,30 @@ public class MigrationIntegrationTests
         return schemaResult.Result;
     }
 
-    private async Task VerifySchemaMatches(string connectionString, string dbName, ConcurrentDictionary<string, SqlTable> expectedSchema)
+    private async Task VerifySchemaMatches(string connectionString, string dbName, ConcurrentDictionary<string, SqlTable> expectedSchema, 
+        ConcurrentDictionary<string, SqlSequence> expectedSequences, 
+        ConcurrentDictionary<string, SqlStoredProcedure> expectedProcedures)
     {
         ConcurrentDictionary<string, SqlTable> currentSchema = await GetCurrentSchema(connectionString, dbName);
-        SchemaDiff diff = MigrationSchemaComparer.CompareSchemas(currentSchema, expectedSchema);
+        (ConcurrentDictionary<string, SqlSequence> currentSequences, ConcurrentDictionary<string, SqlStoredProcedure> currentProcedures) = await GetCurrentSequencesAndProcedures(connectionString, dbName);
+        
+        SchemaDiff diff = MigrationSchemaComparer.CompareSchemas(
+            currentSchema, 
+            expectedSchema,
+            currentSequences,
+            expectedSequences,
+            currentProcedures,
+            expectedProcedures);
 
         Assert.That(diff.NewTables, Is.Empty, "Schema mismatch: Found unexpected new tables");
         Assert.That(diff.DroppedTableNames, Is.Empty, "Schema mismatch: Found unexpected dropped tables");
         Assert.That(diff.ModifiedTables, Is.Empty, "Schema mismatch: Found unexpected table modifications");
+        Assert.That(diff.NewSequences, Is.Empty, "Schema mismatch: Found unexpected new sequences");
+        Assert.That(diff.DroppedSequenceNames, Is.Empty, "Schema mismatch: Found unexpected dropped sequences");
+        Assert.That(diff.ModifiedSequences, Is.Empty, "Schema mismatch: Found unexpected sequence modifications");
+        Assert.That(diff.NewProcedures, Is.Empty, "Schema mismatch: Found unexpected new procedures");
+        Assert.That(diff.DroppedProcedureNames, Is.Empty, "Schema mismatch: Found unexpected dropped procedures");
+        Assert.That(diff.ModifiedProcedures, Is.Empty, "Schema mismatch: Found unexpected procedure modifications");
     }
 
     private async Task<MigrationTestState> GetCurrentState(string connectionString, string dbName, string projectPath, string stepName, string? migrationName)
@@ -328,6 +347,25 @@ public class MigrationIntegrationTests
         List<string> appliedMigrations = appliedMigrationsResult.Result ?? new List<string>();
 
         return new MigrationTestState(stepName, schema, appliedMigrations, migrationName);
+    }
+
+    private async Task<(ConcurrentDictionary<string, SqlSequence> Sequences, ConcurrentDictionary<string, SqlStoredProcedure> Procedures)> GetCurrentSequencesAndProcedures(string connectionString, string dbName)
+    {
+        SqlService sqlService = new SqlService(connectionString);
+        ResultOrException<ConcurrentDictionary<string, SqlSequence>> sequencesResult = await sqlService.GetSequences(dbName);
+        if (sequencesResult.Exception is not null)
+        {
+            throw new Exception($"Failed to get sequences: {sequencesResult.Exception.Message}");
+        }
+
+        ResultOrException<ConcurrentDictionary<string, SqlStoredProcedure>> proceduresResult = await sqlService.GetStoredProcedures(dbName);
+        if (proceduresResult.Exception is not null)
+        {
+            throw new Exception($"Failed to get procedures: {proceduresResult.Exception.Message}");
+        }
+
+        return (sequencesResult.Result ?? new ConcurrentDictionary<string, SqlSequence>(), 
+                proceduresResult.Result ?? new ConcurrentDictionary<string, SqlStoredProcedure>());
     }
 
     private async Task RecordMigrationApplied(string connectionString, string dbName, string migrationName)
@@ -364,7 +402,7 @@ public class MigrationIntegrationTests
         Assert.That(applyResult.Result, Is.Not.Null, "Step 2: Apply migrations returned null result");
         Assert.That(applyResult.Result!.AppliedMigrations.Count, Is.EqualTo(1), "Step 2: Expected exactly one migration to be applied");
 
-        await VerifySchemaMatches(connectionString, dbName, expectedSchema);
+        await VerifySchemaMatches(connectionString, dbName, expectedSchema, new ConcurrentDictionary<string, SqlSequence>(), new ConcurrentDictionary<string, SqlStoredProcedure>());
 
         return await GetCurrentState(connectionString, dbName, projectPath, "Step2", applyResult.Result.AppliedMigrations[0]);
     }
@@ -551,7 +589,7 @@ public class MigrationIntegrationTests
         Assert.That(applyResult.Result, Is.Not.Null, "Step 2.7: Apply migrations returned null result");
         Assert.That(applyResult.Result!.AppliedMigrations.Count, Is.EqualTo(2), "Step 2.7: Expected two migrations to be applied (initial + complex)");
 
-        await VerifySchemaMatches(connectionString, dbName, expectedSchema);
+        await VerifySchemaMatches(connectionString, dbName, expectedSchema, new ConcurrentDictionary<string, SqlSequence>(), new ConcurrentDictionary<string, SqlStoredProcedure>());
 
         // Return state with the last applied migration (the complex one)
         return await GetCurrentState(connectionString, dbName, projectPath, "Step2.7", applyResult.Result.AppliedMigrations[^1]);
@@ -579,12 +617,14 @@ public class MigrationIntegrationTests
             File.Delete(downScriptPath);
         }
 
-        await VerifySchemaMatches(connectionString, dbName, expectedSchema);
+        await VerifySchemaMatches(connectionString, dbName, expectedSchema, new ConcurrentDictionary<string, SqlSequence>(), new ConcurrentDictionary<string, SqlStoredProcedure>());
     }
 
     private async Task Step3_MakeSchemaChanges(string connectionString, string dbName)
     {
         SqlService sqlService = new SqlService(connectionString);
+        
+        // Execute table/index/sequence operations in one batch
         ResultOrException<int> result = await sqlService.Execute("""
             ALTER TABLE [dbo].[Users] ADD [createdAt] DATETIME2(7) NOT NULL DEFAULT GETUTCDATE()
 
@@ -600,11 +640,43 @@ public class MigrationIntegrationTests
             CREATE NONCLUSTERED INDEX [IX_Users_createdAt] ON [dbo].[Users]([createdAt])
             CREATE UNIQUE NONCLUSTERED INDEX [IX_Tags_name] ON [dbo].[Tags]([name])
             CREATE NONCLUSTERED INDEX [IX_Posts_tagId] ON [dbo].[Posts]([tagId])
+            
+            -- Create sequences (CRUD: Create)
+            CREATE SEQUENCE [dbo].[Seq_OrderNumber] AS INT START WITH 1000 INCREMENT BY 1 MINVALUE 1 MAXVALUE 999999 NO CYCLE CACHE 10
+            CREATE SEQUENCE [dbo].[Seq_InvoiceNumber] AS BIGINT START WITH 1 INCREMENT BY 1 NO MINVALUE NO MAXVALUE NO CYCLE NO CACHE
             """);
 
         if (result.Exception is not null)
         {
             throw new Exception($"Step 3 failed: {result.Exception.Message}", result.Exception);
+        }
+
+        // Execute each stored procedure in its own batch (CREATE PROCEDURE must be first statement in batch)
+        ResultOrException<int> proc1Result = await sqlService.Execute("""
+            CREATE PROCEDURE [dbo].[sp_GetUserPosts]
+            AS
+            BEGIN
+                SELECT p.* FROM [dbo].[Posts] p
+                INNER JOIN [dbo].[Users] u ON p.[userId] = u.[id]
+            END
+            """);
+
+        if (proc1Result.Exception is not null)
+        {
+            throw new Exception($"Step 3 failed (sp_GetUserPosts): {proc1Result.Exception.Message}", proc1Result.Exception);
+        }
+
+        ResultOrException<int> proc2Result = await sqlService.Execute("""
+            CREATE PROCEDURE [dbo].[sp_GetUserCount]
+            AS
+            BEGIN
+                SELECT COUNT(*) AS UserCount FROM [dbo].[Users]
+            END
+            """);
+
+        if (proc2Result.Exception is not null)
+        {
+            throw new Exception($"Step 3 failed (sp_GetUserCount): {proc2Result.Exception.Message}", proc2Result.Exception);
         }
     }
 
@@ -677,7 +749,22 @@ public class MigrationIntegrationTests
         Assert.That(applyResult.Result, Is.Not.Null, "Step 5: Apply migrations returned null result");
         Assert.That(applyResult.Result!.AppliedMigrations.Count, Is.EqualTo(1), "Step 5: Expected exactly one migration to be applied");
 
-        await VerifySchemaMatches(connectionString, dbName, expectedSchema);
+        // Verify sequences were created
+        (ConcurrentDictionary<string, SqlSequence> currentSequences, ConcurrentDictionary<string, SqlStoredProcedure> currentProcedures) = await GetCurrentSequencesAndProcedures(connectionString, dbName);
+        
+        Console.WriteLine($"\n=== Step 5: Verifying sequences and procedures ===");
+        Console.WriteLine($"Sequences in database: {string.Join(", ", currentSequences.Keys)}");
+        Console.WriteLine($"Procedures in database: {string.Join(", ", currentProcedures.Keys)}");
+        
+        Assert.That(currentSequences.Keys, Does.Contain("seq_ordernumber").IgnoreCase, "Step 5: Seq_OrderNumber should exist");
+        Assert.That(currentSequences.Keys, Does.Contain("seq_invoicenumber").IgnoreCase, "Step 5: Seq_InvoiceNumber should exist");
+        Assert.That(currentSequences.Count, Is.EqualTo(2), $"Step 5: Expected 2 sequences, but found {currentSequences.Count}: {string.Join(", ", currentSequences.Keys)}");
+        
+        Assert.That(currentProcedures.Keys, Does.Contain("sp_getuserposts").IgnoreCase, "Step 5: sp_GetUserPosts should exist");
+        Assert.That(currentProcedures.Keys, Does.Contain("sp_getusercount").IgnoreCase, "Step 5: sp_GetUserCount should exist");
+        Assert.That(currentProcedures.Count, Is.EqualTo(2), $"Step 5: Expected 2 procedures, but found {currentProcedures.Count}: {string.Join(", ", currentProcedures.Keys)}");
+
+        await VerifySchemaMatches(connectionString, dbName, expectedSchema, currentSequences, currentProcedures);
 
         return await GetCurrentState(connectionString, dbName, projectPath, "Step5", applyResult.Result.AppliedMigrations[0]);
     }
@@ -685,6 +772,8 @@ public class MigrationIntegrationTests
     private async Task Step6_MakeMoreSchemaChanges(string connectionString, string dbName)
     {
         SqlService sqlService = new SqlService(connectionString);
+        
+        // Execute table/index/sequence operations in one batch
         ResultOrException<int> result = await sqlService.Execute("""
             ALTER TABLE [dbo].[Users] ALTER COLUMN [email] NVARCHAR(500) NOT NULL
 
@@ -701,11 +790,39 @@ public class MigrationIntegrationTests
             
             -- Drop index: Remove IX_Posts_tagId
             DROP INDEX [IX_Posts_tagId] ON [dbo].[Posts]
+            
+            -- Sequence operations (CRUD: Modify and Delete)
+            -- Modify sequence: Drop and recreate Seq_OrderNumber with different properties
+            DROP SEQUENCE [dbo].[Seq_OrderNumber]
+            CREATE SEQUENCE [dbo].[Seq_OrderNumber] AS INT START WITH 2000 INCREMENT BY 2 MINVALUE 1 MAXVALUE 999999 CYCLE CACHE 20
+            
+            -- Drop sequence: Remove Seq_InvoiceNumber
+            DROP SEQUENCE [dbo].[Seq_InvoiceNumber]
+            
+            -- Drop procedures (before recreating)
+            DROP PROCEDURE [dbo].[sp_GetUserPosts]
+            DROP PROCEDURE [dbo].[sp_GetUserCount]
             """);
 
         if (result.Exception is not null)
         {
             throw new Exception($"Step 6 failed: {result.Exception.Message}", result.Exception);
+        }
+
+        // Execute modified stored procedure in its own batch (CREATE PROCEDURE must be first statement in batch)
+        ResultOrException<int> procResult = await sqlService.Execute("""
+            CREATE PROCEDURE [dbo].[sp_GetUserPosts]
+            AS
+            BEGIN
+                SELECT p.*, u.[name] AS UserName FROM [dbo].[Posts] p
+                INNER JOIN [dbo].[Users] u ON p.[userId] = u.[id]
+                ORDER BY p.[title]
+            END
+            """);
+
+        if (procResult.Exception is not null)
+        {
+            throw new Exception($"Step 6 failed (sp_GetUserPosts): {procResult.Exception.Message}", procResult.Exception);
         }
     }
 
@@ -726,7 +843,8 @@ public class MigrationIntegrationTests
         return new MigrationTestState("Step7", schema, appliedMigrations, result.Result.MigrationName);
     }
 
-    private async Task<MigrationTestState> Step8_ApplyMigration2AndVerify(string projectPath, string connectionString, string dbName, ConcurrentDictionary<string, SqlTable> expectedSchema)
+    private async Task<MigrationTestState> Step8_ApplyMigration2AndVerify(string projectPath, string connectionString, string dbName, ConcurrentDictionary<string, SqlTable> expectedSchema,
+        ConcurrentDictionary<string, SqlSequence> expectedSequences, ConcurrentDictionary<string, SqlStoredProcedure> expectedProcedures)
     {
         ResultOrException<MigrationApplyResult> applyResult = await MigrationApplier.ApplyMigrations(connectionString, dbName, projectPath, false);
 
@@ -734,22 +852,41 @@ public class MigrationIntegrationTests
         Assert.That(applyResult.Result, Is.Not.Null, "Step 8: Apply migrations returned null result");
         Assert.That(applyResult.Result!.AppliedMigrations.Count, Is.EqualTo(1), "Step 8: Expected exactly one migration to be applied");
 
-        await VerifySchemaMatches(connectionString, dbName, expectedSchema);
+        // Verify sequences and procedures after migration 2
+        (ConcurrentDictionary<string, SqlSequence> currentSequences, ConcurrentDictionary<string, SqlStoredProcedure> currentProcedures) = await GetCurrentSequencesAndProcedures(connectionString, dbName);
+        
+        Console.WriteLine($"\n=== Step 8: Verifying sequences and procedures after migration 2 ===");
+        Console.WriteLine($"Sequences in database: {string.Join(", ", currentSequences.Keys)}");
+        Console.WriteLine($"Procedures in database: {string.Join(", ", currentProcedures.Keys)}");
+        Console.WriteLine($"Expected sequences: {string.Join(", ", expectedSequences.Keys)}");
+        Console.WriteLine($"Expected procedures: {string.Join(", ", expectedProcedures.Keys)}");
+        
+        // After migration 2: Seq_InvoiceNumber should be dropped, Seq_OrderNumber modified, sp_GetUserCount dropped, sp_GetUserPosts modified
+        Assert.That(currentSequences.Keys, Does.Contain("seq_ordernumber").IgnoreCase, "Step 8: Seq_OrderNumber should exist");
+        Assert.That(currentSequences.Keys, Does.Not.Contain("seq_invoicenumber").IgnoreCase, "Step 8: Seq_InvoiceNumber should be dropped");
+        Assert.That(currentSequences.Count, Is.EqualTo(1), $"Step 8: Expected 1 sequence, but found {currentSequences.Count}: {string.Join(", ", currentSequences.Keys)}");
+        
+        Assert.That(currentProcedures.Keys, Does.Contain("sp_getuserposts").IgnoreCase, "Step 8: sp_GetUserPosts should exist");
+        Assert.That(currentProcedures.Keys, Does.Not.Contain("sp_getusercount").IgnoreCase, "Step 8: sp_GetUserCount should be dropped");
+        Assert.That(currentProcedures.Count, Is.EqualTo(1), $"Step 8: Expected 1 procedure, but found {currentProcedures.Count}: {string.Join(", ", currentProcedures.Keys)}");
+
+        await VerifySchemaMatches(connectionString, dbName, expectedSchema, expectedSequences, expectedProcedures);
 
         return await GetCurrentState(connectionString, dbName, projectPath, "Step8", applyResult.Result.AppliedMigrations[0]);
     }
 
-    private async Task Step9_RollbackToMigration1(string projectPath, string connectionString, string dbName, ConcurrentDictionary<string, SqlTable> expectedSchema, string migration1Name)
+    private async Task Step9_RollbackToMigration1(string projectPath, string connectionString, string dbName, ConcurrentDictionary<string, SqlTable> expectedSchema, ConcurrentDictionary<string, SqlSequence> expectedSequences, ConcurrentDictionary<string, SqlStoredProcedure> expectedProcedures, string migration1Name)
     {
         ResultOrException<MigrationGotoResult> gotoResult = await MigrationApplier.GotoMigration(connectionString, dbName, projectPath, migration1Name, false);
 
         Assert.That(gotoResult.Exception, Is.Null, $"Step 9 failed: {gotoResult.Exception?.Message}");
         Assert.That(gotoResult.Result, Is.Not.Null, "Step 9: Goto migration returned null result");
 
-        await VerifySchemaMatches(connectionString, dbName, expectedSchema);
+        await VerifySchemaMatches(connectionString, dbName, expectedSchema, expectedSequences, expectedProcedures);
     }
 
-    private async Task Step10_ReapplyMigration2(string projectPath, string connectionString, string dbName, ConcurrentDictionary<string, SqlTable> expectedSchema)
+    private async Task Step10_ReapplyMigration2(string projectPath, string connectionString, string dbName, ConcurrentDictionary<string, SqlTable> expectedSchema,
+        ConcurrentDictionary<string, SqlSequence> expectedSequences, ConcurrentDictionary<string, SqlStoredProcedure> expectedProcedures)
     {
         ResultOrException<MigrationApplyResult> applyResult = await MigrationApplier.ApplyMigrations(connectionString, dbName, projectPath, false);
 
@@ -757,7 +894,10 @@ public class MigrationIntegrationTests
         Assert.That(applyResult.Result, Is.Not.Null, "Step 10: Apply migrations returned null result");
         Assert.That(applyResult.Result!.AppliedMigrations.Count, Is.EqualTo(1), "Step 10: Expected exactly one migration to be applied");
 
-        await VerifySchemaMatches(connectionString, dbName, expectedSchema);
+        // Verify against the expected sequences/procedures (step6Sequences/step6Procedures)
+        // After migration 2 is reapplied, Seq_InvoiceNumber should be dropped (it was dropped in Step 6)
+        // So expectedSequences should only contain Seq_OrderNumber (modified)
+        await VerifySchemaMatches(connectionString, dbName, expectedSchema, expectedSequences, expectedProcedures);
     }
 
     private async Task Step11_RollbackToInitial(string projectPath, string connectionString, string dbName, ConcurrentDictionary<string, SqlTable> expectedSchema, string initialMigrationName)
@@ -767,17 +907,18 @@ public class MigrationIntegrationTests
         Assert.That(gotoResult.Exception, Is.Null, $"Step 11 failed: {gotoResult.Exception?.Message}");
         Assert.That(gotoResult.Result, Is.Not.Null, "Step 11: Goto migration returned null result");
 
-        await VerifySchemaMatches(connectionString, dbName, expectedSchema);
+        await VerifySchemaMatches(connectionString, dbName, expectedSchema, new ConcurrentDictionary<string, SqlSequence>(), new ConcurrentDictionary<string, SqlStoredProcedure>());
     }
 
-    private async Task Step12_ReapplyAllMigrations(string projectPath, string connectionString, string dbName, ConcurrentDictionary<string, SqlTable> expectedSchema)
+    private async Task Step12_ReapplyAllMigrations(string projectPath, string connectionString, string dbName, ConcurrentDictionary<string, SqlTable> expectedSchema,
+        ConcurrentDictionary<string, SqlSequence> expectedSequences, ConcurrentDictionary<string, SqlStoredProcedure> expectedProcedures)
     {
         ResultOrException<MigrationApplyResult> applyResult = await MigrationApplier.ApplyMigrations(connectionString, dbName, projectPath, false);
 
         Assert.That(applyResult.Exception, Is.Null, $"Step 12 failed: {applyResult.Exception?.Message}");
         Assert.That(applyResult.Result, Is.Not.Null, "Step 12: Apply migrations returned null result");
 
-        await VerifySchemaMatches(connectionString, dbName, expectedSchema);
+        await VerifySchemaMatches(connectionString, dbName, expectedSchema, expectedSequences, expectedProcedures);
     }
 }
 

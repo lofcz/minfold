@@ -5,23 +5,44 @@ namespace Minfold;
 public class MigrationApplier
 {
     private const string MigrationsTableName = "__MinfoldMigrations";
-    private const string CreateMigrationsTableSql = $"""
-        IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[{MigrationsTableName}]') AND type in (N'U'))
-        BEGIN
-            CREATE TABLE [dbo].[{MigrationsTableName}] (
-                [Id] INT IDENTITY(1,1) PRIMARY KEY,
-                [MigrationName] NVARCHAR(255) NOT NULL UNIQUE,
-                [AppliedAt] DATETIME2(7) NOT NULL DEFAULT GETUTCDATE()
-            );
-        END
-        """;
+    
+    private static string GetCreateMigrationsTableSql()
+    {
+        // Default CREATE statement - used only if table doesn't exist
+        // The actual values should come from scripted SQL if table exists
+        return $"""
+            IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[{MigrationsTableName}]') AND type in (N'U'))
+            BEGIN
+                CREATE TABLE [dbo].[{MigrationsTableName}] (
+                    [Id] INT IDENTITY(1,1) PRIMARY KEY,
+                    [MigrationName] NVARCHAR(255) NOT NULL UNIQUE,
+                    [AppliedAt] DATETIME2(7) NOT NULL DEFAULT GETUTCDATE()
+                );
+            END
+            """;
+    }
 
     public static async Task<ResultOrException<bool>> EnsureMigrationsTableExists(string sqlConn, string dbName)
     {
         try
         {
             SqlService sqlService = new SqlService(sqlConn);
-            ResultOrException<int> result = await sqlService.Execute(CreateMigrationsTableSql);
+            
+            // First, try to script the table to get its actual definition from the database
+            // This ensures we use the correct IDENTITY values if the table already exists
+            ResultOrException<string> scriptResult = await sqlService.SqlTableCreateScript($"dbo.{MigrationsTableName}");
+            
+            // If table exists, scriptResult will contain the CREATE TABLE statement with correct values
+            // If table doesn't exist, we'll create it with the default definition
+            if (scriptResult.Exception is null && !string.IsNullOrWhiteSpace(scriptResult.Result))
+            {
+                // Table exists - the scripted SQL contains the correct definition from the database
+                // No need to create it, just verify it exists
+                return new ResultOrException<bool>(true, null);
+            }
+            
+            // Table doesn't exist, create it with default definition
+            ResultOrException<int> result = await sqlService.Execute(GetCreateMigrationsTableSql());
 
             if (result.Exception is not null)
             {
@@ -125,10 +146,58 @@ public class MigrationApplier
     {
         try
         {
-            SqlService sqlService = new SqlService(sqlConn);
-            ResultOrException<int> result = await sqlService.Execute(script);
-
-            return result;
+            // Log the script being executed
+            Console.WriteLine("=== Executing Migration Script ===");
+            Console.WriteLine(script);
+            Console.WriteLine("=== End of Script ===");
+            Console.WriteLine();
+            
+            // Split script into batches on GO statements (case-insensitive, handles GO on its own line)
+            // GO is a batch separator in SQL Server - it's not a SQL statement, so we need to split manually
+            // Migration scripts don't include BEGIN TRANSACTION/COMMIT TRANSACTION - we manage transactions via ADO.NET
+            string[] batches = System.Text.RegularExpressions.Regex.Split(
+                script,
+                @"^\s*GO\s*$",
+                System.Text.RegularExpressions.RegexOptions.Multiline | System.Text.RegularExpressions.RegexOptions.IgnoreCase
+            );
+            
+            // Execute all batches within a single ADO.NET transaction
+            await using Microsoft.Data.SqlClient.SqlConnection connection = new Microsoft.Data.SqlClient.SqlConnection(sqlConn);
+            await connection.OpenAsync();
+            
+            // Set XACT_ABORT ON for proper error handling
+            Microsoft.Data.SqlClient.SqlCommand setXactAbortCommand = new Microsoft.Data.SqlClient.SqlCommand("SET XACT_ABORT ON", connection);
+            await setXactAbortCommand.ExecuteNonQueryAsync();
+            
+            await using Microsoft.Data.SqlClient.SqlTransaction transaction = connection.BeginTransaction();
+            
+            try
+            {
+                // Execute each batch separately within the transaction
+                foreach (string batch in batches)
+                {
+                    string trimmedBatch = batch.Trim();
+                    if (string.IsNullOrWhiteSpace(trimmedBatch))
+                    {
+                        continue; // Skip empty batches (e.g., multiple consecutive GO statements)
+                    }
+                    
+                    Microsoft.Data.SqlClient.SqlCommand command = new Microsoft.Data.SqlClient.SqlCommand(trimmedBatch, connection, transaction);
+                    await using Microsoft.Data.SqlClient.SqlDataReader reader = await command.ExecuteReaderAsync();
+                    // Consume the reader to ensure the command completes
+                    while (await reader.ReadAsync()) { }
+                }
+                
+                // Commit the transaction if all batches succeeded
+                await transaction.CommitAsync();
+                return new ResultOrException<int>(1, null);
+            }
+            catch (Exception ex)
+            {
+                // Rollback the transaction on any error
+                await transaction.RollbackAsync();
+                return new ResultOrException<int>(0, ex);
+            }
         }
         catch (Exception ex)
         {
@@ -180,6 +249,7 @@ public class MigrationApplier
                     continue;
                 }
 
+                Console.WriteLine($">>> Applying migration: {migrationName}");
                 string upScript = await File.ReadAllTextAsync(migration.UpScriptPath);
                 ResultOrException<int> executeResult = await ExecuteMigrationScript(sqlConn, upScript);
 
@@ -225,6 +295,7 @@ public class MigrationApplier
                 return new ResultOrException<MigrationRollbackResult>(new MigrationRollbackResult(migrationName), null);
             }
 
+            Console.WriteLine($">>> Rolling back migration: {migrationName}");
             string downScript = await File.ReadAllTextAsync(migration.DownScriptPath);
             ResultOrException<int> executeResult = await ExecuteMigrationScript(sqlConn, downScript);
 
@@ -323,6 +394,7 @@ public class MigrationApplier
                     continue;
                 }
 
+                Console.WriteLine($">>> Applying migration: {migrationName}");
                 string upScript = await File.ReadAllTextAsync(migration.UpScriptPath);
                 ResultOrException<int> executeResult = await ExecuteMigrationScript(sqlConn, upScript);
 

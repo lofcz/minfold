@@ -4,7 +4,13 @@ namespace Minfold;
 
 public static class MigrationSchemaComparer
 {
-    public static SchemaDiff CompareSchemas(ConcurrentDictionary<string, SqlTable> currentSchema, ConcurrentDictionary<string, SqlTable> targetSchema)
+    public static SchemaDiff CompareSchemas(
+        ConcurrentDictionary<string, SqlTable> currentSchema, 
+        ConcurrentDictionary<string, SqlTable> targetSchema,
+        ConcurrentDictionary<string, SqlSequence>? currentSequences = null,
+        ConcurrentDictionary<string, SqlSequence>? targetSequences = null,
+        ConcurrentDictionary<string, SqlStoredProcedure>? currentProcedures = null,
+        ConcurrentDictionary<string, SqlStoredProcedure>? targetProcedures = null)
     {
         List<SqlTable> newTables = new List<SqlTable>();
         List<string> droppedTableNames = new List<string>();
@@ -41,7 +47,123 @@ public static class MigrationSchemaComparer
             }
         }
 
-        return new SchemaDiff(newTables, droppedTableNames, modifiedTables);
+        // Compare sequences
+        List<SqlSequence> newSequences = new List<SqlSequence>();
+        List<string> droppedSequenceNames = new List<string>();
+        List<SequenceChange> modifiedSequences = CompareSequences(currentSequences ?? new ConcurrentDictionary<string, SqlSequence>(), targetSequences ?? new ConcurrentDictionary<string, SqlSequence>(), newSequences, droppedSequenceNames);
+
+        // Compare procedures
+        List<SqlStoredProcedure> newProcedures = new List<SqlStoredProcedure>();
+        List<string> droppedProcedureNames = new List<string>();
+        List<ProcedureChange> modifiedProcedures = CompareProcedures(currentProcedures ?? new ConcurrentDictionary<string, SqlStoredProcedure>(), targetProcedures ?? new ConcurrentDictionary<string, SqlStoredProcedure>(), newProcedures, droppedProcedureNames);
+
+        return new SchemaDiff(newTables, droppedTableNames, modifiedTables, newSequences, droppedSequenceNames, modifiedSequences, newProcedures, droppedProcedureNames, modifiedProcedures);
+    }
+
+    private static List<SequenceChange> CompareSequences(
+        ConcurrentDictionary<string, SqlSequence> currentSequences,
+        ConcurrentDictionary<string, SqlSequence> targetSequences,
+        List<SqlSequence> newSequences,
+        List<string> droppedSequenceNames)
+    {
+        List<SequenceChange> modifiedSequences = new List<SequenceChange>();
+
+        // Find new sequences (in target but not in current)
+        foreach (KeyValuePair<string, SqlSequence> targetSequence in targetSequences)
+        {
+            if (!currentSequences.ContainsKey(targetSequence.Key))
+            {
+                newSequences.Add(targetSequence.Value);
+            }
+            else if (currentSequences.TryGetValue(targetSequence.Key, out SqlSequence? currentSequence))
+            {
+                // Sequence exists in both - check if modified (compare definition or properties)
+                if (!AreSequencesEqual(currentSequence, targetSequence.Value))
+                {
+                    modifiedSequences.Add(new SequenceChange(SequenceChangeType.Modify, currentSequence, targetSequence.Value));
+                }
+            }
+        }
+
+        // Find dropped sequences (in current but not in target)
+        foreach (KeyValuePair<string, SqlSequence> currentSequence in currentSequences)
+        {
+            if (!targetSequences.ContainsKey(currentSequence.Key))
+            {
+                droppedSequenceNames.Add(currentSequence.Value.Name);
+            }
+        }
+
+        return modifiedSequences;
+    }
+
+    private static List<ProcedureChange> CompareProcedures(
+        ConcurrentDictionary<string, SqlStoredProcedure> currentProcedures,
+        ConcurrentDictionary<string, SqlStoredProcedure> targetProcedures,
+        List<SqlStoredProcedure> newProcedures,
+        List<string> droppedProcedureNames)
+    {
+        List<ProcedureChange> modifiedProcedures = new List<ProcedureChange>();
+
+        // Find new procedures (in target but not in current)
+        foreach (KeyValuePair<string, SqlStoredProcedure> targetProcedure in targetProcedures)
+        {
+            if (!currentProcedures.ContainsKey(targetProcedure.Key))
+            {
+                newProcedures.Add(targetProcedure.Value);
+            }
+            else if (currentProcedures.TryGetValue(targetProcedure.Key, out SqlStoredProcedure? currentProcedure))
+            {
+                // Procedure exists in both - check if modified (compare definition text)
+                if (!AreProceduresEqual(currentProcedure, targetProcedure.Value))
+                {
+                    modifiedProcedures.Add(new ProcedureChange(ProcedureChangeType.Modify, currentProcedure, targetProcedure.Value));
+                }
+            }
+        }
+
+        // Find dropped procedures (in current but not in target)
+        foreach (KeyValuePair<string, SqlStoredProcedure> currentProcedure in currentProcedures)
+        {
+            if (!targetProcedures.ContainsKey(currentProcedure.Key))
+            {
+                droppedProcedureNames.Add(currentProcedure.Value.Name);
+            }
+        }
+
+        return modifiedProcedures;
+    }
+
+    private static bool AreSequencesEqual(SqlSequence seq1, SqlSequence seq2)
+    {
+        // Compare all properties - if any differ, sequences are not equal
+        return seq1.Name.Equals(seq2.Name, StringComparison.OrdinalIgnoreCase) &&
+               seq1.DataType.Equals(seq2.DataType, StringComparison.OrdinalIgnoreCase) &&
+               seq1.StartValue == seq2.StartValue &&
+               seq1.Increment == seq2.Increment &&
+               seq1.MinValue == seq2.MinValue &&
+               seq1.MaxValue == seq2.MaxValue &&
+               seq1.Cycle == seq2.Cycle &&
+               seq1.CacheSize == seq2.CacheSize;
+    }
+
+    private static bool AreProceduresEqual(SqlStoredProcedure proc1, SqlStoredProcedure proc2)
+    {
+        // Compare definition text - normalize whitespace for comparison
+        string def1 = NormalizeSqlDefinition(proc1.Definition);
+        string def2 = NormalizeSqlDefinition(proc2.Definition);
+        return def1.Equals(def2, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeSqlDefinition(string definition)
+    {
+        if (string.IsNullOrWhiteSpace(definition))
+        {
+            return string.Empty;
+        }
+
+        // Normalize whitespace: replace multiple spaces/newlines with single space, trim
+        return System.Text.RegularExpressions.Regex.Replace(definition, @"\s+", " ").Trim();
     }
 
     private static TableDiff? CompareTables(SqlTable currentTable, SqlTable targetTable)

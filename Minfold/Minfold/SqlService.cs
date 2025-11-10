@@ -266,7 +266,9 @@ public class SqlService
                        when DATA_TYPE in('datetime2', 'datetime', 'time', 'timestamp') then DATETIME_PRECISION
                        when DATA_TYPE in ('varchar', 'nvarchar', 'text', 'binary', 'varbinary', 'blob') then CHARACTER_MAXIMUM_LENGTH
                        else null
-                   end as LENGTH_OR_PRECISION
+                   end as LENGTH_OR_PRECISION,
+                   ic.seed_value as IDENTITY_SEED,
+                   ic.increment_value as IDENTITY_INCR
                     from information_schema.COLUMNS col
                     inner join sys.objects o 
                         on object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME) = o.object_id
@@ -286,6 +288,9 @@ public class SqlService
                     left join sys.computed_columns cc 
                         on cc.object_id = object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME) 
                         and cc.column_id = columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'ColumnId')
+                    left join sys.identity_columns ic
+                        on ic.object_id = object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME)
+                        and ic.column_id = columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'ColumnId')
                     left join (
                         select k.COLUMN_NAME, 
                                k.TABLE_NAME, 
@@ -394,6 +399,97 @@ public class SqlService
         return new ResultOrException<ConcurrentDictionary<string, int>>(tablesMap, null);
     }
 
+    public async Task<ResultOrException<ConcurrentDictionary<string, SqlSequence>>> GetSequences(string dbName)
+    {
+        await using SqlConnectionResult conn = await Connect();
+
+        if (conn.Exception is not null)
+        {
+            return new ResultOrException<ConcurrentDictionary<string, SqlSequence>>(null, conn.Exception);
+        }
+
+        string sql = $"""
+            USE [{dbName}];
+            SELECT 
+                s.name AS SEQUENCE_NAME,
+                t.name AS DATA_TYPE,
+                s.start_value AS START_VALUE,
+                s.increment AS INCREMENT,
+                s.minimum_value AS MIN_VALUE,
+                s.maximum_value AS MAX_VALUE,
+                s.is_cycling AS CYCLE,
+                s.cache_size AS CACHE_SIZE,
+                OBJECT_DEFINITION(OBJECT_ID(SCHEMA_NAME(s.schema_id) + '.' + s.name, 'SO')) AS DEFINITION
+            FROM sys.sequences s
+            INNER JOIN sys.types t ON s.user_type_id = t.user_type_id
+            WHERE s.is_ms_shipped = 0
+            ORDER BY s.name
+            """;
+
+        SqlCommand command = new SqlCommand(sql, conn.Connection);
+        await using SqlDataReader reader = await command.ExecuteReaderAsync();
+
+        ConcurrentDictionary<string, SqlSequence> sequences = new ConcurrentDictionary<string, SqlSequence>(StringComparer.OrdinalIgnoreCase);
+
+        while (await reader.ReadAsync())
+        {
+            string sequenceName = reader.GetString(0);
+            string dataType = reader.GetString(1);
+            // Sequence values can be int or bigint depending on sequence type, so use Convert.ToInt64 to handle both
+            long? startValue = reader.IsDBNull(2) ? null : Convert.ToInt64(reader.GetValue(2));
+            long? increment = reader.IsDBNull(3) ? null : Convert.ToInt64(reader.GetValue(3));
+            long? minValue = reader.IsDBNull(4) ? null : Convert.ToInt64(reader.GetValue(4));
+            long? maxValue = reader.IsDBNull(5) ? null : Convert.ToInt64(reader.GetValue(5));
+            bool cycle = reader.GetBoolean(6);
+            long? cacheSize = reader.IsDBNull(7) ? null : Convert.ToInt64(reader.GetValue(7));
+            string? definition = reader.IsDBNull(8) ? null : reader.GetString(8);
+
+            SqlSequence sequence = new SqlSequence(sequenceName, dataType, startValue, increment, minValue, maxValue, cycle, cacheSize, definition);
+            sequences.TryAdd(sequenceName.ToLowerInvariant(), sequence);
+        }
+
+        return new ResultOrException<ConcurrentDictionary<string, SqlSequence>>(sequences, null);
+    }
+
+    public async Task<ResultOrException<ConcurrentDictionary<string, SqlStoredProcedure>>> GetStoredProcedures(string dbName)
+    {
+        await using SqlConnectionResult conn = await Connect();
+
+        if (conn.Exception is not null)
+        {
+            return new ResultOrException<ConcurrentDictionary<string, SqlStoredProcedure>>(null, conn.Exception);
+        }
+
+        string sql = $"""
+            USE [{dbName}];
+            SELECT 
+                p.name AS PROCEDURE_NAME,
+                OBJECT_DEFINITION(p.object_id) AS DEFINITION
+            FROM sys.procedures p
+            INNER JOIN sys.schemas s ON p.schema_id = s.schema_id
+            WHERE p.type = 'P'
+                AND p.is_ms_shipped = 0
+                AND s.name = 'dbo'
+            ORDER BY p.name
+            """;
+
+        SqlCommand command = new SqlCommand(sql, conn.Connection);
+        await using SqlDataReader reader = await command.ExecuteReaderAsync();
+
+        ConcurrentDictionary<string, SqlStoredProcedure> procedures = new ConcurrentDictionary<string, SqlStoredProcedure>(StringComparer.OrdinalIgnoreCase);
+
+        while (await reader.ReadAsync())
+        {
+            string procedureName = reader.GetString(0);
+            string definition = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
+
+            SqlStoredProcedure procedure = new SqlStoredProcedure(procedureName, definition);
+            procedures.TryAdd(procedureName.ToLowerInvariant(), procedure);
+        }
+
+        return new ResultOrException<ConcurrentDictionary<string, SqlStoredProcedure>>(procedures, null);
+    }
+
     public async Task<ResultOrException<ConcurrentDictionary<string, SqlTable>>> GetSchema(string dbName, List<string>? selectTables = null, List<string>? excludeTables = null)
     {
         await using SqlConnectionResult conn = await Connect();
@@ -439,12 +535,32 @@ public class SqlService
             string? computedSql = reader.GetValue(8) as string;
             int? lengthOrPrecision = reader.GetValue(9) as int?;
             
+            // Read identity seed and increment (sql_variant, need to convert)
+            long? identitySeed = null;
+            long? identityIncrement = null;
+            if (isIdentity)
+            {
+                object? seedValue = reader.GetValue(10);
+                object? incrementValue = reader.GetValue(11);
+                
+                if (seedValue != null && seedValue != DBNull.Value)
+                {
+                    // sql_variant can be various numeric types, convert to long
+                    identitySeed = Convert.ToInt64(seedValue);
+                }
+                
+                if (incrementValue != null && incrementValue != DBNull.Value)
+                {
+                    identityIncrement = Convert.ToInt64(incrementValue);
+                }
+            }
+            
             if (!(Enum.TryParse(typeof(SqlDbType), dataType, true, out object? dataTypeObject) && dataTypeObject is SqlDbType dt))
             {
                 continue;
             }
             
-            SqlTableColumn column = new SqlTableColumn(columnName, ordinalPosition, isNullable, isIdentity, (SqlDbTypeExt)dt, [], isComputed, isPk, computedSql, lengthOrPrecision);
+            SqlTableColumn column = new SqlTableColumn(columnName, ordinalPosition, isNullable, isIdentity, (SqlDbTypeExt)dt, [], isComputed, isPk, computedSql, lengthOrPrecision, identitySeed, identityIncrement);
             
             if (tables.TryGetValue(tableName.ToLowerInvariant(), out SqlTable? table))
             {

@@ -8,9 +8,11 @@ using Microsoft.Data.SqlClient;
 namespace Minfold;
 
 public record SqlTable(string Name, Dictionary<string, SqlTableColumn> Columns, List<SqlIndex> Indexes);
-public record SqlTableColumn(string Name, int OrdinalPosition, bool IsNullable, bool IsIdentity, SqlDbTypeExt SqlType, List<SqlForeignKey> ForeignKeys, bool IsComputed, bool IsPrimaryKey, string? ComputedSql, int? LengthOrPrecision);
+public record SqlTableColumn(string Name, int OrdinalPosition, bool IsNullable, bool IsIdentity, SqlDbTypeExt SqlType, List<SqlForeignKey> ForeignKeys, bool IsComputed, bool IsPrimaryKey, string? ComputedSql, int? LengthOrPrecision, long? IdentitySeed = null, long? IdentityIncrement = null);
 public record SqlForeignKey(string Name, string Table, string Column, string RefTable, string RefColumn, bool NotEnforced, bool NotForReplication = false, int DeleteAction = 0, int UpdateAction = 0);
 public record SqlIndex(string Name, string Table, List<string> Columns, bool IsUnique);
+public record SqlSequence(string Name, string DataType, long? StartValue, long? Increment, long? MinValue, long? MaxValue, bool Cycle, long? CacheSize, string? Definition);
+public record SqlStoredProcedure(string Name, string Definition);
 public record CsModelSource(string Name, string ModelPath, string? DaoPath, string ModelSourceCode, string? DaoSourceCode, SyntaxTree ModelAst, SyntaxTree? DaoAst, string NameLastPart, SqlTable? Table, SyntaxNode ModelRootNode, SyntaxNode? DaoRootNode, ConcurrentDictionary<string, string> Columns, ModelInfo ModelInfo);
 public record CsSource(string DbPath, string DbSource, ConcurrentDictionary<string, CsModelSource> Models, ConcurrentDictionary<string, string> Daos, string ProjectNamespace, string ProjectPath, ConcurrentDictionary<string, CsDbSetDecl> DbSetMap);
 public record ColumnDefaultVal(SqlTableColumn Column, string? DefaultValue, ColumnDefaultValTypes Type, string? Key);
@@ -129,4 +131,8 @@ public record ForeignKeyChange(ForeignKeyChangeType ChangeType, SqlForeignKey? O
 public record TableDiff(string TableName, List<ColumnChange> ColumnChanges, List<ForeignKeyChange> ForeignKeyChanges, List<IndexChange> IndexChanges);
 public record IndexChange(IndexChangeType ChangeType, SqlIndex? OldIndex, SqlIndex? NewIndex);
 public enum IndexChangeType { Add, Drop, Modify }
-public record SchemaDiff(List<SqlTable> NewTables, List<string> DroppedTableNames, List<TableDiff> ModifiedTables);
+public record SequenceChange(SequenceChangeType ChangeType, SqlSequence? OldSequence, SqlSequence? NewSequence);
+public enum SequenceChangeType { Add, Drop, Modify }
+public record ProcedureChange(ProcedureChangeType ChangeType, SqlStoredProcedure? OldProcedure, SqlStoredProcedure? NewProcedure);
+public enum ProcedureChangeType { Add, Drop, Modify }
+public record SchemaDiff(List<SqlTable> NewTables, List<string> DroppedTableNames, List<TableDiff> ModifiedTables, List<SqlSequence> NewSequences, List<string> DroppedSequenceNames, List<SequenceChange> ModifiedSequences, List<SqlStoredProcedure> NewProcedures, List<string> DroppedProcedureNames, List<ProcedureChange> ModifiedProcedures);

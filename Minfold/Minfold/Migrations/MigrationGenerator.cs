@@ -46,6 +46,22 @@ public static class MigrationGenerator
                 return new ResultOrException<MigrationGenerationResult>(null, schemaResult.Exception ?? new Exception("Failed to get database schema"));
             }
 
+            // Get sequences and procedures
+            ResultOrException<ConcurrentDictionary<string, SqlSequence>> sequencesResult = await sqlService.GetSequences(dbName);
+            if (sequencesResult.Exception is not null)
+            {
+                return new ResultOrException<MigrationGenerationResult>(null, sequencesResult.Exception);
+            }
+
+            ResultOrException<ConcurrentDictionary<string, SqlStoredProcedure>> proceduresResult = await sqlService.GetStoredProcedures(dbName);
+            if (proceduresResult.Exception is not null)
+            {
+                return new ResultOrException<MigrationGenerationResult>(null, proceduresResult.Exception);
+            }
+
+            ConcurrentDictionary<string, SqlSequence> sequences = sequencesResult.Result ?? new ConcurrentDictionary<string, SqlSequence>();
+            ConcurrentDictionary<string, SqlStoredProcedure> procedures = proceduresResult.Result ?? new ConcurrentDictionary<string, SqlStoredProcedure>();
+
             // Get foreign keys with full metadata
             ResultOrException<Dictionary<string, List<SqlForeignKey>>> fksResult = await sqlService.GetForeignKeys(schemaResult.Result.Keys.ToList());
             if (fksResult.Exception is not null)
@@ -127,13 +143,29 @@ public static class MigrationGenerator
                 phase3Constraints.AppendLine();
             }
 
-            // Build up script with transaction and phases (only include phases with content)
+            // Build up script with phases (only include phases with content)
+            // Transaction is managed by MigrationApplier.ExecuteMigrationScript using ADO.NET transactions
             StringBuilder upScript = new StringBuilder();
             upScript.AppendLine("SET XACT_ABORT ON;");
-            upScript.AppendLine("BEGIN TRANSACTION;");
             upScript.AppendLine();
             
             int phaseNumber = 1;
+            
+            // Phase 0.5: Create Sequences (before tables, so they can be used in table defaults)
+            StringBuilder phase0_5Sequences = new StringBuilder();
+            foreach (SqlSequence sequence in sequences.Values.OrderBy(s => s.Name))
+            {
+                phase0_5Sequences.Append(MigrationSqlGenerator.GenerateCreateSequenceStatement(sequence));
+                phase0_5Sequences.AppendLine();
+            }
+            string phase0_5Content = phase0_5Sequences.ToString().Trim();
+            if (!string.IsNullOrEmpty(phase0_5Content))
+            {
+                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Create Sequences"));
+                upScript.AppendLine(phase0_5Content);
+                upScript.AppendLine();
+                phaseNumber++;
+            }
             
             // Phase 1: Create Tables
             string phase1Content = phase1Tables.ToString().Trim();
@@ -162,47 +194,60 @@ public static class MigrationGenerator
                 upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Add Foreign Key Constraints"));
                 upScript.AppendLine(phase3Content);
                 upScript.AppendLine();
+                phaseNumber++;
             }
             
-            upScript.AppendLine("COMMIT TRANSACTION;");
-
-            // Generate DROP TABLE statements for down script (in reverse order, wrapped in transaction)
+            // Phase 4: Create Stored Procedures (after constraints)
+            StringBuilder phase4Procedures = new StringBuilder();
+            foreach (SqlStoredProcedure procedure in procedures.Values.OrderBy(p => p.Name))
+            {
+                phase4Procedures.Append(MigrationSqlGenerator.GenerateCreateProcedureStatement(procedure));
+                phase4Procedures.AppendLine();
+            }
+            string phase4Content = phase4Procedures.ToString().Trim();
+            if (!string.IsNullOrEmpty(phase4Content))
+            {
+                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Create Stored Procedures"));
+                upScript.AppendLine(phase4Content);
+                upScript.AppendLine();
+            }
+            
+            // Generate down script (drop procedures first, then tables, then sequences - reverse order of creation)
+            // Transaction is managed by MigrationApplier.ExecuteMigrationScript using ADO.NET transactions
             downScript.AppendLine("SET XACT_ABORT ON;");
-            downScript.AppendLine("BEGIN TRANSACTION;");
             downScript.AppendLine();
+            
+            // Drop procedures (reverse order)
+            foreach (SqlStoredProcedure procedure in procedures.Values.OrderByDescending(p => p.Name))
+            {
+                downScript.AppendLine(MigrationSqlGenerator.GenerateDropProcedureStatement(procedure.Name));
+            }
+            
+            // Drop tables (reverse order)
             for (int i = tables.Count - 1; i >= 0; i--)
             {
                 string tableName = tables[i].Value.Name;
                 downScript.AppendLine($"DROP TABLE IF EXISTS [dbo].[{tableName}];");
             }
+            
+            // Drop sequences (reverse order)
+            foreach (SqlSequence sequence in sequences.Values.OrderByDescending(s => s.Name))
+            {
+                downScript.AppendLine(MigrationSqlGenerator.GenerateDropSequenceStatement(sequence.Name));
+            }
+            
             downScript.AppendLine();
-            downScript.AppendLine("COMMIT TRANSACTION;");
 
             string timestamp = MigrationUtilities.GetNextMigrationTimestamp();
             string migrationName = $"{timestamp}_{description}";
             string upScriptPath = Path.Combine(migrationsPath, $"{migrationName}.sql");
             string downScriptPath = Path.Combine(migrationsPath, $"{migrationName}.down.sql");
 
-            string finalUpScript = upScript.ToString();
-            // Ensure transaction wrapper is present
-            if (!finalUpScript.Contains("BEGIN TRANSACTION", StringComparison.OrdinalIgnoreCase))
-            {
-                finalUpScript = "SET XACT_ABORT ON;\r\nBEGIN TRANSACTION;\r\n\r\n" + finalUpScript + "\r\n\r\nCOMMIT TRANSACTION;";
-            }
-            
-            await File.WriteAllTextAsync(upScriptPath, finalUpScript.TrimEnd());
-            
-            string finalDownScript = downScript.ToString();
-            // Ensure transaction wrapper is present
-            if (!finalDownScript.Contains("BEGIN TRANSACTION", StringComparison.OrdinalIgnoreCase))
-            {
-                finalDownScript = "SET XACT_ABORT ON;\r\nBEGIN TRANSACTION;\r\n\r\n" + finalDownScript + "\r\n\r\nCOMMIT TRANSACTION;";
-            }
-            
-            await File.WriteAllTextAsync(downScriptPath, finalDownScript.TrimEnd());
+            await File.WriteAllTextAsync(upScriptPath, upScript.ToString().TrimEnd());
+            await File.WriteAllTextAsync(downScriptPath, downScript.ToString().TrimEnd());
 
-            // Save schema snapshot for incremental migrations
-            await MigrationSchemaSnapshot.SaveSchemaSnapshot(schemaResult.Result, migrationName, codePath);
+            // Save schema snapshot for incremental migrations (including sequences and procedures)
+            await MigrationSchemaSnapshot.SaveSchemaSnapshot(schemaResult.Result, migrationName, codePath, sequences, procedures);
 
             return new ResultOrException<MigrationGenerationResult>(
                 new MigrationGenerationResult(migrationName, upScriptPath, downScriptPath, description),
@@ -231,6 +276,22 @@ public static class MigrationGenerator
                 return new ResultOrException<MigrationGenerationResult>(null, currentSchemaResult.Exception ?? new Exception("Failed to get current database schema"));
             }
 
+            // Get current sequences and procedures
+            ResultOrException<ConcurrentDictionary<string, SqlSequence>> currentSequencesResult = await sqlService.GetSequences(dbName);
+            if (currentSequencesResult.Exception is not null)
+            {
+                return new ResultOrException<MigrationGenerationResult>(null, currentSequencesResult.Exception);
+            }
+
+            ResultOrException<ConcurrentDictionary<string, SqlStoredProcedure>> currentProceduresResult = await sqlService.GetStoredProcedures(dbName);
+            if (currentProceduresResult.Exception is not null)
+            {
+                return new ResultOrException<MigrationGenerationResult>(null, currentProceduresResult.Exception);
+            }
+
+            ConcurrentDictionary<string, SqlSequence> currentSequences = currentSequencesResult.Result ?? new ConcurrentDictionary<string, SqlSequence>();
+            ConcurrentDictionary<string, SqlStoredProcedure> currentProcedures = currentProceduresResult.Result ?? new ConcurrentDictionary<string, SqlStoredProcedure>();
+
             // Get applied migrations
             ResultOrException<List<string>> appliedMigrationsResult = await MigrationApplier.GetAppliedMigrations(sqlConn, dbName);
             if (appliedMigrationsResult.Exception is not null || appliedMigrationsResult.Result is null)
@@ -238,12 +299,16 @@ public static class MigrationGenerator
                 return new ResultOrException<MigrationGenerationResult>(null, appliedMigrationsResult.Exception ?? new Exception("Failed to get applied migrations"));
             }
 
-            // Get target schema from last migration snapshot
-            ResultOrException<ConcurrentDictionary<string, SqlTable>> targetSchemaResult = await MigrationSchemaSnapshot.GetTargetSchemaFromMigrations(codePath, appliedMigrationsResult.Result);
-            if (targetSchemaResult.Exception is not null || targetSchemaResult.Result is null)
+            // Get target schema from last migration snapshot (including sequences and procedures)
+            ResultOrException<(ConcurrentDictionary<string, SqlTable> Tables, ConcurrentDictionary<string, SqlSequence> Sequences, ConcurrentDictionary<string, SqlStoredProcedure> Procedures)> targetSchemaResult = await MigrationSchemaSnapshot.GetTargetSchemaFromMigrations(codePath, appliedMigrationsResult.Result);
+            if (targetSchemaResult.Exception is not null)
             {
-                return new ResultOrException<MigrationGenerationResult>(null, targetSchemaResult.Exception ?? new Exception("Failed to get target schema from migrations"));
+                return new ResultOrException<MigrationGenerationResult>(null, targetSchemaResult.Exception);
             }
+
+            ConcurrentDictionary<string, SqlTable> targetSchema = targetSchemaResult.Result.Tables;
+            ConcurrentDictionary<string, SqlSequence> targetSequences = targetSchemaResult.Result.Sequences;
+            ConcurrentDictionary<string, SqlStoredProcedure> targetProcedures = targetSchemaResult.Result.Procedures;
 
             // Attach foreign keys to current schema for comparison
             ResultOrException<Dictionary<string, List<SqlForeignKey>>> currentFksResult = await sqlService.GetForeignKeys(currentSchemaResult.Result.Keys.ToList());
@@ -266,25 +331,83 @@ public static class MigrationGenerator
                 }
             }
 
-            // Compare schemas: we want to find what changed from target (snapshot) to current (database)
-            // So we compare target -> current, which means we pass (target, current) to CompareSchemas
-            // But CompareSchemas expects (current, target) and finds what's needed to go from current to target
-            // So we swap the parameters: CompareSchemas(target, current) finds what's in current but not in target (new tables)
-            SchemaDiff diff = MigrationSchemaComparer.CompareSchemas(targetSchemaResult.Result, currentSchemaResult.Result);
+            // Compare schemas: we need TWO diffs - one for up script, one for down script
+            // For incremental migrations:
+            //   - targetSchema = state AFTER all applied migrations (from snapshot)
+            //   - currentSchema = current database state (may have manual changes)
+            //   - We want to generate a migration: targetSchema → currentSchema
+            //
+            // For UP script: CompareSchemas(target=BEFORE, current=AFTER) finds what to add/change
+            //   - Add changes = columns in current but not in target → ADD them
+            //   - Drop changes = columns in target but not in current → DROP them
+            //
+            // For DOWN script: CompareSchemas(current=AFTER, target=BEFORE) finds what to reverse
+            //   - Add changes = columns in target but not in current → ADD them back
+            //   - Drop changes = columns in current but not in target → DROP them back
+            
+            // Up script diff: what changed from target (BEFORE) to current (AFTER)
+            SchemaDiff upDiff = MigrationSchemaComparer.CompareSchemas(targetSchema, currentSchemaResult.Result, targetSequences, currentSequences, targetProcedures, currentProcedures);
+            
+            // Down script diff: what changed from current (AFTER) back to target (BEFORE) - reverse of up diff
+            SchemaDiff downDiff = MigrationSchemaComparer.CompareSchemas(currentSchemaResult.Result, targetSchema, currentSequences, targetSequences, currentProcedures, targetProcedures);
+            
+            // Debug logging for sequences and procedures
+            Console.WriteLine($"\n=== Sequence comparison for down script ===");
+            Console.WriteLine($"Current sequences: {string.Join(", ", currentSequences.Keys)}");
+            Console.WriteLine($"Target sequences: {string.Join(", ", targetSequences.Keys)}");
+            Console.WriteLine($"DownDiff.NewSequences: {string.Join(", ", downDiff.NewSequences.Select(s => s.Name))}");
+            Console.WriteLine($"DownDiff.DroppedSequenceNames: {string.Join(", ", downDiff.DroppedSequenceNames)}");
+            Console.WriteLine($"DownDiff.ModifiedSequences: {downDiff.ModifiedSequences.Count}");
+            if (downDiff.DroppedSequenceNames.Count > 0)
+            {
+                Console.WriteLine("Detailed dropped sequence classification:");
+                foreach (string sequenceName in downDiff.DroppedSequenceNames)
+                {
+                    bool inCurrent = currentSequences.Keys.Any(k => k.Equals(sequenceName, StringComparison.OrdinalIgnoreCase));
+                    bool inTarget = targetSequences.Keys.Any(k => k.Equals(sequenceName, StringComparison.OrdinalIgnoreCase));
+                    Console.WriteLine($"  {sequenceName} -> inCurrent={inCurrent}, inTarget={inTarget}");
+                }
+            }
+            if (downDiff.NewSequences.Count > 0)
+            {
+                Console.WriteLine("Detailed new sequence classification:");
+                foreach (SqlSequence sequence in downDiff.NewSequences)
+                {
+                    bool inCurrent = currentSequences.Keys.Any(k => k.Equals(sequence.Name, StringComparison.OrdinalIgnoreCase));
+                    bool inTarget = targetSequences.Keys.Any(k => k.Equals(sequence.Name, StringComparison.OrdinalIgnoreCase));
+                    Console.WriteLine($"  {sequence.Name} -> inCurrent={inCurrent}, inTarget={inTarget}");
+                }
+            }
+            
+            Console.WriteLine($"\n=== Procedure comparison for down script ===");
+            Console.WriteLine($"Current procedures: {string.Join(", ", currentProcedures.Keys)}");
+            Console.WriteLine($"Target procedures: {string.Join(", ", targetProcedures.Keys)}");
+            Console.WriteLine($"DownDiff.NewProcedures: {string.Join(", ", downDiff.NewProcedures.Select(p => p.Name))}");
+            Console.WriteLine($"DownDiff.DroppedProcedureNames: {string.Join(", ", downDiff.DroppedProcedureNames)}");
+            Console.WriteLine($"DownDiff.ModifiedProcedures: {downDiff.ModifiedProcedures.Count}");
+            
+            // Use upDiff for up script generation, downDiff for down script generation
+            SchemaDiff diff = upDiff;
 
             // Check if there are any changes
-            if (diff.NewTables.Count == 0 && diff.DroppedTableNames.Count == 0 && diff.ModifiedTables.Count == 0)
+            if (diff.NewTables.Count == 0 && diff.DroppedTableNames.Count == 0 && diff.ModifiedTables.Count == 0 &&
+                diff.NewSequences.Count == 0 && diff.DroppedSequenceNames.Count == 0 && diff.ModifiedSequences.Count == 0 &&
+                diff.NewProcedures.Count == 0 && diff.DroppedProcedureNames.Count == 0 && diff.ModifiedProcedures.Count == 0)
             {
                 return new ResultOrException<MigrationGenerationResult>(null, new InvalidOperationException("No schema changes detected. Database is already up to date."));
             }
 
             // Generate migration scripts
+            StringBuilder phase0DropProcedures = new StringBuilder(); // DROP PROCEDURE statements
+            StringBuilder phase0DropSequences = new StringBuilder(); // DROP SEQUENCE statements
             StringBuilder phase0DropFks = new StringBuilder(); // DROP FK constraints for tables that will be dropped
             StringBuilder phase0DropTables = new StringBuilder(); // DROP TABLE statements
             StringBuilder phase0DropPks = new StringBuilder(); // DROP PRIMARY KEY constraints
+            StringBuilder phase0_5Sequences = new StringBuilder(); // CREATE SEQUENCE statements (before tables)
             StringBuilder phase1Tables = new StringBuilder(); // CREATE TABLE statements
             StringBuilder phase2Columns = new StringBuilder(); // ALTER TABLE column modifications
             StringBuilder phase3Constraints = new StringBuilder(); // ALTER TABLE FK constraints and PRIMARY KEY constraints
+            StringBuilder phase4Procedures = new StringBuilder(); // CREATE PROCEDURE statements (after constraints)
             StringBuilder downScript = new StringBuilder();
 
             // Phase 0: Drop tables (drop FKs first, then tables)
@@ -292,7 +415,7 @@ public static class MigrationGenerator
             foreach (string droppedTableName in diff.DroppedTableNames)
             {
                 // Find the table schema from target schema to get its FKs
-                if (targetSchemaResult.Result.TryGetValue(droppedTableName.ToLowerInvariant(), out SqlTable? droppedTable))
+                if (targetSchema.TryGetValue(droppedTableName.ToLowerInvariant(), out SqlTable? droppedTable))
                 {
                     // Drop FKs for this table
                     HashSet<string> processedFks = new HashSet<string>();
@@ -346,7 +469,7 @@ public static class MigrationGenerator
                 {
                     // Need to drop PK constraint before dropping/modifying the column
                     // Get current PK columns from target schema to determine constraint name
-                    if (targetSchemaResult.Result.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTable))
+                    if (targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTable))
                     {
                         List<SqlTableColumn> pkColumns = targetTable.Columns.Values.Where(c => c.IsPrimaryKey).OrderBy(c => c.OrdinalPosition).ToList();
                         if (pkColumns.Count > 0)
@@ -430,7 +553,7 @@ public static class MigrationGenerator
                                     }
                                 }
                             }
-                            string fkSql = MigrationSqlGenerator.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchemaResult.Result));
+                            string fkSql = MigrationSqlGenerator.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchema));
                             phase3Constraints.Append(fkSql);
                             phase3Constraints.AppendLine();
                             processedFks.Add(fk.Name);
@@ -460,7 +583,7 @@ public static class MigrationGenerator
                                 fkGroup.Add(otherFkChange.NewForeignKey);
                             }
                         }
-                        string fkSql = MigrationSqlGenerator.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchemaResult.Result));
+                        string fkSql = MigrationSqlGenerator.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchema));
                         phase3Constraints.Append(fkSql);
                         phase3Constraints.AppendLine();
                     }
@@ -469,7 +592,7 @@ public static class MigrationGenerator
 
             // Add PRIMARY KEY constraints for columns that are gaining PK status
             // Get current schema (after modifications) to find new PK columns
-            ConcurrentDictionary<string, SqlTable> currentSchemaAfterChanges = MigrationSchemaSnapshot.ApplySchemaDiffToTarget(targetSchemaResult.Result, diff);
+            ConcurrentDictionary<string, SqlTable> currentSchemaAfterChanges = MigrationSchemaSnapshot.ApplySchemaDiffToTarget(targetSchema, diff);
             HashSet<string> tablesWithPkAdded = new HashSet<string>();
             
             foreach (TableDiff tableDiff in diff.ModifiedTables.OrderBy(t => t.TableName))
@@ -554,55 +677,126 @@ public static class MigrationGenerator
                 }
             }
 
-            // Generate down script
+            // Phase 0: Drop sequences that are being dropped (before dropping tables)
+            foreach (string droppedSequenceName in diff.DroppedSequenceNames.OrderByDescending(s => s))
+            {
+                phase0DropSequences.Append(MigrationSqlGenerator.GenerateDropSequenceStatement(droppedSequenceName));
+                phase0DropSequences.AppendLine();
+            }
+            
+            // Phase 0: Drop procedures that are being dropped or modified (before dropping tables)
+            foreach (string droppedProcedureName in diff.DroppedProcedureNames.OrderByDescending(p => p))
+            {
+                phase0DropProcedures.Append(MigrationSqlGenerator.GenerateDropProcedureStatement(droppedProcedureName));
+                phase0DropProcedures.AppendLine();
+            }
+            
+            // Note: Modified sequences are handled in Phase 0.5 via GenerateAlterSequenceStatement which drops and recreates
+            
+            foreach (ProcedureChange procedureChange in diff.ModifiedProcedures)
+            {
+                if (procedureChange.ChangeType == ProcedureChangeType.Modify && procedureChange.OldProcedure != null)
+                {
+                    // For modifications, drop the old procedure before creating the new one
+                    phase0DropProcedures.Append(MigrationSqlGenerator.GenerateDropProcedureStatement(procedureChange.OldProcedure.Name));
+                    phase0DropProcedures.AppendLine();
+                }
+            }
+
+            // Phase 0.5: Create sequences (before tables, so they can be used in table defaults)
+            foreach (SqlSequence newSequence in diff.NewSequences.OrderBy(s => s.Name))
+            {
+                phase0_5Sequences.Append(MigrationSqlGenerator.GenerateCreateSequenceStatement(newSequence));
+                phase0_5Sequences.AppendLine();
+            }
+            foreach (SequenceChange sequenceChange in diff.ModifiedSequences)
+            {
+                if (sequenceChange.ChangeType == SequenceChangeType.Modify && sequenceChange.NewSequence != null)
+                {
+                    // For modifications, drop and recreate (handled by GenerateAlterSequenceStatement)
+                    phase0_5Sequences.Append(MigrationSqlGenerator.GenerateAlterSequenceStatement(sequenceChange.OldSequence!, sequenceChange.NewSequence));
+                    phase0_5Sequences.AppendLine();
+                }
+            }
+
+            // Phase 4: Create procedures (after constraints)
+            foreach (SqlStoredProcedure newProcedure in diff.NewProcedures.OrderBy(p => p.Name))
+            {
+                phase4Procedures.Append(MigrationSqlGenerator.GenerateCreateProcedureStatement(newProcedure));
+                phase4Procedures.AppendLine();
+            }
+            foreach (ProcedureChange procedureChange in diff.ModifiedProcedures)
+            {
+                if (procedureChange.ChangeType == ProcedureChangeType.Modify && procedureChange.NewProcedure != null)
+                {
+                    // For modifications, create the new procedure (old one was already dropped in phase 0)
+                    phase4Procedures.Append(MigrationSqlGenerator.GenerateCreateProcedureStatement(procedureChange.NewProcedure));
+                    phase4Procedures.AppendLine();
+                }
+            }
+
+            // Generate down script using downDiff (reverse of upDiff)
+            // Transaction is managed by MigrationApplier.ExecuteMigrationScript using ADO.NET transactions
             downScript.AppendLine("SET XACT_ABORT ON;");
-            downScript.AppendLine("BEGIN TRANSACTION;");
             downScript.AppendLine();
 
-            // Reverse index changes (drop added indexes, add back dropped indexes)
-            // For Modify: drop the new index and add back the old index
+            // Switch to downDiff for down script generation
+            SchemaDiff originalDiff = diff;
+            diff = downDiff;
+
+            // Reverse index changes
+            // For Modify: OldIndex = current state (after migration), NewIndex = target state (before migration)
+            // For Add: NewIndex = from targetSchema (was dropped by migration) → should be ADDED back
+            // For Drop: OldIndex = from currentSchema (was added by migration) → should be DROPPED
             foreach (TableDiff tableDiff in diff.ModifiedTables.OrderByDescending(t => t.TableName))
             {
                 foreach (IndexChange indexChange in tableDiff.IndexChanges.Where(c => c.ChangeType == IndexChangeType.Modify))
                 {
-                    if (indexChange.NewIndex != null)
-                    {
-                        downScript.AppendLine(MigrationSqlGenerator.GenerateDropIndexStatement(indexChange.NewIndex));
-                    }
+                    // Drop current index (OldIndex) and add back target index (NewIndex)
                     if (indexChange.OldIndex != null)
                     {
-                        downScript.Append(MigrationSqlGenerator.GenerateCreateIndexStatement(indexChange.OldIndex));
+                        downScript.AppendLine(MigrationSqlGenerator.GenerateDropIndexStatement(indexChange.OldIndex));
+                    }
+                    if (indexChange.NewIndex != null)
+                    {
+                        downScript.Append(MigrationSqlGenerator.GenerateCreateIndexStatement(indexChange.NewIndex));
                         downScript.AppendLine();
                     }
                 }
                 
-                // Drop added indexes
-                foreach (IndexChange indexChange in tableDiff.IndexChanges.Where(c => c.ChangeType == IndexChangeType.Add))
-                {
-                    if (indexChange.NewIndex != null)
-                    {
-                        downScript.AppendLine(MigrationSqlGenerator.GenerateDropIndexStatement(indexChange.NewIndex));
-                    }
-                }
-                
-                // Add back dropped indexes
+                // Drop indexes that were added by the migration
+                // Drop changes: index exists in currentSchema (after migration) but not in targetSchema (before migration)
                 foreach (IndexChange indexChange in tableDiff.IndexChanges.Where(c => c.ChangeType == IndexChangeType.Drop))
                 {
                     if (indexChange.OldIndex != null)
                     {
-                        downScript.Append(MigrationSqlGenerator.GenerateCreateIndexStatement(indexChange.OldIndex));
+                        downScript.AppendLine(MigrationSqlGenerator.GenerateDropIndexStatement(indexChange.OldIndex));
+                    }
+                }
+                
+                // Add back indexes that were dropped by the migration
+                // Add changes: index exists in targetSchema (before migration) but not in currentSchema (after migration)
+                foreach (IndexChange indexChange in tableDiff.IndexChanges.Where(c => c.ChangeType == IndexChangeType.Add))
+                {
+                    if (indexChange.NewIndex != null)
+                    {
+                        downScript.Append(MigrationSqlGenerator.GenerateCreateIndexStatement(indexChange.NewIndex));
                         downScript.AppendLine();
                     }
                 }
             }
 
-            // Reverse PRIMARY KEY changes - drop new PKs first (before restoring columns)
+            // Reverse PRIMARY KEY changes - drop PKs first (before restoring columns)
+            // We need to drop PK if:
+            // 1. Any columns gained PK status (new PK columns)
+            // 2. Any columns that are currently PKs need to be modified or dropped (losing PK status)
             // We'll add back old PKs after restoring columns
             StringBuilder pkRestoreScript = new StringBuilder(); // Store PK restorations for after column restoration
             foreach (TableDiff tableDiff in diff.ModifiedTables.OrderByDescending(t => t.TableName))
             {
-                // First, check if any columns gained PK status (need to drop new PK)
                 bool needsPkDropped = false;
+                
+                // Check if any columns gained PK status (need to drop new PK)
                 foreach (ColumnChange change in tableDiff.ColumnChanges)
                 {
                     if (change.NewColumn != null && change.NewColumn.IsPrimaryKey)
@@ -616,10 +810,35 @@ public static class MigrationGenerator
                     }
                 }
                 
+                // Also check if any columns that are currently PKs need to be modified or dropped
+                // For dropped columns: OldColumn is from current schema (after migration), so check OldColumn.IsPrimaryKey
+                // For modified columns: NewColumn is from current schema (after migration), so check if it's a PK that will lose PK status
+                if (!needsPkDropped)
+                {
+                    foreach (ColumnChange change in tableDiff.ColumnChanges)
+                    {
+                        // Check if a column that is currently a PK is being dropped
+                        // OldColumn represents the current state (after migration), so check if it's a PK
+                        if (change.ChangeType == ColumnChangeType.Drop && change.OldColumn != null && change.OldColumn.IsPrimaryKey)
+                        {
+                            needsPkDropped = true;
+                            break;
+                        }
+                        // Check if a column that is currently a PK is being modified to lose PK status
+                        // NewColumn represents the current state (after migration)
+                        if (change.ChangeType == ColumnChangeType.Modify && change.NewColumn != null && change.NewColumn.IsPrimaryKey && 
+                            change.OldColumn != null && !change.OldColumn.IsPrimaryKey)
+                        {
+                            needsPkDropped = true;
+                            break;
+                        }
+                    }
+                }
+                
                 if (needsPkDropped)
                 {
-                    // Get new PK columns from current schema (after changes) to drop
-                    ConcurrentDictionary<string, SqlTable> schemaAfterChanges = MigrationSchemaSnapshot.ApplySchemaDiffToTarget(targetSchemaResult.Result, diff);
+                    // Get current PK columns from schema after changes to drop
+                    ConcurrentDictionary<string, SqlTable> schemaAfterChanges = MigrationSchemaSnapshot.ApplySchemaDiffToTarget(targetSchema, diff);
                     if (schemaAfterChanges.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? newTable))
                     {
                         List<SqlTableColumn> newPkColumns = newTable.Columns.Values.Where(c => c.IsPrimaryKey).OrderBy(c => c.OrdinalPosition).ToList();
@@ -632,26 +851,44 @@ public static class MigrationGenerator
                 }
                 
                 // Store PK restoration for after column restoration
+                // We need to restore PK if the target schema (before migration) had columns as PKs
+                // For Drop: NewColumn is null, so check if OldColumn (current state) was a PK that needs to be restored
+                //   Actually, for Drop: OldColumn is from current schema, NewColumn is null. We need to check targetSchema.
+                // For Modify: NewColumn is from target schema (what we want), so check NewColumn.IsPrimaryKey
                 bool needsPkRestored = false;
-                List<string> restoredPkColumns = new List<string>();
+                HashSet<string> columnsThatLostPk = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 
                 foreach (ColumnChange change in tableDiff.ColumnChanges)
                 {
-                    if (change.OldColumn != null && change.OldColumn.IsPrimaryKey)
+                    if (change.ChangeType == ColumnChangeType.Drop)
                     {
-                        if (change.ChangeType == ColumnChangeType.Drop || 
-                            (change.ChangeType == ColumnChangeType.Modify && change.NewColumn != null && !change.NewColumn.IsPrimaryKey))
+                        // For dropped columns, check if they were PKs in the target schema (before migration)
+                        // We need to check the target schema directly since NewColumn is null
+                        if (targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTable))
+                        {
+                            if (targetTable.Columns.TryGetValue(change.OldColumn?.Name.ToLowerInvariant() ?? "", out SqlTableColumn? targetColumn) && targetColumn.IsPrimaryKey)
+                            {
+                                needsPkRestored = true;
+                                columnsThatLostPk.Add(change.OldColumn!.Name);
+                            }
+                        }
+                    }
+                    else if (change.ChangeType == ColumnChangeType.Modify && change.NewColumn != null)
+                    {
+                        // NewColumn is from target schema (what we want to restore to)
+                        // If it was a PK in the target schema, we need to restore it
+                        if (change.NewColumn.IsPrimaryKey)
                         {
                             needsPkRestored = true;
-                            restoredPkColumns.Add(change.OldColumn.Name);
+                            columnsThatLostPk.Add(change.NewColumn.Name);
                         }
                     }
                 }
                 
-                if (needsPkRestored && restoredPkColumns.Count > 0)
+                if (needsPkRestored)
                 {
                     // Get all original PK columns from target schema
-                    if (targetSchemaResult.Result.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTable))
+                    if (targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTable))
                     {
                         List<SqlTableColumn> originalPkColumns = targetTable.Columns.Values.Where(c => c.IsPrimaryKey).OrderBy(c => c.OrdinalPosition).ToList();
                         if (originalPkColumns.Count > 0)
@@ -686,7 +923,7 @@ public static class MigrationGenerator
                             fkGroup.Add(otherFkChange.OldForeignKey);
                         }
                     }
-                    string fkSql = MigrationSqlGenerator.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchemaResult.Result));
+                    string fkSql = MigrationSqlGenerator.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchema));
                     downScript.Append(fkSql);
                     downScript.AppendLine();
                 }
@@ -718,7 +955,7 @@ public static class MigrationGenerator
                             fkGroup.Add(otherFkChange.OldForeignKey);
                         }
                     }
-                    string fkSql = MigrationSqlGenerator.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchemaResult.Result));
+                    string fkSql = MigrationSqlGenerator.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchema));
                     downScript.Append(fkSql);
                     downScript.AppendLine();
                 }
@@ -727,58 +964,111 @@ public static class MigrationGenerator
             // Reverse column modifications (in reverse order)
             // Important: Drop added identity columns BEFORE restoring identity to modified columns
             // to avoid "Multiple identity columns" error
+            // Track which columns we're adding to avoid duplicates
+            // Also track which columns we're dropping to ensure we don't add a column we just dropped
+            HashSet<string> columnsBeingAdded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> columnsBeingDropped = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            
             foreach (TableDiff tableDiff in diff.ModifiedTables.OrderByDescending(t => t.TableName))
             {
-                // First pass: Drop added columns (especially identity columns) before restoring identity
-                foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Add))
+                // Log column changes for debugging
+                Console.WriteLine($"\n=== Processing table: {tableDiff.TableName} ===");
+                foreach (ColumnChange change in tableDiff.ColumnChanges)
                 {
-                    if (change.NewColumn != null)
-                    {
-                        downScript.AppendLine(MigrationSqlGenerator.GenerateDropColumnStatement(change.NewColumn.Name, tableDiff.TableName));
-                    }
+                    Console.WriteLine($"  ChangeType: {change.ChangeType}, Column: {change.OldColumn?.Name ?? change.NewColumn?.Name ?? "null"}");
+                    if (change.OldColumn != null) Console.WriteLine($"    OldColumn: IsIdentity={change.OldColumn.IsIdentity}, IsPrimaryKey={change.OldColumn.IsPrimaryKey}");
+                    if (change.NewColumn != null) Console.WriteLine($"    NewColumn: IsIdentity={change.NewColumn.IsIdentity}, IsPrimaryKey={change.NewColumn.IsPrimaryKey}");
                 }
-
-                // Second pass: Restore dropped columns
+                
+                // First pass: Drop columns that were added by the migration
+                // For Drop changes: column exists in currentSchema (after migration) but not in targetSchema (before migration)
+                // This means the column was ADDED by the migration, so we need to DROP it during rollback
                 foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Drop))
                 {
                     if (change.OldColumn != null)
                     {
-                        downScript.Append(MigrationSqlGenerator.GenerateAddColumnStatement(change.OldColumn, tableDiff.TableName));
+                        string columnKey = $"{tableDiff.TableName}.{change.OldColumn.Name}";
+                        columnsBeingDropped.Add(columnKey);
+                        Console.WriteLine($"  [DROP] {columnKey}");
+                        downScript.AppendLine(MigrationSqlGenerator.GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName));
+                    }
+                }
+
+                // Second pass: Restore columns that were dropped by the migration
+                // For Add changes: column exists in targetSchema (before migration) but not in currentSchema (after migration)
+                // This means the column was DROPPED by the migration, so we need to ADD it back during rollback
+                foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Add))
+                {
+                    if (change.NewColumn != null)
+                    {
+                        string columnKey = $"{tableDiff.TableName}.{change.NewColumn.Name}";
+                        // Only add if we haven't already added it and we haven't dropped it in this script
+                        if (!columnsBeingAdded.Contains(columnKey) && !columnsBeingDropped.Contains(columnKey))
+                        {
+                            columnsBeingAdded.Add(columnKey);
+                            Console.WriteLine($"  [ADD] {columnKey}");
+                            downScript.Append(MigrationSqlGenerator.GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName));
+                        }
+                        else
+                        {
+                            Console.WriteLine($"  [SKIP ADD] {columnKey} (already added or being dropped)");
+                        }
                     }
                 }
 
                 // Third pass: Reverse modifications (now safe to restore identity since added identity columns are dropped)
+                // For Modify changes: OldColumn = current state (after migration), NewColumn = target state (before migration)
+                // We need to restore from OldColumn to NewColumn
                 foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Modify))
                 {
                     if (change.OldColumn != null && change.NewColumn != null)
                     {
+                        string columnKey = $"{tableDiff.TableName}.{change.NewColumn.Name}";
+                        
+                        Console.WriteLine($"  [MODIFY] {columnKey}: OldColumn.IsIdentity={change.OldColumn.IsIdentity}, NewColumn.IsIdentity={change.NewColumn.IsIdentity}");
+                        
                         // Check if identity property changed - SQL Server requires DROP + ADD (same as up script)
                         if (change.OldColumn.IsIdentity != change.NewColumn.IsIdentity)
                         {
-                            // Drop new column and add back old column with original identity setting
-                            downScript.AppendLine(MigrationSqlGenerator.GenerateDropColumnStatement(change.NewColumn.Name, tableDiff.TableName));
-                            downScript.Append(MigrationSqlGenerator.GenerateAddColumnStatement(change.OldColumn, tableDiff.TableName));
+                            // Drop current column (OldColumn) and add back target column (NewColumn) with original identity setting
+                            Console.WriteLine($"    Dropping {change.OldColumn.Name} and adding back with identity={change.NewColumn.IsIdentity}");
+                            downScript.AppendLine(MigrationSqlGenerator.GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName));
+                            // For Modify changes, we drop and then immediately add, so don't check columnsBeingDropped
+                            // Only check if we've already added it (shouldn't happen, but be safe)
+                            if (!columnsBeingAdded.Contains(columnKey))
+                            {
+                                columnsBeingAdded.Add(columnKey);
+                                downScript.Append(MigrationSqlGenerator.GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName));
+                                Console.WriteLine($"    Added back {change.NewColumn.Name}");
+                            }
+                            else
+                            {
+                                Console.WriteLine($"    Skipped adding {change.NewColumn.Name} (already added)");
+                            }
                         }
                         // Check if it's a computed column change - these need DROP + ADD
                         else if (change.OldColumn.IsComputed || change.NewColumn.IsComputed)
                         {
-                            // Drop new computed column
-                            if (change.NewColumn.IsComputed)
-                            {
-                                downScript.AppendLine(MigrationSqlGenerator.GenerateDropColumnStatement(change.NewColumn.Name, tableDiff.TableName));
-                            }
-                            // Add back old computed column
+                            // Drop current computed column
                             if (change.OldColumn.IsComputed)
                             {
-                                downScript.Append(MigrationSqlGenerator.GenerateAddColumnStatement(change.OldColumn, tableDiff.TableName));
+                                downScript.AppendLine(MigrationSqlGenerator.GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName));
+                            }
+                            // Add back target computed column
+                            // For Modify changes, we drop and then immediately add, so don't check columnsBeingDropped
+                            if (change.NewColumn.IsComputed && !columnsBeingAdded.Contains(columnKey))
+                            {
+                                columnsBeingAdded.Add(columnKey);
+                                downScript.Append(MigrationSqlGenerator.GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName));
                             }
                         }
                         else
                         {
-                            string reverseAlter = MigrationSqlGenerator.GenerateAlterColumnStatement(change.NewColumn, change.OldColumn, tableDiff.TableName);
-                            if (!string.IsNullOrEmpty(reverseAlter))
-                            {
-                                downScript.Append(reverseAlter);
+                            // Reverse the modification: change from OldColumn (current) to NewColumn (target)
+                            string reverseAlter = MigrationSqlGenerator.GenerateAlterColumnStatement(change.OldColumn, change.NewColumn, tableDiff.TableName);
+                        if (!string.IsNullOrEmpty(reverseAlter))
+                        {
+                            downScript.Append(reverseAlter);
                             }
                         }
                     }
@@ -789,10 +1079,14 @@ public static class MigrationGenerator
             downScript.Append(pkRestoreScript);
 
             // Recreate dropped tables (in forward order, so dependencies are created first)
+            if (diff.DroppedTableNames.Count > 0)
+            {
+                Console.WriteLine($"\n=== Recreating dropped tables: {string.Join(", ", diff.DroppedTableNames)} ===");
+            }
             foreach (string droppedTableName in diff.DroppedTableNames)
             {
                 // Find the table schema from target schema (before migration was applied)
-                if (targetSchemaResult.Result.TryGetValue(droppedTableName.ToLowerInvariant(), out SqlTable? droppedTable))
+                if (targetSchema.TryGetValue(droppedTableName.ToLowerInvariant(), out SqlTable? droppedTable))
                 {
                     // Generate CREATE TABLE statement
                     string createTableSql = MigrationSqlGenerator.GenerateCreateTableStatement(droppedTable);
@@ -819,7 +1113,7 @@ public static class MigrationGenerator
                                         }
                                     }
                                 }
-                                string fkSql = MigrationSqlGenerator.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchemaResult.Result));
+                                string fkSql = MigrationSqlGenerator.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchema));
                                 downScript.Append(fkSql);
                                 downScript.AppendLine();
                                 processedFks.Add(fk.Name);
@@ -829,22 +1123,166 @@ public static class MigrationGenerator
                 }
             }
 
-            // Drop new tables (in reverse order)
-            for (int i = diff.NewTables.Count - 1; i >= 0; i--)
+            // Recreate new tables (tables that were dropped by the migration and need to be restored)
+            // In downDiff, NewTables = tables in targetSchema (before migration) but not in currentSchema (after migration)
+            // These are tables that were DROPPED by the migration, so we need to RECREATE them in the down script
+            if (diff.NewTables.Count > 0)
             {
-                downScript.AppendLine($"DROP TABLE IF EXISTS [dbo].[{diff.NewTables[i].Name}];");
+                Console.WriteLine($"\n=== Recreating new tables (were dropped by migration): {string.Join(", ", diff.NewTables.Select(t => t.Name))} ===");
+            }
+            foreach (SqlTable newTable in diff.NewTables.OrderBy(t => t.Name))
+            {
+                // Generate CREATE TABLE statement
+                string createTableSql = MigrationSqlGenerator.GenerateCreateTableStatement(newTable);
+                downScript.AppendLine(createTableSql);
+                downScript.AppendLine();
+                
+                // Generate FK constraints for the recreated table
+                HashSet<string> processedFks = new HashSet<string>();
+                foreach (SqlTableColumn column in newTable.Columns.Values)
+                {
+                    foreach (SqlForeignKey fk in column.ForeignKeys)
+                    {
+                        if (!processedFks.Contains(fk.Name))
+                        {
+                            // Group multi-column FKs
+                            List<SqlForeignKey> fkGroup = new List<SqlForeignKey> { fk };
+                            foreach (SqlTableColumn otherColumn in newTable.Columns.Values)
+                            {
+                                foreach (SqlForeignKey otherFk in otherColumn.ForeignKeys)
+                                {
+                                    if (otherFk.Name == fk.Name && otherFk.Table == fk.Table && otherFk != fk)
+                                    {
+                                        fkGroup.Add(otherFk);
+                                    }
+                                }
+                            }
+                            string fkSql = MigrationSqlGenerator.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchema));
+                            downScript.Append(fkSql);
+                            downScript.AppendLine();
+                            processedFks.Add(fk.Name);
+                        }
+                    }
+                }
+            }
+            
+            // Drop tables that were added by the migration (in reverse order)
+            // In downDiff, DroppedTableNames = tables in currentSchema (after migration) but not in targetSchema (before migration)
+            // These are tables that were ADDED by the migration, so we need to DROP them in the down script
+            for (int i = diff.DroppedTableNames.Count - 1; i >= 0; i--)
+            {
+                downScript.AppendLine($"DROP TABLE IF EXISTS [dbo].[{diff.DroppedTableNames[i]}];");
+            }
+
+            // Drop sequences that were added or modified by the migration (reverse order)
+            // In downDiff, DroppedSequenceNames = sequences in currentSchema (after migration) but not in targetSchema (before migration)
+            // These are sequences that were ADDED by the migration, so we need to DROP them in the down script
+            if (diff.DroppedSequenceNames.Count > 0)
+            {
+                Console.WriteLine($"\n=== Dropping sequences (were added by migration): {string.Join(", ", diff.DroppedSequenceNames)} ===");
+            }
+            foreach (string droppedSequenceName in diff.DroppedSequenceNames.OrderByDescending(s => s))
+            {
+                Console.WriteLine($"  [DROP SEQUENCE] {droppedSequenceName}");
+                downScript.AppendLine(MigrationSqlGenerator.GenerateDropSequenceStatement(droppedSequenceName));
+            }
+            // For Modify: drop the current sequence (OldSequence - after modification) before recreating the old one
+            foreach (SequenceChange sequenceChange in diff.ModifiedSequences)
+            {
+                if (sequenceChange.ChangeType == SequenceChangeType.Modify && sequenceChange.OldSequence != null)
+                {
+                    downScript.AppendLine(MigrationSqlGenerator.GenerateDropSequenceStatement(sequenceChange.OldSequence.Name));
+                }
+            }
+
+            // Drop procedures that were added or modified by the migration (reverse order)
+            // In downDiff, DroppedProcedureNames = procedures in currentSchema (after migration) but not in targetSchema (before migration)
+            // These are procedures that were ADDED by the migration, so we need to DROP them in the down script
+            foreach (string droppedProcedureName in diff.DroppedProcedureNames.OrderByDescending(p => p))
+            {
+                downScript.Append(MigrationSqlGenerator.GenerateDropProcedureStatement(droppedProcedureName));
+                downScript.AppendLine();
+            }
+            // For Modify: drop the current procedure (OldProcedure - after modification) before recreating the old one
+            foreach (ProcedureChange procedureChange in diff.ModifiedProcedures)
+            {
+                if (procedureChange.ChangeType == ProcedureChangeType.Modify && procedureChange.OldProcedure != null)
+                {
+                    downScript.Append(MigrationSqlGenerator.GenerateDropProcedureStatement(procedureChange.OldProcedure.Name));
+                    downScript.AppendLine();
+                }
+            }
+
+            // Recreate sequences that were dropped or modified by the migration
+            // In downDiff, NewSequences = sequences in targetSchema (before migration) but not in currentSchema (after migration)
+            // These are sequences that were DROPPED by the migration, so we need to RECREATE them in the down script
+            if (diff.NewSequences.Count > 0)
+            {
+                Console.WriteLine($"\n=== Recreating sequences (were dropped by migration): {string.Join(", ", diff.NewSequences.Select(s => s.Name))} ===");
+            }
+            foreach (SqlSequence newSequence in diff.NewSequences.OrderBy(s => s.Name))
+            {
+                Console.WriteLine($"  [CREATE SEQUENCE] {newSequence.Name}");
+                downScript.Append(MigrationSqlGenerator.GenerateCreateSequenceStatement(newSequence));
+                downScript.AppendLine();
+            }
+            // For Modify: restore the old sequence (NewSequence - before modification)
+            foreach (SequenceChange sequenceChange in diff.ModifiedSequences)
+            {
+                if (sequenceChange.ChangeType == SequenceChangeType.Modify && sequenceChange.NewSequence != null)
+                {
+                    downScript.Append(MigrationSqlGenerator.GenerateCreateSequenceStatement(sequenceChange.NewSequence));
+                    downScript.AppendLine();
+                }
+            }
+
+            // Recreate procedures that were dropped or modified by the migration
+            // In downDiff, NewProcedures = procedures in targetSchema (before migration) but not in currentSchema (after migration)
+            // These are procedures that were DROPPED by the migration, so we need to RECREATE them in the down script
+            foreach (SqlStoredProcedure newProcedure in diff.NewProcedures.OrderBy(p => p.Name))
+            {
+                downScript.Append(MigrationSqlGenerator.GenerateCreateProcedureStatement(newProcedure));
+                downScript.AppendLine();
+            }
+            // For Modify: restore the old procedure (NewProcedure - before modification)
+            foreach (ProcedureChange procedureChange in diff.ModifiedProcedures)
+            {
+                if (procedureChange.ChangeType == ProcedureChangeType.Modify && procedureChange.NewProcedure != null)
+                {
+                    downScript.Append(MigrationSqlGenerator.GenerateCreateProcedureStatement(procedureChange.NewProcedure));
+                    downScript.AppendLine();
+                }
             }
 
             downScript.AppendLine();
-            downScript.AppendLine("COMMIT TRANSACTION;");
 
-            // Build up script with transaction and phases
+            // Build up script with phases
+            // Transaction is managed by MigrationApplier.ExecuteMigrationScript using ADO.NET transactions
             StringBuilder upScript = new StringBuilder();
             upScript.AppendLine("SET XACT_ABORT ON;");
-            upScript.AppendLine("BEGIN TRANSACTION;");
             upScript.AppendLine();
 
             int phaseNumber = 1;
+
+            // Phase 0: Drop Procedures (before dropping tables)
+            string phase0DropProceduresContent = phase0DropProcedures.ToString().Trim();
+            if (!string.IsNullOrEmpty(phase0DropProceduresContent))
+            {
+                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Drop Stored Procedures"));
+                upScript.AppendLine(phase0DropProceduresContent);
+                upScript.AppendLine();
+                phaseNumber++;
+            }
+
+            // Phase 0: Drop Sequences (before dropping tables)
+            string phase0DropSequencesContent = phase0DropSequences.ToString().Trim();
+            if (!string.IsNullOrEmpty(phase0DropSequencesContent))
+            {
+                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Drop Sequences"));
+                upScript.AppendLine(phase0DropSequencesContent);
+                upScript.AppendLine();
+                phaseNumber++;
+            }
 
             // Phase 0: Drop Foreign Keys for tables that will be dropped
             string phase0DropFksContent = phase0DropFks.ToString().Trim();
@@ -876,6 +1314,16 @@ public static class MigrationGenerator
                 phaseNumber++;
             }
 
+            // Phase 0.5: Create Sequences (before tables, so they can be used in table defaults)
+            string phase0_5SequencesContent = phase0_5Sequences.ToString().Trim();
+            if (!string.IsNullOrEmpty(phase0_5SequencesContent))
+            {
+                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Create Sequences"));
+                upScript.AppendLine(phase0_5SequencesContent);
+                upScript.AppendLine();
+                phaseNumber++;
+            }
+
             // Phase 1: Create Tables
             string phase1Content = phase1Tables.ToString().Trim();
             if (!string.IsNullOrEmpty(phase1Content))
@@ -903,35 +1351,35 @@ public static class MigrationGenerator
                 upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Add Foreign Key Constraints and Primary Key Constraints"));
                 upScript.AppendLine(phase3Content);
                 upScript.AppendLine();
+                phaseNumber++;
             }
 
-            upScript.AppendLine("COMMIT TRANSACTION;");
+            // Phase 4: Create Stored Procedures (after constraints)
+            string phase4ProceduresContent = phase4Procedures.ToString().Trim();
+            if (!string.IsNullOrEmpty(phase4ProceduresContent))
+            {
+                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Create Stored Procedures"));
+                upScript.AppendLine(phase4ProceduresContent);
+                upScript.AppendLine();
+            }
 
             string timestamp = MigrationUtilities.GetNextMigrationTimestamp();
             string migrationName = $"{timestamp}_{description}";
             string upScriptPath = Path.Combine(migrationsPath, $"{migrationName}.sql");
             string downScriptPath = Path.Combine(migrationsPath, $"{migrationName}.down.sql");
 
-            string finalUpScript = upScript.ToString();
-            if (!finalUpScript.Contains("BEGIN TRANSACTION", StringComparison.OrdinalIgnoreCase))
-            {
-                finalUpScript = "SET XACT_ABORT ON;\r\nBEGIN TRANSACTION;\r\n\r\n" + finalUpScript + "\r\n\r\nCOMMIT TRANSACTION;";
-            }
+            await File.WriteAllTextAsync(upScriptPath, upScript.ToString().TrimEnd());
+            await File.WriteAllTextAsync(downScriptPath, downScript.ToString().TrimEnd());
 
-            await File.WriteAllTextAsync(upScriptPath, finalUpScript.TrimEnd());
-
-            string finalDownScript = downScript.ToString();
-            if (!finalDownScript.Contains("BEGIN TRANSACTION", StringComparison.OrdinalIgnoreCase))
-            {
-                finalDownScript = "SET XACT_ABORT ON;\r\nBEGIN TRANSACTION;\r\n\r\n" + finalDownScript + "\r\n\r\nCOMMIT TRANSACTION;";
-            }
-
-            await File.WriteAllTextAsync(downScriptPath, finalDownScript.TrimEnd());
+            // Restore diff to upDiff for snapshot saving (we save the state after applying the UP migration)
+            diff = originalDiff;
 
             // Save schema snapshot (target schema represents the state after this migration is applied)
             // We need to apply the changes to target schema to get the new target
-            ConcurrentDictionary<string, SqlTable> newTargetSchema = MigrationSchemaSnapshot.ApplySchemaDiffToTarget(targetSchemaResult.Result, diff);
-            await MigrationSchemaSnapshot.SaveSchemaSnapshot(newTargetSchema, migrationName, codePath);
+            ConcurrentDictionary<string, SqlTable> newTargetSchema = MigrationSchemaSnapshot.ApplySchemaDiffToTarget(targetSchema, diff);
+            ConcurrentDictionary<string, SqlSequence> newTargetSequences = MigrationSchemaSnapshot.ApplySequenceDiffToTarget(targetSequences, diff);
+            ConcurrentDictionary<string, SqlStoredProcedure> newTargetProcedures = MigrationSchemaSnapshot.ApplyProcedureDiffToTarget(targetProcedures, diff);
+            await MigrationSchemaSnapshot.SaveSchemaSnapshot(newTargetSchema, migrationName, codePath, newTargetSequences, newTargetProcedures);
 
             return new ResultOrException<MigrationGenerationResult>(
                 new MigrationGenerationResult(migrationName, upScriptPath, downScriptPath, description),
