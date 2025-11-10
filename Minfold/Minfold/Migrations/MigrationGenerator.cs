@@ -281,9 +281,10 @@ public static class MigrationGenerator
             // Generate migration scripts
             StringBuilder phase0DropFks = new StringBuilder(); // DROP FK constraints for tables that will be dropped
             StringBuilder phase0DropTables = new StringBuilder(); // DROP TABLE statements
+            StringBuilder phase0DropPks = new StringBuilder(); // DROP PRIMARY KEY constraints
             StringBuilder phase1Tables = new StringBuilder(); // CREATE TABLE statements
             StringBuilder phase2Columns = new StringBuilder(); // ALTER TABLE column modifications
-            StringBuilder phase3Constraints = new StringBuilder(); // ALTER TABLE FK constraints
+            StringBuilder phase3Constraints = new StringBuilder(); // ALTER TABLE FK constraints and PRIMARY KEY constraints
             StringBuilder downScript = new StringBuilder();
 
             // Phase 0: Drop tables (drop FKs first, then tables)
@@ -323,10 +324,47 @@ public static class MigrationGenerator
                 phase1Tables.AppendLine();
             }
 
+            // Phase 0.5: Drop PRIMARY KEY constraints before column modifications
+            // Collect PK changes from modified tables
+            HashSet<string> tablesWithPkDropped = new HashSet<string>();
+            foreach (TableDiff tableDiff in diff.ModifiedTables.OrderBy(t => t.TableName))
+            {
+                // Check if any column is losing PK status
+                bool needsPkDropped = false;
+                foreach (ColumnChange change in tableDiff.ColumnChanges)
+                {
+                    if (change.OldColumn != null && change.OldColumn.IsPrimaryKey && 
+                        (change.ChangeType == ColumnChangeType.Drop || 
+                         (change.ChangeType == ColumnChangeType.Modify && change.NewColumn != null && !change.NewColumn.IsPrimaryKey)))
+                    {
+                        needsPkDropped = true;
+                        break;
+                    }
+                }
+                
+                if (needsPkDropped && !tablesWithPkDropped.Contains(tableDiff.TableName.ToLowerInvariant()))
+                {
+                    // Need to drop PK constraint before dropping/modifying the column
+                    // Get current PK columns from target schema to determine constraint name
+                    if (targetSchemaResult.Result.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTable))
+                    {
+                        List<SqlTableColumn> pkColumns = targetTable.Columns.Values.Where(c => c.IsPrimaryKey).OrderBy(c => c.OrdinalPosition).ToList();
+                        if (pkColumns.Count > 0)
+                        {
+                            // Generate PK constraint name (SQL Server default pattern)
+                            string pkConstraintName = $"PK_{tableDiff.TableName}";
+                            phase0DropPks.AppendLine(MigrationSqlGenerator.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName));
+                            tablesWithPkDropped.Add(tableDiff.TableName.ToLowerInvariant());
+                        }
+                    }
+                }
+            }
+
             // Phase 2: Column modifications
             foreach (TableDiff tableDiff in diff.ModifiedTables.OrderBy(t => t.TableName))
             {
-                string columnModifications = MigrationSqlGenerator.GenerateColumnModifications(tableDiff);
+                // Pass current schema to allow dropping indexes before dropping columns
+                string columnModifications = MigrationSqlGenerator.GenerateColumnModifications(tableDiff, currentSchemaResult.Result ?? new ConcurrentDictionary<string, SqlTable>());
                 if (!string.IsNullOrWhiteSpace(columnModifications))
                 {
                     phase2Columns.Append(columnModifications);
@@ -429,10 +467,202 @@ public static class MigrationGenerator
                 }
             }
 
+            // Add PRIMARY KEY constraints for columns that are gaining PK status
+            // Get current schema (after modifications) to find new PK columns
+            ConcurrentDictionary<string, SqlTable> currentSchemaAfterChanges = MigrationSchemaSnapshot.ApplySchemaDiffToTarget(targetSchemaResult.Result, diff);
+            HashSet<string> tablesWithPkAdded = new HashSet<string>();
+            
+            foreach (TableDiff tableDiff in diff.ModifiedTables.OrderBy(t => t.TableName))
+            {
+                // Check if any columns are gaining PK status
+                bool hasNewPk = false;
+                foreach (ColumnChange change in tableDiff.ColumnChanges)
+                {
+                    if (change.NewColumn != null && change.NewColumn.IsPrimaryKey)
+                    {
+                        if (change.ChangeType == ColumnChangeType.Add || 
+                            (change.ChangeType == ColumnChangeType.Modify && change.OldColumn != null && !change.OldColumn.IsPrimaryKey))
+                        {
+                            hasNewPk = true;
+                            break;
+                        }
+                    }
+                }
+                
+                if (hasNewPk && !tablesWithPkAdded.Contains(tableDiff.TableName.ToLowerInvariant()))
+                {
+                    // Get all PK columns from the new schema (after changes)
+                    if (currentSchemaAfterChanges.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? newTable))
+                    {
+                        List<SqlTableColumn> allPkColumns = newTable.Columns.Values.Where(c => c.IsPrimaryKey).OrderBy(c => c.OrdinalPosition).ToList();
+                        if (allPkColumns.Count > 0)
+                        {
+                            List<string> pkColumnNames = allPkColumns.Select(c => c.Name).ToList();
+                            string pkConstraintName = $"PK_{tableDiff.TableName}";
+                            phase3Constraints.Append(MigrationSqlGenerator.GenerateAddPrimaryKeyStatement(tableDiff.TableName, pkColumnNames, pkConstraintName));
+                            tablesWithPkAdded.Add(tableDiff.TableName.ToLowerInvariant());
+                        }
+                    }
+                }
+            }
+
+            // Add PRIMARY KEY constraints for new tables (already included in CREATE TABLE, but handle separately if needed)
+            foreach (SqlTable newTable in diff.NewTables)
+            {
+                List<SqlTableColumn> pkColumns = newTable.Columns.Values.Where(c => c.IsPrimaryKey).OrderBy(c => c.OrdinalPosition).ToList();
+                // PKs for new tables are already in CREATE TABLE statement, so we don't need to add them here
+            }
+
+            // Phase 3.5: Handle index changes (drop modified/dropped indexes, add new/modified indexes)
+            // Drop indexes that are being dropped or modified (need to drop old before adding new)
+            foreach (TableDiff tableDiff in diff.ModifiedTables.OrderBy(t => t.TableName))
+            {
+                foreach (IndexChange indexChange in tableDiff.IndexChanges)
+                {
+                    if (indexChange.ChangeType == IndexChangeType.Drop && indexChange.OldIndex != null)
+                    {
+                        phase3Constraints.AppendLine(MigrationSqlGenerator.GenerateDropIndexStatement(indexChange.OldIndex));
+                    }
+                    else if (indexChange.ChangeType == IndexChangeType.Modify && indexChange.OldIndex != null)
+                    {
+                        // For modifications, drop the old index before adding the new one
+                        phase3Constraints.AppendLine(MigrationSqlGenerator.GenerateDropIndexStatement(indexChange.OldIndex));
+                    }
+                }
+            }
+
+            // Add indexes for new tables
+            foreach (SqlTable newTable in diff.NewTables)
+            {
+                foreach (SqlIndex index in newTable.Indexes)
+                {
+                    phase3Constraints.Append(MigrationSqlGenerator.GenerateCreateIndexStatement(index));
+                    phase3Constraints.AppendLine();
+                }
+            }
+
+            // Add new/modified indexes from modified tables
+            foreach (TableDiff tableDiff in diff.ModifiedTables.OrderBy(t => t.TableName))
+            {
+                foreach (IndexChange indexChange in tableDiff.IndexChanges.Where(c => c.ChangeType == IndexChangeType.Add || c.ChangeType == IndexChangeType.Modify))
+                {
+                    if (indexChange.NewIndex != null)
+                    {
+                        phase3Constraints.Append(MigrationSqlGenerator.GenerateCreateIndexStatement(indexChange.NewIndex));
+                        phase3Constraints.AppendLine();
+                    }
+                }
+            }
+
             // Generate down script
             downScript.AppendLine("SET XACT_ABORT ON;");
             downScript.AppendLine("BEGIN TRANSACTION;");
             downScript.AppendLine();
+
+            // Reverse index changes (drop added indexes, add back dropped indexes)
+            // For Modify: drop the new index and add back the old index
+            foreach (TableDiff tableDiff in diff.ModifiedTables.OrderByDescending(t => t.TableName))
+            {
+                foreach (IndexChange indexChange in tableDiff.IndexChanges.Where(c => c.ChangeType == IndexChangeType.Modify))
+                {
+                    if (indexChange.NewIndex != null)
+                    {
+                        downScript.AppendLine(MigrationSqlGenerator.GenerateDropIndexStatement(indexChange.NewIndex));
+                    }
+                    if (indexChange.OldIndex != null)
+                    {
+                        downScript.Append(MigrationSqlGenerator.GenerateCreateIndexStatement(indexChange.OldIndex));
+                        downScript.AppendLine();
+                    }
+                }
+                
+                // Drop added indexes
+                foreach (IndexChange indexChange in tableDiff.IndexChanges.Where(c => c.ChangeType == IndexChangeType.Add))
+                {
+                    if (indexChange.NewIndex != null)
+                    {
+                        downScript.AppendLine(MigrationSqlGenerator.GenerateDropIndexStatement(indexChange.NewIndex));
+                    }
+                }
+                
+                // Add back dropped indexes
+                foreach (IndexChange indexChange in tableDiff.IndexChanges.Where(c => c.ChangeType == IndexChangeType.Drop))
+                {
+                    if (indexChange.OldIndex != null)
+                    {
+                        downScript.Append(MigrationSqlGenerator.GenerateCreateIndexStatement(indexChange.OldIndex));
+                        downScript.AppendLine();
+                    }
+                }
+            }
+
+            // Reverse PRIMARY KEY changes - drop new PKs first (before restoring columns)
+            // We'll add back old PKs after restoring columns
+            StringBuilder pkRestoreScript = new StringBuilder(); // Store PK restorations for after column restoration
+            foreach (TableDiff tableDiff in diff.ModifiedTables.OrderByDescending(t => t.TableName))
+            {
+                // First, check if any columns gained PK status (need to drop new PK)
+                bool needsPkDropped = false;
+                foreach (ColumnChange change in tableDiff.ColumnChanges)
+                {
+                    if (change.NewColumn != null && change.NewColumn.IsPrimaryKey)
+                    {
+                        if (change.ChangeType == ColumnChangeType.Add || 
+                            (change.ChangeType == ColumnChangeType.Modify && change.OldColumn != null && !change.OldColumn.IsPrimaryKey))
+                        {
+                            needsPkDropped = true;
+                            break;
+                        }
+                    }
+                }
+                
+                if (needsPkDropped)
+                {
+                    // Get new PK columns from current schema (after changes) to drop
+                    ConcurrentDictionary<string, SqlTable> schemaAfterChanges = MigrationSchemaSnapshot.ApplySchemaDiffToTarget(targetSchemaResult.Result, diff);
+                    if (schemaAfterChanges.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? newTable))
+                    {
+                        List<SqlTableColumn> newPkColumns = newTable.Columns.Values.Where(c => c.IsPrimaryKey).OrderBy(c => c.OrdinalPosition).ToList();
+                        if (newPkColumns.Count > 0)
+                        {
+                            string pkConstraintName = $"PK_{tableDiff.TableName}";
+                            downScript.AppendLine(MigrationSqlGenerator.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName));
+                        }
+                    }
+                }
+                
+                // Store PK restoration for after column restoration
+                bool needsPkRestored = false;
+                List<string> restoredPkColumns = new List<string>();
+                
+                foreach (ColumnChange change in tableDiff.ColumnChanges)
+                {
+                    if (change.OldColumn != null && change.OldColumn.IsPrimaryKey)
+                    {
+                        if (change.ChangeType == ColumnChangeType.Drop || 
+                            (change.ChangeType == ColumnChangeType.Modify && change.NewColumn != null && !change.NewColumn.IsPrimaryKey))
+                        {
+                            needsPkRestored = true;
+                            restoredPkColumns.Add(change.OldColumn.Name);
+                        }
+                    }
+                }
+                
+                if (needsPkRestored && restoredPkColumns.Count > 0)
+                {
+                    // Get all original PK columns from target schema
+                    if (targetSchemaResult.Result.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTable))
+                    {
+                        List<SqlTableColumn> originalPkColumns = targetTable.Columns.Values.Where(c => c.IsPrimaryKey).OrderBy(c => c.OrdinalPosition).ToList();
+                        if (originalPkColumns.Count > 0)
+                        {
+                            List<string> pkColumnNames = originalPkColumns.Select(c => c.Name).ToList();
+                            string pkConstraintName = $"PK_{tableDiff.TableName}";
+                            pkRestoreScript.Append(MigrationSqlGenerator.GenerateAddPrimaryKeyStatement(tableDiff.TableName, pkColumnNames, pkConstraintName));
+                        }
+                    }
+                }
+            }
 
             // Reverse FK changes
             // For Modify: drop the new FK and add back the old FK
@@ -495,29 +725,68 @@ public static class MigrationGenerator
             }
 
             // Reverse column modifications (in reverse order)
+            // Important: Drop added identity columns BEFORE restoring identity to modified columns
+            // to avoid "Multiple identity columns" error
             foreach (TableDiff tableDiff in diff.ModifiedTables.OrderByDescending(t => t.TableName))
             {
-                // Reverse: ADD becomes DROP, DROP becomes ADD, MODIFY reversed
-                foreach (ColumnChange change in tableDiff.ColumnChanges.OrderByDescending(c => c.ChangeType))
+                // First pass: Drop added columns (especially identity columns) before restoring identity
+                foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Add))
                 {
-                    if (change.ChangeType == ColumnChangeType.Add && change.NewColumn != null)
+                    if (change.NewColumn != null)
                     {
                         downScript.AppendLine(MigrationSqlGenerator.GenerateDropColumnStatement(change.NewColumn.Name, tableDiff.TableName));
                     }
-                    else if (change.ChangeType == ColumnChangeType.Drop && change.OldColumn != null)
+                }
+
+                // Second pass: Restore dropped columns
+                foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Drop))
+                {
+                    if (change.OldColumn != null)
                     {
                         downScript.Append(MigrationSqlGenerator.GenerateAddColumnStatement(change.OldColumn, tableDiff.TableName));
                     }
-                    else if (change.ChangeType == ColumnChangeType.Modify && change.OldColumn != null && change.NewColumn != null)
+                }
+
+                // Third pass: Reverse modifications (now safe to restore identity since added identity columns are dropped)
+                foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Modify))
+                {
+                    if (change.OldColumn != null && change.NewColumn != null)
                     {
-                        string reverseAlter = MigrationSqlGenerator.GenerateAlterColumnStatement(change.NewColumn, change.OldColumn, tableDiff.TableName);
-                        if (!string.IsNullOrEmpty(reverseAlter))
+                        // Check if identity property changed - SQL Server requires DROP + ADD (same as up script)
+                        if (change.OldColumn.IsIdentity != change.NewColumn.IsIdentity)
                         {
-                            downScript.Append(reverseAlter);
+                            // Drop new column and add back old column with original identity setting
+                            downScript.AppendLine(MigrationSqlGenerator.GenerateDropColumnStatement(change.NewColumn.Name, tableDiff.TableName));
+                            downScript.Append(MigrationSqlGenerator.GenerateAddColumnStatement(change.OldColumn, tableDiff.TableName));
+                        }
+                        // Check if it's a computed column change - these need DROP + ADD
+                        else if (change.OldColumn.IsComputed || change.NewColumn.IsComputed)
+                        {
+                            // Drop new computed column
+                            if (change.NewColumn.IsComputed)
+                            {
+                                downScript.AppendLine(MigrationSqlGenerator.GenerateDropColumnStatement(change.NewColumn.Name, tableDiff.TableName));
+                            }
+                            // Add back old computed column
+                            if (change.OldColumn.IsComputed)
+                            {
+                                downScript.Append(MigrationSqlGenerator.GenerateAddColumnStatement(change.OldColumn, tableDiff.TableName));
+                            }
+                        }
+                        else
+                        {
+                            string reverseAlter = MigrationSqlGenerator.GenerateAlterColumnStatement(change.NewColumn, change.OldColumn, tableDiff.TableName);
+                            if (!string.IsNullOrEmpty(reverseAlter))
+                            {
+                                downScript.Append(reverseAlter);
+                            }
                         }
                     }
                 }
             }
+
+            // Add back old PKs (after columns have been restored)
+            downScript.Append(pkRestoreScript);
 
             // Recreate dropped tables (in forward order, so dependencies are created first)
             foreach (string droppedTableName in diff.DroppedTableNames)
@@ -587,6 +856,16 @@ public static class MigrationGenerator
                 phaseNumber++;
             }
 
+            // Phase 0: Drop Primary Key Constraints (before column modifications)
+            string phase0DropPksContent = phase0DropPks.ToString().Trim();
+            if (!string.IsNullOrEmpty(phase0DropPksContent))
+            {
+                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Drop Primary Key Constraints"));
+                upScript.AppendLine(phase0DropPksContent);
+                upScript.AppendLine();
+                phaseNumber++;
+            }
+
             // Phase 0: Drop Tables
             string phase0DropTablesContent = phase0DropTables.ToString().Trim();
             if (!string.IsNullOrEmpty(phase0DropTablesContent))
@@ -617,11 +896,11 @@ public static class MigrationGenerator
                 phaseNumber++;
             }
 
-            // Phase 3: Add Foreign Key Constraints
+            // Phase 3: Add Foreign Key Constraints and Primary Key Constraints
             string phase3Content = phase3Constraints.ToString().Trim();
             if (!string.IsNullOrEmpty(phase3Content))
             {
-                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Add Foreign Key Constraints"));
+                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Add Foreign Key Constraints and Primary Key Constraints"));
                 upScript.AppendLine(phase3Content);
                 upScript.AppendLine();
             }

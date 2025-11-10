@@ -56,6 +56,36 @@ public class MigrationIntegrationTests
                 await DropTempDatabase(freshDbConnectionString, freshDbName);
             }
 
+            // Step 2.5: Make complex schema changes (identity, PK changes)
+            await Step2_5_MakeComplexSchemaChanges(tempDbConnectionString, tempDbName);
+            MigrationTestState step2_5State = await GetCurrentState(tempDbConnectionString, tempDbName, tempProjectPath, "Step2.5", null);
+            stateHistory["Step2.5"] = step2_5State;
+
+            // Step 2.6: Generate migration for complex changes
+            MigrationTestState step2_6State = await Step2_6_GenerateComplexMigration(tempProjectPath, tempDbConnectionString, tempDbName);
+            stateHistory["Step2.6"] = step2_6State;
+
+            // Record complex migration as applied to original database
+            Assert.That(step2_6State.MigrationName, Is.Not.Null, "Step 2.6: Migration name is null");
+            await RecordMigrationApplied(tempDbConnectionString, tempDbName, step2_6State.MigrationName!);
+
+            // Step 2.7: Apply all pending migrations (initial + complex) to fresh database and verify
+            string freshDbComplexName = $"MinfoldTest_Migration_Complex_{Guid.NewGuid():N}";
+            string freshDbComplexConnectionString = await CreateTempDatabase(connSettings.Connection, freshDbComplexName);
+            try
+            {
+                // Apply all pending migrations (initial + complex) - ApplyMigrations applies all pending migrations
+                MigrationTestState step2_7State = await Step2_7_ApplyComplexMigrationAndVerify(tempProjectPath, freshDbComplexConnectionString, freshDbComplexName, step2_5State.Schema);
+                stateHistory["Step2.7"] = step2_7State;
+            }
+            finally
+            {
+                await DropTempDatabase(freshDbComplexConnectionString, freshDbComplexName);
+            }
+
+            // Step 2.8: Rollback complex migration and verify schema restored
+            await Step2_8_RollbackComplexMigration(tempProjectPath, tempDbConnectionString, tempDbName, step1State.Schema, step2_6State.MigrationName!);
+
             // Step 3: Make schema changes (add column, add table, add FK)
             await Step3_MakeSchemaChanges(tempDbConnectionString, tempDbName);
             MigrationTestState step3State = await GetCurrentState(tempDbConnectionString, tempDbName, tempProjectPath, "Step3", null);
@@ -80,6 +110,7 @@ public class MigrationIntegrationTests
             try
             {
                 // Apply all pending migrations (initial + migration #1)
+                // The complex migration was rolled back and its files deleted, so it won't be applied
                 ResultOrException<MigrationApplyResult> applyResult = await MigrationApplier.ApplyMigrations(freshDb2ConnectionString, freshDb2Name, tempProjectPath, false);
                 Assert.That(applyResult.Exception, Is.Null, $"Step 5 failed: {applyResult.Exception?.Message}");
                 Assert.That(applyResult.Result, Is.Not.Null, "Step 5: Apply migrations returned null result");
@@ -191,6 +222,22 @@ public class MigrationIntegrationTests
         string migrationsPath = Path.Combine(basePath, "Dao", "Migrations");
         Directory.CreateDirectory(migrationsPath);
         await Task.CompletedTask;
+    }
+
+    private async Task DropPrimaryKeyConstraint(SqlService sqlService, string tableName)
+    {
+        ResultOrException<int> result = await sqlService.Execute($"""
+            DECLARE @pkConstraintName NVARCHAR(128);
+            SELECT @pkConstraintName = name FROM sys.key_constraints 
+            WHERE parent_object_id = OBJECT_ID('[dbo].[{tableName}]') 
+            AND type = 'PK';
+            IF @pkConstraintName IS NOT NULL
+                EXEC('ALTER TABLE [dbo].[{tableName}] DROP CONSTRAINT [' + @pkConstraintName + ']');
+            """);
+        if (result.Exception is not null)
+        {
+            throw new Exception($"Failed to drop PK constraint on {tableName}: {result.Exception.Message}", result.Exception);
+        }
     }
 
     private async Task ApplyInitialSchema(string connectionString, string dbName)
@@ -313,6 +360,219 @@ public class MigrationIntegrationTests
         await VerifySchemaMatches(connectionString, dbName, expectedSchema);
 
         return await GetCurrentState(connectionString, dbName, projectPath, "Step2", applyResult.Result.AppliedMigrations[0]);
+    }
+
+    private async Task Step2_5_MakeComplexSchemaChanges(string connectionString, string dbName)
+    {
+        SqlService sqlService = new SqlService(connectionString);
+        
+        // 1. Add identity to non-identity column: 
+        // First, remove identity from existing id column (SQL Server only allows one identity per table)
+        // Then add sequenceNumber with DEFAULT, then change to identity
+        // The migration generator should automatically handle dropping the default constraint
+        
+        // Step 1a: Remove identity from id column (drop and recreate as non-identity)
+        // First, drop the PK constraint (SQL Server auto-generates constraint names)
+        await DropPrimaryKeyConstraint(sqlService, "Categories");
+
+        // Now drop and recreate the id column without identity
+        string dropIdColumnSql = MigrationSqlGenerator.GenerateDropColumnStatement("id", "Categories");
+        string addIdColumnSql = MigrationSqlGenerator.GenerateAddColumnStatement(
+            new SqlTableColumn(
+                Name: "id",
+                OrdinalPosition: 0,
+                IsNullable: false,
+                IsIdentity: false,
+                SqlType: SqlDbTypeExt.Int,
+                ForeignKeys: [],
+                IsComputed: false,
+                IsPrimaryKey: true,
+                ComputedSql: null,
+                LengthOrPrecision: null
+            ), 
+            "Categories");
+        
+        ResultOrException<int> result1b = await sqlService.Execute($"""
+            {dropIdColumnSql}
+            {addIdColumnSql}
+            ALTER TABLE [dbo].[Categories] ADD CONSTRAINT [PK_Categories] PRIMARY KEY ([id])
+            """);
+        if (result1b.Exception is not null)
+        {
+            throw new Exception($"Step 2.5 failed (remove identity from id): {result1b.Exception.Message}", result1b.Exception);
+        }
+
+        // Step 1c: Add sequenceNumber with DEFAULT
+        ResultOrException<int> result1c = await sqlService.Execute("""
+            ALTER TABLE [dbo].[Categories] ADD [sequenceNumber] INT NOT NULL DEFAULT 0
+            """);
+        if (result1c.Exception is not null)
+        {
+            throw new Exception($"Step 2.5 failed (add sequenceNumber): {result1c.Exception.Message}", result1c.Exception);
+        }
+
+        // Step 1d: Change sequenceNumber to identity - use the same SQL that the migration generator would produce
+        // This tests that the migration generator correctly handles default constraints
+        string dropSequenceNumberSql = MigrationSqlGenerator.GenerateDropColumnStatement("sequenceNumber", "Categories");
+        string addSequenceNumberSql = MigrationSqlGenerator.GenerateAddColumnStatement(
+            new SqlTableColumn(
+                Name: "sequenceNumber",
+                OrdinalPosition: 0,
+                IsNullable: false,
+                IsIdentity: true,
+                SqlType: SqlDbTypeExt.Int,
+                ForeignKeys: [],
+                IsComputed: false,
+                IsPrimaryKey: false,
+                ComputedSql: null,
+                LengthOrPrecision: null
+            ), 
+            "Categories");
+        
+        ResultOrException<int> result1d = await sqlService.Execute($"""
+            {dropSequenceNumberSql}
+            {addSequenceNumberSql}
+            """);
+        if (result1d.Exception is not null)
+        {
+            throw new Exception($"Step 2.5 failed (recreate as identity): {result1d.Exception.Message}", result1d.Exception);
+        }
+
+        // 2. Make non-PK column a PK: Add code column, drop PK on id, add PK on code
+        ResultOrException<int> result3 = await sqlService.Execute("""
+            ALTER TABLE [dbo].[Categories] ADD [code] NVARCHAR(50) NOT NULL DEFAULT 'TEMP'
+            CREATE UNIQUE INDEX [IX_Categories_code] ON [dbo].[Categories]([code])
+            """);
+        if (result3.Exception is not null)
+        {
+            throw new Exception($"Step 2.5 failed (add code column): {result3.Exception.Message}", result3.Exception);
+        }
+
+        // Drop existing PK
+        await DropPrimaryKeyConstraint(sqlService, "Categories");
+
+        // Add new PK on code
+        ResultOrException<int> result5 = await sqlService.Execute("""
+            ALTER TABLE [dbo].[Categories] ADD CONSTRAINT [PK_Categories] PRIMARY KEY ([code])
+            """);
+        if (result5.Exception is not null)
+        {
+            throw new Exception($"Step 2.5 failed (add PK on code): {result5.Exception.Message}", result5.Exception);
+        }
+
+        // 3. Make PK column non-PK: Drop PK on Posts.id, add new postId as PK
+        // First, drop FK constraint that references Posts.id
+        ResultOrException<int> result6 = await sqlService.Execute("""
+            ALTER TABLE [dbo].[Posts] DROP CONSTRAINT [FK_Posts_Users]
+            """);
+        if (result6.Exception is not null)
+        {
+            throw new Exception($"Step 2.5 failed (drop FK): {result6.Exception.Message}", result6.Exception);
+        }
+
+        // Drop PK on Posts.id
+        await DropPrimaryKeyConstraint(sqlService, "Posts");
+
+        // Remove identity from id column (SQL Server only allows one identity per table)
+        string dropPostsIdColumnSql = MigrationSqlGenerator.GenerateDropColumnStatement("id", "Posts");
+        string addPostsIdColumnSql = MigrationSqlGenerator.GenerateAddColumnStatement(
+            new SqlTableColumn(
+                Name: "id",
+                OrdinalPosition: 0,
+                IsNullable: false,
+                IsIdentity: false,
+                SqlType: SqlDbTypeExt.Int,
+                ForeignKeys: [],
+                IsComputed: false,
+                IsPrimaryKey: false,
+                ComputedSql: null,
+                LengthOrPrecision: null
+            ), 
+            "Posts");
+        
+        ResultOrException<int> result7 = await sqlService.Execute($"""
+            {dropPostsIdColumnSql}
+            {addPostsIdColumnSql}
+            """);
+        if (result7.Exception is not null)
+        {
+            throw new Exception($"Step 2.5 failed (remove identity from Posts.id): {result7.Exception.Message}", result7.Exception);
+        }
+
+        // Add new postId column as PK with identity
+        ResultOrException<int> result8 = await sqlService.Execute("""
+            ALTER TABLE [dbo].[Posts] ADD [postId] INT IDENTITY(1,1) NOT NULL
+            ALTER TABLE [dbo].[Posts] ADD CONSTRAINT [PK_Posts] PRIMARY KEY ([postId])
+            """);
+        if (result8.Exception is not null)
+        {
+            throw new Exception($"Step 2.5 failed (add postId PK): {result8.Exception.Message}", result8.Exception);
+        }
+
+        // Recreate FK constraint (now referencing Users.id, which still exists)
+        ResultOrException<int> result9 = await sqlService.Execute("""
+            ALTER TABLE [dbo].[Posts] ADD CONSTRAINT [FK_Posts_Users] FOREIGN KEY ([userId]) REFERENCES [dbo].[Users]([id])
+            """);
+        if (result9.Exception is not null)
+        {
+            throw new Exception($"Step 2.5 failed (recreate FK): {result9.Exception.Message}", result9.Exception);
+        }
+    }
+
+    private async Task<MigrationTestState> Step2_6_GenerateComplexMigration(string projectPath, string connectionString, string dbName)
+    {
+        ResultOrException<MigrationGenerationResult> result = await MigrationGenerator.GenerateIncrementalMigration(
+            connectionString, dbName, projectPath, "ComplexSchemaChanges");
+
+        Assert.That(result.Exception, Is.Null, $"Step 2.6 failed: {result.Exception?.Message}");
+        Assert.That(result.Result, Is.Not.Null, "Step 2.6: Migration generation returned null result");
+        Assert.That(File.Exists(result.Result!.UpScriptPath), Is.True, "Step 2.6: Up script file not created");
+        Assert.That(File.Exists(result.Result.DownScriptPath), Is.True, "Step 2.6: Down script file not created");
+
+        ConcurrentDictionary<string, SqlTable> schema = await GetCurrentSchema(connectionString, dbName);
+        ResultOrException<List<string>> appliedMigrationsResult = await MigrationApplier.GetAppliedMigrations(connectionString, dbName);
+        List<string> appliedMigrations = appliedMigrationsResult.Result ?? new List<string>();
+
+        return new MigrationTestState("Step2.6", schema, appliedMigrations, result.Result.MigrationName);
+    }
+
+    private async Task<MigrationTestState> Step2_7_ApplyComplexMigrationAndVerify(string projectPath, string connectionString, string dbName, ConcurrentDictionary<string, SqlTable> expectedSchema)
+    {
+        ResultOrException<MigrationApplyResult> applyResult = await MigrationApplier.ApplyMigrations(connectionString, dbName, projectPath, false);
+
+        Assert.That(applyResult.Exception, Is.Null, $"Step 2.7 failed: {applyResult.Exception?.Message}");
+        Assert.That(applyResult.Result, Is.Not.Null, "Step 2.7: Apply migrations returned null result");
+        Assert.That(applyResult.Result!.AppliedMigrations.Count, Is.EqualTo(2), "Step 2.7: Expected two migrations to be applied (initial + complex)");
+
+        await VerifySchemaMatches(connectionString, dbName, expectedSchema);
+
+        // Return state with the last applied migration (the complex one)
+        return await GetCurrentState(connectionString, dbName, projectPath, "Step2.7", applyResult.Result.AppliedMigrations[^1]);
+    }
+
+    private async Task Step2_8_RollbackComplexMigration(string projectPath, string connectionString, string dbName, ConcurrentDictionary<string, SqlTable> expectedSchema, string migrationName)
+    {
+        ResultOrException<MigrationRollbackResult> rollbackResult = await MigrationApplier.RollbackMigration(connectionString, dbName, projectPath, migrationName, false);
+
+        Assert.That(rollbackResult.Exception, Is.Null, $"Step 2.8 failed: {rollbackResult.Exception?.Message}");
+        Assert.That(rollbackResult.Result, Is.Not.Null, "Step 2.8: Rollback migration returned null result");
+
+        // Delete the rolled-back migration files since they're no longer part of the migration history
+        // This ensures that subsequent migrations don't try to apply it
+        string migrationsPath = MigrationUtilities.GetMigrationsPath(projectPath);
+        string upScriptPath = Path.Combine(migrationsPath, $"{migrationName}.sql");
+        string downScriptPath = Path.Combine(migrationsPath, $"{migrationName}.down.sql");
+        
+        if (File.Exists(upScriptPath))
+        {
+            File.Delete(upScriptPath);
+        }
+        if (File.Exists(downScriptPath))
+        {
+            File.Delete(downScriptPath);
+        }
+
+        await VerifySchemaMatches(connectionString, dbName, expectedSchema);
     }
 
     private async Task Step3_MakeSchemaChanges(string connectionString, string dbName)

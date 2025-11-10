@@ -452,7 +452,52 @@ public class SqlService
             }
             else
             {
-                tables.TryAdd(tableName.ToLowerInvariant(), new SqlTable(tableName, new Dictionary<string, SqlTableColumn> { {column.Name.ToLowerInvariant(), column} }));
+                tables.TryAdd(tableName.ToLowerInvariant(), new SqlTable(tableName, new Dictionary<string, SqlTableColumn> { {column.Name.ToLowerInvariant(), column} }, new List<SqlIndex>()));
+            }
+        }
+        
+        // Query indexes for all tables
+        await reader.CloseAsync();
+        foreach (string tableName in tables.Keys)
+        {
+            if (excludeSet.Contains(tableName.ToLowerInvariant()))
+            {
+                continue;
+            }
+            
+            string indexQuery = $"""
+                SELECT 
+                    i.name AS INDEX_NAME,
+                    i.is_unique,
+                    STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS COLUMN_NAMES
+                FROM sys.indexes i
+                INNER JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+                INNER JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+                WHERE i.object_id = OBJECT_ID('[dbo].[{tableName}]')
+                    AND i.is_primary_key = 0
+                    AND i.type = 2
+                GROUP BY i.name, i.is_unique
+                """;
+            
+            SqlCommand indexCommand = new SqlCommand($"USE [{dbName}]; {indexQuery}", conn.Connection);
+            await using SqlDataReader indexReader = await indexCommand.ExecuteReaderAsync();
+            
+            List<SqlIndex> indexes = new List<SqlIndex>();
+            while (await indexReader.ReadAsync())
+            {
+                string indexName = indexReader.GetString(0);
+                bool isUnique = indexReader.GetBoolean(1);
+                string columnNamesStr = indexReader.GetString(2);
+                List<string> columnNames = columnNamesStr.Split(',').ToList();
+                
+                indexes.Add(new SqlIndex(indexName, tableName, columnNames, isUnique));
+            }
+            
+            await indexReader.CloseAsync();
+            
+            if (tables.TryGetValue(tableName.ToLowerInvariant(), out SqlTable? table))
+            {
+                tables[tableName.ToLowerInvariant()] = table with { Indexes = indexes };
             }
         }
 

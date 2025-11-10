@@ -111,7 +111,7 @@ public static class MigrationSchemaSnapshot
                     ForeignKeys = [..colKvp.Value.ForeignKeys]
                 };
             }
-            newTarget[kvp.Key] = new SqlTable(kvp.Value.Name, newColumns);
+            newTarget[kvp.Key] = new SqlTable(kvp.Value.Name, newColumns, kvp.Value.Indexes);
         }
 
         // Apply new tables
@@ -183,7 +183,7 @@ public static class MigrationSchemaSnapshot
                     }
                 }
 
-                newTarget[tableDiff.TableName.ToLowerInvariant()] = new SqlTable(table.Name, newColumns);
+                newTarget[tableDiff.TableName.ToLowerInvariant()] = new SqlTable(table.Name, newColumns, table.Indexes);
             }
         }
 

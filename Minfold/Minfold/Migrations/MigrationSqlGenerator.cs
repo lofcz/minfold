@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 
 namespace Minfold;
@@ -173,11 +174,14 @@ public static class MigrationSqlGenerator
         return sb.ToString();
     }
 
-    public static string GenerateDropColumnStatement(string columnName, string tableName)
+    /// <summary>
+    /// Generates SQL to drop a default constraint for a column, if one exists.
+    /// Returns empty string if no constraint exists.
+    /// </summary>
+    public static string GenerateDropDefaultConstraintStatement(string columnName, string tableName, string? variableSuffix = null)
     {
-        // SQL Server requires dropping default constraints before dropping columns
-        // Use a GUID-based variable name to avoid conflicts when multiple columns are dropped in the same batch
-        string varSuffix = Guid.NewGuid().ToString("N"); // GUID without dashes
+        // Use provided suffix or generate a GUID-based one to avoid conflicts
+        string varSuffix = variableSuffix ?? Guid.NewGuid().ToString("N");
         
         StringBuilder sb = new StringBuilder();
         sb.AppendLine($"DECLARE @constraintName_{varSuffix} NVARCHAR(128);");
@@ -186,6 +190,17 @@ public static class MigrationSqlGenerator
         sb.AppendLine($"AND parent_column_id = COLUMNPROPERTY(OBJECT_ID('[dbo].[{tableName}]'), '{columnName}', 'ColumnId');");
         sb.AppendLine($"IF @constraintName_{varSuffix} IS NOT NULL");
         sb.AppendLine($"    EXEC('ALTER TABLE [dbo].[{tableName}] DROP CONSTRAINT [' + @constraintName_{varSuffix} + ']');");
+        return sb.ToString();
+    }
+
+    public static string GenerateDropColumnStatement(string columnName, string tableName)
+    {
+        // SQL Server requires dropping default constraints before dropping columns
+        // Use a GUID-based variable name to avoid conflicts when multiple columns are dropped in the same batch
+        string varSuffix = Guid.NewGuid().ToString("N"); // GUID without dashes
+        
+        StringBuilder sb = new StringBuilder();
+        sb.Append(GenerateDropDefaultConstraintStatement(columnName, tableName, varSuffix));
         sb.AppendLine($"ALTER TABLE [dbo].[{tableName}] DROP COLUMN [{columnName}];");
         return sb.ToString();
     }
@@ -248,12 +263,32 @@ public static class MigrationSqlGenerator
         return sb.ToString();
     }
 
-    public static string GenerateColumnModifications(TableDiff tableDiff)
+    public static string GenerateColumnModifications(TableDiff tableDiff, ConcurrentDictionary<string, SqlTable>? currentSchema = null)
     {
         StringBuilder sb = new StringBuilder();
 
-        // Order operations: DROP COLUMN first, then ALTER COLUMN, then ADD COLUMN
+        // Order operations: DROP INDEXES (on columns being dropped), DROP COLUMN, then ALTER COLUMN, then ADD COLUMN
         // This ensures we don't have dependency issues
+
+        // Drop indexes that reference columns being dropped (must happen before dropping columns)
+        if (currentSchema != null)
+        {
+            if (currentSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? currentTable))
+            {
+                HashSet<string> columnsBeingDropped = new HashSet<string>(tableDiff.ColumnChanges
+                    .Where(c => c.ChangeType == ColumnChangeType.Drop && c.OldColumn != null)
+                    .Select(c => c.OldColumn!.Name), StringComparer.OrdinalIgnoreCase);
+
+                foreach (SqlIndex index in currentTable.Indexes)
+                {
+                    // If any column in this index is being dropped, drop the index
+                    if (index.Columns.Any(col => columnsBeingDropped.Contains(col)))
+                    {
+                        sb.AppendLine(GenerateDropIndexStatement(index));
+                    }
+                }
+            }
+        }
 
         // Drop columns
         foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Drop))
@@ -264,7 +299,7 @@ public static class MigrationSqlGenerator
             }
         }
 
-        // Alter columns (excluding computed columns which need special handling)
+        // Alter columns (excluding computed columns, identity changes, and PK changes which need special handling)
         foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Modify))
         {
             if (change.OldColumn != null && change.NewColumn != null)
@@ -281,6 +316,30 @@ public static class MigrationSqlGenerator
                     if (change.NewColumn.IsComputed)
                     {
                         sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName));
+                    }
+                }
+                // Check if identity property changed - SQL Server requires DROP + ADD
+                else if (change.OldColumn.IsIdentity != change.NewColumn.IsIdentity)
+                {
+                    // Drop old column
+                    sb.AppendLine(GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName));
+                    // Add new column with new identity setting
+                    sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName));
+                }
+                // Check if only PK property changed (and no other significant changes) - handle via PK constraint changes
+                // Note: PK changes are also handled via FK changes, but we need to ensure column is recreated if needed
+                else if (change.OldColumn.IsPrimaryKey != change.NewColumn.IsPrimaryKey && 
+                         change.OldColumn.IsIdentity == change.NewColumn.IsIdentity &&
+                         change.OldColumn.IsComputed == change.NewColumn.IsComputed &&
+                         change.OldColumn.SqlType == change.NewColumn.SqlType &&
+                         change.OldColumn.IsNullable == change.NewColumn.IsNullable)
+                {
+                    // Only PK changed, no other changes - PK constraint will be handled separately
+                    // But we still need to handle the column if there are other changes
+                    string alterSql = GenerateAlterColumnStatement(change.OldColumn, change.NewColumn, tableDiff.TableName);
+                    if (!string.IsNullOrEmpty(alterSql))
+                    {
+                        sb.Append(alterSql);
                     }
                 }
                 else
@@ -386,6 +445,34 @@ public static class MigrationSqlGenerator
     public static string GenerateDropForeignKeyStatement(SqlForeignKey fk)
     {
         return $"ALTER TABLE [dbo].[{fk.Table}] DROP CONSTRAINT [{fk.Name}];";
+    }
+
+    public static string GenerateDropPrimaryKeyStatement(string tableName, string constraintName)
+    {
+        return $"ALTER TABLE [dbo].[{tableName}] DROP CONSTRAINT [{constraintName}];";
+    }
+
+    public static string GenerateAddPrimaryKeyStatement(string tableName, List<string> columnNames, string constraintName)
+    {
+        StringBuilder sb = new StringBuilder();
+        sb.Append($"ALTER TABLE [dbo].[{tableName}] ADD CONSTRAINT [{constraintName}] PRIMARY KEY (");
+        sb.Append(string.Join(", ", columnNames.Select(c => $"[{c}]")));
+        sb.AppendLine(");");
+        return sb.ToString();
+    }
+
+    public static string GenerateDropIndexStatement(SqlIndex index)
+    {
+        return $"DROP INDEX [{index.Name}] ON [dbo].[{index.Table}];";
+    }
+
+    public static string GenerateCreateIndexStatement(SqlIndex index)
+    {
+        StringBuilder sb = new StringBuilder();
+        sb.Append($"CREATE {(index.IsUnique ? "UNIQUE " : "")}NONCLUSTERED INDEX [{index.Name}] ON [dbo].[{index.Table}] (");
+        sb.Append(string.Join(", ", index.Columns.Select(c => $"[{c}]")));
+        sb.AppendLine(");");
+        return sb.ToString();
     }
 }
 

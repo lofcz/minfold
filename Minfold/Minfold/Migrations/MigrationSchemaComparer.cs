@@ -34,7 +34,7 @@ public static class MigrationSchemaComparer
             if (currentSchema.TryGetValue(targetTable.Key, out SqlTable? currentTable))
             {
                 TableDiff? tableDiff = CompareTables(currentTable, targetTable.Value);
-                if (tableDiff != null && (tableDiff.ColumnChanges.Count > 0 || tableDiff.ForeignKeyChanges.Count > 0))
+                if (tableDiff != null && (tableDiff.ColumnChanges.Count > 0 || tableDiff.ForeignKeyChanges.Count > 0 || tableDiff.IndexChanges.Count > 0))
                 {
                     modifiedTables.Add(tableDiff);
                 }
@@ -48,6 +48,7 @@ public static class MigrationSchemaComparer
     {
         List<ColumnChange> columnChanges = new List<ColumnChange>();
         List<ForeignKeyChange> foreignKeyChanges = new List<ForeignKeyChange>();
+        List<IndexChange> indexChanges = new List<IndexChange>();
 
         // Compare columns
         HashSet<string> processedColumns = new HashSet<string>();
@@ -134,12 +135,51 @@ public static class MigrationSchemaComparer
             }
         }
 
-        if (columnChanges.Count == 0 && foreignKeyChanges.Count == 0)
+        // Compare indexes
+        Dictionary<string, SqlIndex> currentIndexes = currentTable.Indexes.ToDictionary(i => i.Name, StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, SqlIndex> targetIndexes = targetTable.Indexes.ToDictionary(i => i.Name, StringComparer.OrdinalIgnoreCase);
+
+        // Find added and modified indexes
+        foreach (KeyValuePair<string, SqlIndex> targetIndex in targetIndexes)
+        {
+            if (currentIndexes.TryGetValue(targetIndex.Key, out SqlIndex? currentIndex))
+            {
+                // Index exists in both - check if modified
+                if (!AreIndexesEqual(currentIndex, targetIndex.Value))
+                {
+                    indexChanges.Add(new IndexChange(IndexChangeType.Modify, currentIndex, targetIndex.Value));
+                }
+            }
+            else
+            {
+                // Index added
+                indexChanges.Add(new IndexChange(IndexChangeType.Add, null, targetIndex.Value));
+            }
+        }
+
+        // Find dropped indexes
+        foreach (KeyValuePair<string, SqlIndex> currentIndex in currentIndexes)
+        {
+            if (!targetIndexes.ContainsKey(currentIndex.Key))
+            {
+                indexChanges.Add(new IndexChange(IndexChangeType.Drop, currentIndex.Value, null));
+            }
+        }
+
+        if (columnChanges.Count == 0 && foreignKeyChanges.Count == 0 && indexChanges.Count == 0)
         {
             return null;
         }
 
-        return new TableDiff(targetTable.Name, columnChanges, foreignKeyChanges);
+        return new TableDiff(targetTable.Name, columnChanges, foreignKeyChanges, indexChanges);
+    }
+
+    private static bool AreIndexesEqual(SqlIndex idx1, SqlIndex idx2)
+    {
+        return idx1.Name.Equals(idx2.Name, StringComparison.OrdinalIgnoreCase) &&
+               idx1.IsUnique == idx2.IsUnique &&
+               idx1.Columns.Count == idx2.Columns.Count &&
+               idx1.Columns.SequenceEqual(idx2.Columns, StringComparer.OrdinalIgnoreCase);
     }
 
     private static bool AreColumnsEqual(SqlTableColumn col1, SqlTableColumn col2)
