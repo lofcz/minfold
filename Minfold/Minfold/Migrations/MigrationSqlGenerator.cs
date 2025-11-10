@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace Minfold;
@@ -87,7 +88,7 @@ public static class MigrationSqlGenerator
                 {
                     string constraintName = !string.IsNullOrWhiteSpace(col.DefaultConstraintName)
                         ? col.DefaultConstraintName
-                        : $"DF_{table.Name}_{col.Name}_{Guid.NewGuid():N}";
+                        : $"DF_{table.Name}_{col.Name}_{GenerateDeterministicSuffix(table.Name, col.Name, NormalizeDefaultConstraintValue(col.DefaultConstraintValue), "create")}";
                     // Normalize the default value (remove outer parentheses that SQL Server adds)
                     string normalizedValue = NormalizeDefaultConstraintValue(col.DefaultConstraintValue);
                     sb.Append($" CONSTRAINT [{constraintName}] DEFAULT {normalizedValue}");
@@ -166,6 +167,29 @@ public static class MigrationSqlGenerator
             }
         }
         return normalized;
+    }
+
+    /// <summary>
+    /// Generates a deterministic suffix from input strings using SHA256 hashing.
+    /// Same inputs will always produce the same suffix, ensuring idempotent migration generation.
+    /// </summary>
+    /// <param name="inputs">Input strings to hash (e.g., table name, column name, default value, operation context)</param>
+    /// <returns>8-character hexadecimal suffix derived from the hash</returns>
+    private static string GenerateDeterministicSuffix(params string[] inputs)
+    {
+        if (inputs == null || inputs.Length == 0)
+        {
+            throw new ArgumentException("At least one input is required", nameof(inputs));
+        }
+
+        // Normalize inputs: convert to lowercase and join with a delimiter
+        string normalizedInput = string.Join("|", inputs.Select(s => (s ?? string.Empty).ToLowerInvariant()));
+        
+        // Compute SHA256 hash
+        byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(normalizedInput));
+        
+        // Take first 8 hex characters (32 bits) for readability
+        return Convert.ToHexString(hashBytes).Substring(0, 8).ToLowerInvariant();
     }
 
     /// <summary>
@@ -276,13 +300,13 @@ public static class MigrationSqlGenerator
                         // Normalize the value by removing outer parentheses if present (SQL Server stores them with parentheses)
                         defaultValue = NormalizeDefaultConstraintValue(column.DefaultConstraintValue);
                         // Always generate a new constraint name to avoid conflicts
-                        constraintName = $"DF_{tableName}_{column.Name}_{Guid.NewGuid():N}";
+                        constraintName = $"DF_{tableName}_{column.Name}_{GenerateDeterministicSuffix(tableName, column.Name, defaultValue, "add")}";
                     }
                     else
                     {
                         // No existing default constraint - generate one based on type
                         defaultValue = GetDefaultValueForType(column.SqlType);
-                        constraintName = $"DF_{tableName}_{column.Name}_{Guid.NewGuid():N}";
+                        constraintName = $"DF_{tableName}_{column.Name}_{GenerateDeterministicSuffix(tableName, column.Name, defaultValue, "add")}";
                     }
                     
                     // Add a DEFAULT constraint that will persist in the database schema
@@ -319,8 +343,8 @@ public static class MigrationSqlGenerator
     /// </summary>
     public static string GenerateDropDefaultConstraintStatement(string columnName, string tableName, string? variableSuffix = null, string schema = "dbo")
     {
-        // Use provided suffix or generate a GUID-based one to avoid conflicts
-        string varSuffix = variableSuffix ?? Guid.NewGuid().ToString("N");
+        // Use provided suffix or generate a deterministic one to avoid conflicts
+        string varSuffix = variableSuffix ?? GenerateDeterministicSuffix(schema, tableName, columnName, "dropdefault");
         
         StringBuilder sb = new StringBuilder();
         sb.AppendLine($"DECLARE @constraintName_{varSuffix} NVARCHAR(128);");
@@ -335,8 +359,8 @@ public static class MigrationSqlGenerator
     public static string GenerateDropColumnStatement(string columnName, string tableName, string schema = "dbo")
     {
         // SQL Server requires dropping default constraints before dropping columns
-        // Use a GUID-based variable name to avoid conflicts when multiple columns are dropped in the same batch
-        string varSuffix = Guid.NewGuid().ToString("N"); // GUID without dashes
+        // Use a deterministic variable name to avoid conflicts when multiple columns are dropped in the same batch
+        string varSuffix = GenerateDeterministicSuffix(schema, tableName, columnName, "dropcolumn");
         
         StringBuilder sb = new StringBuilder();
         sb.Append(GenerateDropDefaultConstraintStatement(columnName, tableName, varSuffix, schema));
@@ -572,7 +596,7 @@ public static class MigrationSqlGenerator
             if (sameName)
             {
                 // Same name: add with temporary name, drop old, rename
-                string tempColumnName = $"{newColumn.Name}_tmp_{Guid.NewGuid():N}";
+                string tempColumnName = $"{newColumn.Name}_tmp_{GenerateDeterministicSuffix(schema, tableName, newColumn.Name, "tmp")}";
                 SqlTableColumn tempColumn = newColumn with { Name = tempColumnName };
                 
                 // Add new column with temporary name
@@ -840,10 +864,10 @@ public static class MigrationSqlGenerator
                     // Add new default constraint if specified
                     if (!string.IsNullOrWhiteSpace(change.NewColumn.DefaultConstraintValue))
                     {
+                        string normalizedValue = NormalizeDefaultConstraintValue(change.NewColumn.DefaultConstraintValue);
                         string constraintName = !string.IsNullOrWhiteSpace(change.NewColumn.DefaultConstraintName)
                             ? change.NewColumn.DefaultConstraintName
-                            : $"DF_{tableDiff.TableName}_{change.NewColumn.Name}_{Guid.NewGuid():N}";
-                        string normalizedValue = NormalizeDefaultConstraintValue(change.NewColumn.DefaultConstraintValue);
+                            : $"DF_{tableDiff.TableName}_{change.NewColumn.Name}_{GenerateDeterministicSuffix(tableDiff.TableName, change.NewColumn.Name, normalizedValue, "modify")}";
                         sb.AppendLine($"ALTER TABLE [{schema}].[{tableDiff.TableName}] ADD CONSTRAINT [{constraintName}] DEFAULT {normalizedValue} FOR [{change.NewColumn.Name}];");
                     }
                 }
@@ -866,10 +890,11 @@ public static class MigrationSqlGenerator
                             // Add new default constraint if specified
                             if (!string.IsNullOrWhiteSpace(change.NewColumn.DefaultConstraintValue))
                             {
+                                string normalizedValue = NormalizeDefaultConstraintValue(change.NewColumn.DefaultConstraintValue);
                                 string constraintName = !string.IsNullOrWhiteSpace(change.NewColumn.DefaultConstraintName)
                                     ? change.NewColumn.DefaultConstraintName
-                                    : $"DF_{tableDiff.TableName}_{change.NewColumn.Name}_{Guid.NewGuid():N}";
-                                sb.AppendLine($"ALTER TABLE [{schema}].[{tableDiff.TableName}] ADD CONSTRAINT [{constraintName}] DEFAULT {change.NewColumn.DefaultConstraintValue} FOR [{change.NewColumn.Name}];");
+                                    : $"DF_{tableDiff.TableName}_{change.NewColumn.Name}_{GenerateDeterministicSuffix(tableDiff.TableName, change.NewColumn.Name, normalizedValue, "modify")}";
+                                sb.AppendLine($"ALTER TABLE [{schema}].[{tableDiff.TableName}] ADD CONSTRAINT [{constraintName}] DEFAULT {normalizedValue} FOR [{change.NewColumn.Name}];");
                             }
                         }
                     }
@@ -975,8 +1000,8 @@ public static class MigrationSqlGenerator
 
     public static string GenerateDropPrimaryKeyStatement(string tableName, string constraintName, string schema = "dbo", string? variableSuffix = null)
     {
-        // Use provided suffix or generate a GUID-based one to avoid conflicts
-        string varSuffix = variableSuffix ?? Guid.NewGuid().ToString("N");
+        // Use provided suffix or generate a deterministic one to avoid conflicts
+        string varSuffix = variableSuffix ?? GenerateDeterministicSuffix(schema, tableName, constraintName, "droppk");
         
         // Use dynamic SQL to check if constraint exists before dropping
         return $"""
@@ -1299,7 +1324,7 @@ public static class MigrationSqlGenerator
         // Generate column reordering SQL
         // Approach: Create temp table with correct order, copy data, drop old, rename temp
         StringBuilder sb = new StringBuilder();
-        string tempTableName = $"{actualTable.Name}_reorder_{Guid.NewGuid():N}";
+        string tempTableName = $"{actualTable.Name}_reorder_{GenerateDeterministicSuffix(actualTable.Schema, actualTable.Name, "reorder")}";
         
         sb.AppendLine("-- Reorder columns to match target schema");
         sb.AppendLine($"-- Creating temporary table with correct column order");
@@ -1364,9 +1389,8 @@ public static class MigrationSqlGenerator
                 if (!string.IsNullOrWhiteSpace(col.DefaultConstraintValue))
                 {
                     // Always generate a new constraint name to avoid conflicts during reordering
-                    string constraintName = $"DF_{actualTable.Name}_{col.Name}_{Guid.NewGuid():N}";
-                    // Normalize the default value (remove outer parentheses that SQL Server adds)
                     string normalizedValue = NormalizeDefaultConstraintValue(col.DefaultConstraintValue);
+                    string constraintName = $"DF_{actualTable.Name}_{col.Name}_{GenerateDeterministicSuffix(actualTable.Schema, actualTable.Name, col.Name, normalizedValue, "reorder")}";
                     sb.Append($" CONSTRAINT [{constraintName}] DEFAULT {normalizedValue}");
                 }
                 
@@ -1490,7 +1514,7 @@ public static class MigrationSqlGenerator
         
         // Build a check that verifies the table exists and all columns exist
         // Store OBJECT_ID result in a variable to avoid calling it multiple times
-        string tableObjectIdVar = $"@tableObjectId_{Guid.NewGuid():N}";
+        string tableObjectIdVar = $"@tableObjectId_{GenerateDeterministicSuffix(actualTable.Schema, actualTable.Name, "reorder", "objectid")}";
         sb.AppendLine($"DECLARE {tableObjectIdVar} INT = OBJECT_ID('[{actualTable.Schema}].[{actualTable.Name}]', 'U');");
         
         List<string> columnExistenceChecks = new List<string>();
@@ -1510,7 +1534,7 @@ public static class MigrationSqlGenerator
         string escapedInsertSql = insertSql.Replace("'", "''");
         
         // Generate a unique variable name to avoid conflicts when multiple tables are reordered in the same migration
-        string varSuffix = Guid.NewGuid().ToString("N");
+        string varSuffix = GenerateDeterministicSuffix(actualTable.Schema, actualTable.Name, "reorder", "insertsql");
         string insertSqlVarName = $"@insertSql_{varSuffix}";
         
         sb.AppendLine($"IF {allColumnsExistCheck}");
