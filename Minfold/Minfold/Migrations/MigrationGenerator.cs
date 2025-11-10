@@ -508,8 +508,11 @@ public static class MigrationGenerator
             // Phase 2: Column modifications
             foreach (TableDiff tableDiff in diff.ModifiedTables.OrderBy(t => t.TableName))
             {
-                // Pass current schema to allow dropping indexes before dropping columns
-                string columnModifications = MigrationSqlGenerator.GenerateColumnModifications(tableDiff, currentSchemaResult.Result ?? new ConcurrentDictionary<string, SqlTable>(StringComparer.OrdinalIgnoreCase));
+                // Pass current schema (for dropping indexes) and target schema (for single-column detection)
+                string columnModifications = MigrationSqlGenerator.GenerateColumnModifications(
+                    tableDiff, 
+                    currentSchemaResult.Result ?? new ConcurrentDictionary<string, SqlTable>(StringComparer.OrdinalIgnoreCase),
+                    targetSchema);
                 if (!string.IsNullOrWhiteSpace(columnModifications))
                 {
                     phase2Columns.Append(columnModifications);
@@ -1014,24 +1017,61 @@ public static class MigrationGenerator
                     if (change.NewColumn != null) MigrationLogger.Log($"    NewColumn: IsIdentity={change.NewColumn.IsIdentity}, IsPrimaryKey={change.NewColumn.IsPrimaryKey}");
                 }
                 
+                // Pre-calculate lists
+                List<ColumnChange> dropChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Drop).ToList();
+                List<ColumnChange> addChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Add).ToList();
+                List<ColumnChange> modifyChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Modify).ToList();
+                
+                // Check if we have Modify changes that require DROP+ADD, and Drop changes that would leave the modified column as the only one
+                // In this case, we need to process Modify BEFORE Drop to avoid the "only column" error
+                bool needsModifyBeforeDrop = false;
+                if (modifyChanges.Count > 0 && dropChanges.Count > 0 && currentSchemaResult.Result != null)
+                {
+                    if (currentSchemaResult.Result.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? currentTable))
+                    {
+                        int currentDataColumnCount = currentTable.Columns.Values.Count(c => !c.IsComputed);
+                        
+                        // Check if any Modify change requires DROP+ADD and would be the only column after drops
+                        foreach (ColumnChange modifyChange in modifyChanges)
+                        {
+                            if (modifyChange.OldColumn != null && modifyChange.NewColumn != null)
+                            {
+                                bool requiresDropAdd = (modifyChange.OldColumn.IsComputed || modifyChange.NewColumn.IsComputed) ||
+                                                      (modifyChange.OldColumn.IsIdentity != modifyChange.NewColumn.IsIdentity);
+                                
+                                if (requiresDropAdd && currentDataColumnCount - dropChanges.Count == 1)
+                                {
+                                    // After dropping other columns, this would be the only column
+                                    needsModifyBeforeDrop = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                
                 // First pass: Drop columns that were added by the migration
                 // For Drop changes: column exists in currentSchema (after migration) but not in targetSchema (before migration)
                 // This means the column was ADDED by the migration, so we need to DROP it during rollback
-                foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Drop))
+                // BUT: if we need to process Modify before Drop, skip this for now
+                if (!needsModifyBeforeDrop)
                 {
-                    if (change.OldColumn != null)
+                    foreach (ColumnChange change in dropChanges)
                     {
-                        string columnKey = $"{tableDiff.TableName}.{change.OldColumn.Name}";
-                        columnsBeingDropped.Add(columnKey);
-                        MigrationLogger.Log($"  [DROP] {columnKey}");
-                        downScript.AppendLine(MigrationSqlGenerator.GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName));
+                        if (change.OldColumn != null)
+                        {
+                            string columnKey = $"{tableDiff.TableName}.{change.OldColumn.Name}";
+                            columnsBeingDropped.Add(columnKey);
+                            MigrationLogger.Log($"  [DROP] {columnKey}");
+                            downScript.AppendLine(MigrationSqlGenerator.GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName));
+                        }
                     }
                 }
 
                 // Second pass: Restore columns that were dropped by the migration
                 // For Add changes: column exists in targetSchema (before migration) but not in currentSchema (after migration)
                 // This means the column was DROPPED by the migration, so we need to ADD it back during rollback
-                foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Add))
+                foreach (ColumnChange change in addChanges)
                 {
                     if (change.NewColumn != null)
                     {
@@ -1051,9 +1091,10 @@ public static class MigrationGenerator
                 }
 
                 // Third pass: Reverse modifications (now safe to restore identity since added identity columns are dropped)
+                // BUT: if needsModifyBeforeDrop, we process Modify BEFORE Drop to avoid "only column" error
                 // For Modify changes: OldColumn = current state (after migration), NewColumn = target state (before migration)
                 // We need to restore from OldColumn to NewColumn
-                foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Modify))
+                foreach (ColumnChange change in modifyChanges)
                 {
                     if (change.OldColumn != null && change.NewColumn != null)
                     {
@@ -1077,12 +1118,27 @@ public static class MigrationGenerator
                             // We need to drop OldColumn (current) and add NewColumn (target)
                             MigrationLogger.Log($"    Reversing identity change: {change.OldColumn.Name} (IsIdentity={change.OldColumn.IsIdentity}) -> {change.NewColumn.Name} (IsIdentity={change.NewColumn.IsIdentity})");
                             
+                            // If the column being dropped has a primary key constraint, drop it first
+                            if (change.OldColumn.IsPrimaryKey)
+                            {
+                                string pkConstraintName = $"PK_{tableDiff.TableName}";
+                                downScript.AppendLine(MigrationSqlGenerator.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, schema));
+                                MigrationLogger.Log($"    Dropped PK constraint before dropping column {change.OldColumn.Name}");
+                            }
+                            
                             // Create a reversed TableDiff for the safe wrapper to check column state
                             // In down script, currentSchema is the state after up migration (has OldColumn)
                             // We need to check if NewColumn would be the only column when we restore it
+                            // If needsModifyBeforeDrop, include Drop changes in the diff so safe wrapper can detect single-column scenario
+                            List<ColumnChange> reversedDiffChanges = new List<ColumnChange> { new ColumnChange(ColumnChangeType.Modify, change.OldColumn, change.NewColumn) };
+                            if (needsModifyBeforeDrop)
+                            {
+                                // Include Drop changes so GenerateSafeColumnDropAndAdd can detect that this would be the only column
+                                reversedDiffChanges.AddRange(dropChanges);
+                            }
                             TableDiff reversedDiff = new TableDiff(
                                 tableDiff.TableName,
-                                new List<ColumnChange> { new ColumnChange(ColumnChangeType.Modify, change.OldColumn, change.NewColumn) },
+                                reversedDiffChanges,
                                 new List<ForeignKeyChange>(),
                                 new List<IndexChange>()
                             );
@@ -1115,9 +1171,24 @@ public static class MigrationGenerator
                             // Drop OldColumn (current state) and add NewColumn (target state)
                             MigrationLogger.Log($"    Reversing computed column change: {change.OldColumn.Name} -> {change.NewColumn.Name}");
                             
+                            // If the column being dropped has a primary key constraint, drop it first
+                            if (change.OldColumn.IsPrimaryKey)
+                            {
+                                string pkConstraintName = $"PK_{tableDiff.TableName}";
+                                downScript.AppendLine(MigrationSqlGenerator.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, schema));
+                                MigrationLogger.Log($"    Dropped PK constraint before dropping column {change.OldColumn.Name}");
+                            }
+                            
+                            // If needsModifyBeforeDrop, include Drop changes in the diff so safe wrapper can detect single-column scenario
+                            List<ColumnChange> reversedDiffChanges = new List<ColumnChange> { new ColumnChange(ColumnChangeType.Modify, change.OldColumn, change.NewColumn) };
+                            if (needsModifyBeforeDrop)
+                            {
+                                // Include Drop changes so GenerateSafeColumnDropAndAdd can detect that this would be the only column
+                                reversedDiffChanges.AddRange(dropChanges);
+                            }
                             TableDiff reversedDiff = new TableDiff(
                                 tableDiff.TableName,
-                                new List<ColumnChange> { new ColumnChange(ColumnChangeType.Modify, change.OldColumn, change.NewColumn) },
+                                reversedDiffChanges,
                                 new List<ForeignKeyChange>(),
                                 new List<IndexChange>()
                             );
@@ -1144,6 +1215,21 @@ public static class MigrationGenerator
                         {
                             downScript.Append(reverseAlter);
                             }
+                        }
+                    }
+                }
+                
+                // Fourth pass: If we skipped Drop changes earlier (needsModifyBeforeDrop), process them now
+                if (needsModifyBeforeDrop)
+                {
+                    foreach (ColumnChange change in dropChanges)
+                    {
+                        if (change.OldColumn != null)
+                        {
+                            string columnKey = $"{tableDiff.TableName}.{change.OldColumn.Name}";
+                            columnsBeingDropped.Add(columnKey);
+                            MigrationLogger.Log($"  [DROP] {columnKey} (after Modify to avoid only-column error)");
+                            downScript.AppendLine(MigrationSqlGenerator.GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName));
                         }
                     }
                 }

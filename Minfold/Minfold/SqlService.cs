@@ -697,6 +697,12 @@ public class SqlService
             Connection = conn.Connection
         };
         
+        // If no tables provided, return empty result (avoid SQL syntax error with empty IN clause)
+        if (tables.Count == 0)
+        {
+            return new ResultOrException<Dictionary<string, List<SqlForeignKey>>>(new Dictionary<string, List<SqlForeignKey>>(), null);
+        }
+        
         string[] parameters = new string[tables.Count];
         
         for (int i = 0; i < tables.Count; i++)

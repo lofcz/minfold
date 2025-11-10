@@ -600,5 +600,224 @@ public class ZeroColumnTableTests
 
         await VerifySchemaMatches(connectionString, dbName, expectedSchema, new ConcurrentDictionary<string, SqlSequence>(), new ConcurrentDictionary<string, SqlStoredProcedure>());
     }
+
+    [Test]
+    public async Task TestSingleColumnModifyWithAddColumn()
+    {
+        MigrationLogger.SetLogger(Console.WriteLine);
+        
+        string tempDbName = $"MinfoldTest_SingleColumnModify_{Guid.NewGuid():N}";
+        string tempProjectPath = Path.Combine(Path.GetTempPath(), $"MinfoldTestSingleColumnModifyProject_{Guid.NewGuid():N}");
+        string? tempDbConnectionString = null;
+        Dictionary<string, MigrationTestState> stateHistory = new Dictionary<string, MigrationTestState>();
+
+        try
+        {
+            // Setup: Create temporary database and project
+            tempDbConnectionString = await CreateTempDatabase(connSettings.Connection, tempDbName);
+            await CreateTempProject(tempProjectPath);
+            
+            // Step 1: Create table with id INT NOT NULL (only column)
+            await Step1_CreateSingleColumnTable(tempDbConnectionString, tempDbName);
+            
+            // Step 2: Generate initial migration
+            MigrationTestState step2State = await Step2_GenerateInitialMigration(tempProjectPath, tempDbConnectionString, tempDbName);
+            stateHistory["Step2"] = step2State;
+            
+            // Record initial migration as applied (database-first approach)
+            Assert.That(step2State.MigrationName, Is.Not.Null, "Step 2: Initial migration name is null");
+            await RecordMigrationApplied(tempDbConnectionString, tempDbName, step2State.MigrationName!);
+            
+            // Step 3: Modify id to add PK and IDENTITY(1,1), and add text NVARCHAR(MAX) NULL
+            await Step3_ModifyIdAndAddTextColumn(tempDbConnectionString, tempDbName);
+            MigrationTestState step3State = await GetCurrentState(tempDbConnectionString, tempDbName, tempProjectPath, "Step3", null);
+            stateHistory["Step3"] = step3State;
+            
+            // Step 4: Generate incremental migration
+            MigrationTestState step4State = await Step4_GenerateIncrementalMigration(tempProjectPath, tempDbConnectionString, tempDbName);
+            stateHistory["Step4"] = step4State;
+            
+            // Record migration as applied
+            Assert.That(step4State.MigrationName, Is.Not.Null, "Step 4: Migration name is null");
+            await RecordMigrationApplied(tempDbConnectionString, tempDbName, step4State.MigrationName!);
+            
+            // Step 5: Apply migration to fresh database and verify
+            string freshDbName = $"MinfoldTest_SingleColumnModify_Fresh_{Guid.NewGuid():N}";
+            string freshDbConnectionString = await CreateTempDatabase(connSettings.Connection, freshDbName);
+            try
+            {
+                await Step5_ApplyMigrationAndVerify(tempProjectPath, freshDbConnectionString, freshDbName, step3State.Schema);
+            }
+            finally
+            {
+                await DropTempDatabase(freshDbConnectionString, freshDbName);
+            }
+            
+            // Step 6: Rollback to initial migration and verify schema
+            // We need to rollback the incremental migration (not the initial one) to get back to initial state
+            Assert.That(step2State.MigrationName, Is.Not.Null, "Step 6: Initial migration name is null");
+            Assert.That(step4State.MigrationName, Is.Not.Null, "Step 6: Incremental migration name is null");
+            await Step6_RollbackToInitial(tempProjectPath, tempDbConnectionString, tempDbName, step2State.Schema, step4State.MigrationName!);
+            
+            // Step 7: Reapply migration and verify final schema
+            await Step7_ReapplyAndVerify(tempProjectPath, tempDbConnectionString, tempDbName, step3State.Schema);
+        }
+        finally
+        {
+            // Cleanup
+            if (!string.IsNullOrEmpty(tempDbConnectionString))
+            {
+                await DropTempDatabase(tempDbConnectionString, tempDbName);
+            }
+            if (Directory.Exists(tempProjectPath))
+            {
+                Directory.Delete(tempProjectPath, true);
+            }
+        }
+    }
+
+    private async Task Step1_CreateSingleColumnTable(string connectionString, string dbName)
+    {
+        SqlService sqlService = new SqlService(connectionString);
+        ResultOrException<int> result = await sqlService.Execute("""
+            CREATE TABLE [dbo].[SampleTable] (
+                [id] INT NOT NULL
+            )
+            """);
+
+        if (result.Exception is not null)
+        {
+            throw new Exception($"Step 1 failed: {result.Exception.Message}", result.Exception);
+        }
+    }
+
+    private async Task<MigrationTestState> Step2_GenerateInitialMigration(string projectPath, string connectionString, string dbName)
+    {
+        ResultOrException<MigrationGenerationResult> result = await MigrationGenerator.GenerateInitialMigration(
+            connectionString, dbName, projectPath, "InitialSchema");
+
+        Assert.That(result.Exception, Is.Null, $"Step 2 failed: {result.Exception?.Message}");
+        Assert.That(result.Result, Is.Not.Null, "Step 2: Migration generation returned null result");
+        Assert.That(File.Exists(result.Result!.UpScriptPath), Is.True, "Step 2: Up script file not created");
+        Assert.That(File.Exists(result.Result.DownScriptPath), Is.True, "Step 2: Down script file not created");
+
+        ConcurrentDictionary<string, SqlTable> schema = await GetCurrentSchema(connectionString, dbName);
+        return new MigrationTestState("Step2", schema, new List<string>(), result.Result.MigrationName);
+    }
+
+    private async Task Step3_ModifyIdAndAddTextColumn(string connectionString, string dbName)
+    {
+        SqlService sqlService = new SqlService(connectionString);
+        
+        // This step simulates the scenario where we want to:
+        // 1. Add text column
+        // 2. Modify id to add PK and IDENTITY(1,1)
+        // The migration generator should detect that id is the only column and add text FIRST before modifying id
+        
+        // Add text column first (manually, to simulate the target state)
+        // The migration generator will compare current state (only id) with target state (id with identity + text)
+        // and should generate: ADD text, then modify id
+        ResultOrException<int> result1 = await sqlService.Execute("""
+            ALTER TABLE [dbo].[SampleTable] ADD [text] NVARCHAR(MAX) NULL
+            """);
+        if (result1.Exception is not null)
+        {
+            throw new Exception($"Step 3 failed (add text column): {result1.Exception.Message}", result1.Exception);
+        }
+        
+        // Now modify id column to add PK and IDENTITY(1,1)
+        // Use safe wrapper approach since we now have 2 columns
+        string tempColumnName = $"id_tmp_{Guid.NewGuid():N}";
+        string addTempColumnSql = MigrationSqlGenerator.GenerateAddColumnStatement(
+            new SqlTableColumn(
+                Name: tempColumnName,
+                OrdinalPosition: 0,
+                IsNullable: false,
+                IsIdentity: true,
+                SqlType: SqlDbTypeExt.Int,
+                ForeignKeys: [],
+                IsComputed: false,
+                IsPrimaryKey: true,
+                ComputedSql: null,
+                LengthOrPrecision: null,
+                IdentitySeed: 1,
+                IdentityIncrement: 1
+            ), 
+            "SampleTable");
+        string dropOldColumnSql = MigrationSqlGenerator.GenerateDropColumnStatement("id", "SampleTable");
+        string renameColumnSql = MigrationSqlGenerator.GenerateRenameColumnStatement("SampleTable", tempColumnName, "id");
+        
+        ResultOrException<int> result2 = await sqlService.Execute($"""
+            {addTempColumnSql}
+            {dropOldColumnSql}
+            {renameColumnSql}
+            """);
+        if (result2.Exception is not null)
+        {
+            throw new Exception($"Step 3 failed (modify id): {result2.Exception.Message}", result2.Exception);
+        }
+        
+        // Add PK constraint
+        ResultOrException<int> result3 = await sqlService.Execute("""
+            ALTER TABLE [dbo].[SampleTable] ADD CONSTRAINT [PK_SampleTable] PRIMARY KEY ([id])
+            """);
+        if (result3.Exception is not null)
+        {
+            throw new Exception($"Step 3 failed (add PK): {result3.Exception.Message}", result3.Exception);
+        }
+    }
+
+    private async Task<MigrationTestState> Step4_GenerateIncrementalMigration(string projectPath, string connectionString, string dbName)
+    {
+        ResultOrException<MigrationGenerationResult> result = await MigrationGenerator.GenerateIncrementalMigration(
+            connectionString, dbName, projectPath, "AddIdentityAndTextColumn");
+
+        Assert.That(result.Exception, Is.Null, $"Step 4 failed: {result.Exception?.Message}");
+        Assert.That(result.Result, Is.Not.Null, "Step 4: Migration generation returned null result");
+        Assert.That(File.Exists(result.Result!.UpScriptPath), Is.True, "Step 4: Up script file not created");
+        Assert.That(File.Exists(result.Result.DownScriptPath), Is.True, "Step 4: Down script file not created");
+
+        ConcurrentDictionary<string, SqlTable> schema = await GetCurrentSchema(connectionString, dbName);
+        ResultOrException<List<string>> appliedMigrationsResult = await MigrationApplier.GetAppliedMigrations(connectionString, dbName);
+        List<string> appliedMigrations = appliedMigrationsResult.Result ?? new List<string>();
+
+        return new MigrationTestState("Step4", schema, appliedMigrations, result.Result.MigrationName);
+    }
+
+    private async Task Step5_ApplyMigrationAndVerify(string projectPath, string connectionString, string dbName, ConcurrentDictionary<string, SqlTable> expectedSchema)
+    {
+        // Verify that migration files exist before applying
+        List<MigrationInfo> allMigrations = MigrationApplier.GetMigrationFiles(projectPath);
+        Assert.That(allMigrations.Count, Is.GreaterThanOrEqualTo(2), $"Step 5: Expected at least 2 migrations (initial + incremental), but found {allMigrations.Count}");
+        
+        ResultOrException<MigrationApplyResult> applyResult = await MigrationApplier.ApplyMigrations(connectionString, dbName, projectPath, false);
+
+        Assert.That(applyResult.Exception, Is.Null, $"Step 5 failed: {applyResult.Exception?.Message}");
+        Assert.That(applyResult.Result, Is.Not.Null, "Step 5: Apply migrations returned null result");
+        Assert.That(applyResult.Result!.AppliedMigrations.Count, Is.GreaterThanOrEqualTo(2), $"Step 5: Expected at least 2 migrations to be applied (initial + incremental), but only {applyResult.Result.AppliedMigrations.Count} were applied: {string.Join(", ", applyResult.Result.AppliedMigrations)}");
+
+        await VerifySchemaMatches(connectionString, dbName, expectedSchema, new ConcurrentDictionary<string, SqlSequence>(), new ConcurrentDictionary<string, SqlStoredProcedure>());
+    }
+
+    private async Task Step6_RollbackToInitial(string projectPath, string connectionString, string dbName, ConcurrentDictionary<string, SqlTable> expectedSchema, string incrementalMigrationName)
+    {
+        // Rollback the incremental migration to restore the initial state
+        ResultOrException<MigrationRollbackResult> rollbackResult = await MigrationApplier.RollbackMigration(connectionString, dbName, projectPath, incrementalMigrationName, false);
+
+        Assert.That(rollbackResult.Exception, Is.Null, $"Step 6 failed: {rollbackResult.Exception?.Message}");
+        Assert.That(rollbackResult.Result, Is.Not.Null, "Step 6: Rollback migration returned null result");
+
+        await VerifySchemaMatches(connectionString, dbName, expectedSchema, new ConcurrentDictionary<string, SqlSequence>(), new ConcurrentDictionary<string, SqlStoredProcedure>());
+    }
+
+    private async Task Step7_ReapplyAndVerify(string projectPath, string connectionString, string dbName, ConcurrentDictionary<string, SqlTable> expectedSchema)
+    {
+        ResultOrException<MigrationApplyResult> applyResult = await MigrationApplier.ApplyMigrations(connectionString, dbName, projectPath, false);
+
+        Assert.That(applyResult.Exception, Is.Null, $"Step 7 failed: {applyResult.Exception?.Message}");
+        Assert.That(applyResult.Result, Is.Not.Null, "Step 7: Apply migrations returned null result");
+
+        await VerifySchemaMatches(connectionString, dbName, expectedSchema, new ConcurrentDictionary<string, SqlSequence>(), new ConcurrentDictionary<string, SqlStoredProcedure>());
+    }
 }
 

@@ -465,15 +465,19 @@ public static class MigrationSqlGenerator
         return sb.ToString();
     }
 
-    public static string GenerateColumnModifications(TableDiff tableDiff, ConcurrentDictionary<string, SqlTable>? currentSchema = null)
+    public static string GenerateColumnModifications(TableDiff tableDiff, ConcurrentDictionary<string, SqlTable>? currentSchema = null, ConcurrentDictionary<string, SqlTable>? targetSchema = null)
     {
         StringBuilder sb = new StringBuilder();
 
-        // Get schema from current schema or default to dbo
+        // Get schema from current schema or target schema or default to dbo
         string schema = "dbo";
         if (currentSchema != null && currentSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? currentTable))
         {
             schema = currentTable.Schema;
+        }
+        else if (targetSchema != null && targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTable))
+        {
+            schema = targetTable.Schema;
         }
 
         // Order operations: DROP INDEXES (on columns being dropped), DROP COLUMN, then ALTER COLUMN, then ADD COLUMN
@@ -508,10 +512,52 @@ public static class MigrationSqlGenerator
         // If so, we need to ensure at least one column is added first (from Add operations)
         bool wouldReduceToZero = WouldReduceToZeroColumns(tableDiff, currentSchema);
         
+        // Check if we have Modify changes that require DROP+ADD on the only column, AND we have Add changes
+        // In this case, we need to add columns FIRST before modifying the only column
+        // We check the TARGET schema (before migration) to see if it has only 1 column
+        bool needsAddBeforeModify = false;
+        if (modifyChanges.Count > 0 && addChanges.Count > 0 && targetSchema != null)
+        {
+            if (targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTableForCheck))
+            {
+                int dataColumnCount = targetTableForCheck.Columns.Values.Count(c => !c.IsComputed);
+                
+                // Check if any Modify change requires DROP+ADD and is on the only column in TARGET schema
+                foreach (ColumnChange modifyChange in modifyChanges)
+                {
+                    if (modifyChange.OldColumn != null && modifyChange.NewColumn != null)
+                    {
+                        bool requiresDropAdd = (modifyChange.OldColumn.IsComputed || modifyChange.NewColumn.IsComputed) ||
+                                              (modifyChange.OldColumn.IsIdentity != modifyChange.NewColumn.IsIdentity);
+                        
+                        if (requiresDropAdd && dataColumnCount == 1 && 
+                            targetTableForCheck.Columns.TryGetValue(modifyChange.OldColumn.Name.ToLowerInvariant(), out SqlTableColumn? col) &&
+                            !col.IsComputed)
+                        {
+                            needsAddBeforeModify = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
         if (wouldReduceToZero && dropChanges.Count > 0)
         {
             // Need to add columns first before dropping to avoid zero-column state
             // Add columns from Add operations first
+            foreach (ColumnChange change in addChanges)
+            {
+                if (change.NewColumn != null)
+                {
+                    sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName, schema));
+                }
+            }
+        }
+        else if (needsAddBeforeModify)
+        {
+            // Need to add columns first before modifying the only column
+            // This ensures we have multiple columns before attempting DROP+ADD on the only column
             foreach (ColumnChange change in addChanges)
             {
                 if (change.NewColumn != null)
@@ -535,31 +581,61 @@ public static class MigrationSqlGenerator
         {
             if (change.OldColumn != null && change.NewColumn != null)
             {
+                // Check if this Modify change requires DROP+ADD and was the reason we added columns first
+                bool requiresDropAdd = (change.OldColumn.IsComputed || change.NewColumn.IsComputed) ||
+                                      (change.OldColumn.IsIdentity != change.NewColumn.IsIdentity);
+                // Check TARGET schema (before migration) to see if this was the only column
+                bool isSingleColumnModify = needsAddBeforeModify && requiresDropAdd && targetSchema != null &&
+                    targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTableForCheck) &&
+                    targetTableForCheck.Columns.Values.Count(c => !c.IsComputed) == 1 &&
+                    targetTableForCheck.Columns.TryGetValue(change.OldColumn.Name.ToLowerInvariant(), out SqlTableColumn? col) &&
+                    !col.IsComputed;
+                
                 // Check if it's a computed column change - these need DROP + ADD
                 if (change.OldColumn.IsComputed || change.NewColumn.IsComputed)
                 {
-                    // Use safe wrapper for computed column changes
-                    if (change.OldColumn.IsComputed && change.NewColumn.IsComputed)
+                    // Use safe wrapper for computed column changes (unless we've already added columns)
+                    if (isSingleColumnModify)
                     {
-                        // Both computed - use safe wrapper
-                        sb.Append(GenerateSafeColumnDropAndAdd(change.OldColumn, change.NewColumn, tableDiff.TableName, schema, tableDiff, currentSchema));
-                    }
-                    else if (change.OldColumn.IsComputed)
-                    {
-                        // Old is computed, new is not - drop computed, add regular
-                        sb.Append(GenerateSafeColumnDropAndAdd(change.OldColumn, change.NewColumn, tableDiff.TableName, schema, tableDiff, currentSchema));
+                        // Columns already added first, safe to use normal DROP+ADD
+                        sb.AppendLine(GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName, schema));
+                        sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName, schema));
                     }
                     else
                     {
-                        // New is computed, old is not - drop regular, add computed
-                        sb.Append(GenerateSafeColumnDropAndAdd(change.OldColumn, change.NewColumn, tableDiff.TableName, schema, tableDiff, currentSchema));
+                        // Use safe wrapper for computed column changes
+                        if (change.OldColumn.IsComputed && change.NewColumn.IsComputed)
+                        {
+                            // Both computed - use safe wrapper
+                            sb.Append(GenerateSafeColumnDropAndAdd(change.OldColumn, change.NewColumn, tableDiff.TableName, schema, tableDiff, currentSchema));
+                        }
+                        else if (change.OldColumn.IsComputed)
+                        {
+                            // Old is computed, new is not - drop computed, add regular
+                            sb.Append(GenerateSafeColumnDropAndAdd(change.OldColumn, change.NewColumn, tableDiff.TableName, schema, tableDiff, currentSchema));
+                        }
+                        else
+                        {
+                            // New is computed, old is not - drop regular, add computed
+                            sb.Append(GenerateSafeColumnDropAndAdd(change.OldColumn, change.NewColumn, tableDiff.TableName, schema, tableDiff, currentSchema));
+                        }
                     }
                 }
                 // Check if identity property changed - SQL Server requires DROP + ADD
                 else if (change.OldColumn.IsIdentity != change.NewColumn.IsIdentity)
                 {
-                    // Use safe wrapper for identity changes
-                    sb.Append(GenerateSafeColumnDropAndAdd(change.OldColumn, change.NewColumn, tableDiff.TableName, schema, tableDiff, currentSchema));
+                    // Use safe wrapper for identity changes (unless we've already added columns)
+                    if (isSingleColumnModify)
+                    {
+                        // Columns already added first, safe to use normal DROP+ADD
+                        sb.AppendLine(GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName, schema));
+                        sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName, schema));
+                    }
+                    else
+                    {
+                        // Use safe wrapper for identity changes
+                        sb.Append(GenerateSafeColumnDropAndAdd(change.OldColumn, change.NewColumn, tableDiff.TableName, schema, tableDiff, currentSchema));
+                    }
                 }
                 // Check if only PK property changed (and no other significant changes) - handle via PK constraint changes
                 // Note: PK changes are also handled via FK changes, but we need to ensure column is recreated if needed
@@ -588,8 +664,8 @@ public static class MigrationSqlGenerator
             }
         }
 
-        // Add columns (skip if we already added them above for zero-column scenario)
-        if (!wouldReduceToZero || dropChanges.Count == 0)
+        // Add columns (skip if we already added them above for zero-column scenario or single-column modify scenario)
+        if ((!wouldReduceToZero || dropChanges.Count == 0) && !needsAddBeforeModify)
         {
             foreach (ColumnChange change in addChanges)
             {
