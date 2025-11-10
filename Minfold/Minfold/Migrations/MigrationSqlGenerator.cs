@@ -463,15 +463,25 @@ public static class MigrationSqlGenerator
 
     public static string GenerateDropIndexStatement(SqlIndex index)
     {
-        return $"DROP INDEX [{index.Name}] ON [dbo].[{index.Table}];";
+        // Use dynamic SQL to check if index exists before dropping
+        return $"""
+            IF EXISTS (SELECT * FROM sys.indexes WHERE name = '{index.Name}' AND object_id = OBJECT_ID('[dbo].[{index.Table}]'))
+            BEGIN
+                DROP INDEX [{index.Name}] ON [dbo].[{index.Table}];
+            END
+            """;
     }
 
     public static string GenerateCreateIndexStatement(SqlIndex index)
     {
         StringBuilder sb = new StringBuilder();
-        sb.Append($"CREATE {(index.IsUnique ? "UNIQUE " : "")}NONCLUSTERED INDEX [{index.Name}] ON [dbo].[{index.Table}] (");
-        sb.Append(string.Join(", ", index.Columns.Select(c => $"[{c}]")));
-        sb.AppendLine(");");
+        // Use dynamic SQL to check if index doesn't exist before creating
+        sb.AppendLine($"""
+            IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = '{index.Name}' AND object_id = OBJECT_ID('[dbo].[{index.Table}]'))
+            BEGIN
+                CREATE {(index.IsUnique ? "UNIQUE " : "")}NONCLUSTERED INDEX [{index.Name}] ON [dbo].[{index.Table}] ({string.Join(", ", index.Columns.Select(c => $"[{c}]"))});
+            END
+            """);
         return sb.ToString();
     }
 }

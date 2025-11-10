@@ -183,7 +183,32 @@ public static class MigrationSchemaSnapshot
                     }
                 }
 
-                newTarget[tableDiff.TableName.ToLowerInvariant()] = new SqlTable(table.Name, newColumns, table.Indexes);
+                // Apply index changes
+                List<SqlIndex> newIndexes = new List<SqlIndex>(table.Indexes);
+                foreach (IndexChange indexChange in tableDiff.IndexChanges)
+                {
+                    if (indexChange.ChangeType == IndexChangeType.Add && indexChange.NewIndex != null)
+                    {
+                        // Add new index
+                        newIndexes.Add(indexChange.NewIndex);
+                    }
+                    else if (indexChange.ChangeType == IndexChangeType.Drop && indexChange.OldIndex != null)
+                    {
+                        // Remove dropped index
+                        newIndexes.RemoveAll(idx => idx.Name.Equals(indexChange.OldIndex.Name, StringComparison.OrdinalIgnoreCase));
+                    }
+                    else if (indexChange.ChangeType == IndexChangeType.Modify && indexChange.NewIndex != null && indexChange.OldIndex != null)
+                    {
+                        // Replace modified index
+                        int index = newIndexes.FindIndex(idx => idx.Name.Equals(indexChange.OldIndex.Name, StringComparison.OrdinalIgnoreCase));
+                        if (index >= 0)
+                        {
+                            newIndexes[index] = indexChange.NewIndex;
+                        }
+                    }
+                }
+
+                newTarget[tableDiff.TableName.ToLowerInvariant()] = new SqlTable(table.Name, newColumns, newIndexes);
             }
         }
 

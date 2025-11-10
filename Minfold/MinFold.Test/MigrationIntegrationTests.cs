@@ -595,6 +595,11 @@ public class MigrationIntegrationTests
 
             ALTER TABLE [dbo].[Posts] ADD [tagId] INT NULL
             ALTER TABLE [dbo].[Posts] ADD CONSTRAINT [FK_Posts_Tags] FOREIGN KEY ([tagId]) REFERENCES [dbo].[Tags]([id])
+            
+            -- Create indexes (CRUD: Create)
+            CREATE NONCLUSTERED INDEX [IX_Users_createdAt] ON [dbo].[Users]([createdAt])
+            CREATE UNIQUE NONCLUSTERED INDEX [IX_Tags_name] ON [dbo].[Tags]([name])
+            CREATE NONCLUSTERED INDEX [IX_Posts_tagId] ON [dbo].[Posts]([tagId])
             """);
 
         if (result.Exception is not null)
@@ -688,6 +693,14 @@ public class MigrationIntegrationTests
             -- Drop and recreate FK with different enforcement
             ALTER TABLE [dbo].[Posts] DROP CONSTRAINT [FK_Posts_Users]
             ALTER TABLE [dbo].[Posts] WITH NOCHECK ADD CONSTRAINT [FK_Posts_Users] FOREIGN KEY ([userId]) REFERENCES [dbo].[Users]([id])
+            
+            -- Index operations (CRUD: Update/Modify and Delete)
+            -- Modify index: Drop IX_Users_createdAt and recreate with different columns (add email)
+            DROP INDEX [IX_Users_createdAt] ON [dbo].[Users]
+            CREATE NONCLUSTERED INDEX [IX_Users_createdAt_email] ON [dbo].[Users]([createdAt], [email])
+            
+            -- Drop index: Remove IX_Posts_tagId
+            DROP INDEX [IX_Posts_tagId] ON [dbo].[Posts]
             """);
 
         if (result.Exception is not null)
