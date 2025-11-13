@@ -27,12 +27,98 @@ public class ColumnReorderIntegrationTests
     }
 
     [Test]
-    public async Task TestColumnReordering()
+    public async Task TestColumnReordering_OnlyOrdinalPosition()
+    {
+        // Test scenario: Only ordinal position change (no property changes)
+        await RunColumnReorderTest(
+            "ColumnReorder_OnlyPosition",
+            async (connectionString, dbName) =>
+            {
+                // Reorder columns: swap firstName and lastName positions
+                // Change order to: id, lastName, firstName, email, phone, createdDate
+                await Step3_ReorderColumns(connectionString, dbName);
+            },
+            new List<string> { "id", "firstName", "lastName", "email", "phone", "createdDate" }, // Initial order
+            new List<string> { "id", "lastName", "firstName", "email", "phone", "createdDate" }  // After reorder
+        );
+    }
+
+    [Test]
+    public async Task TestColumnReordering_OnlyPropertyChange()
+    {
+        // Test scenario: Only property change (no ordinal position change)
+        await RunColumnReorderTest(
+            "ColumnReorder_OnlyProperty",
+            async (connectionString, dbName) =>
+            {
+                // Change properties: make phone NOT NULL and change email length
+                SqlService sqlService = new SqlService(connectionString);
+                ResultOrException<int> result = await sqlService.Execute("""
+                    -- Change email column length from 100 to 200
+                    ALTER TABLE [dbo].[Customers] ALTER COLUMN [email] NVARCHAR(200) NOT NULL;
+                    
+                    -- Change phone column from NULL to NOT NULL (requires default for existing NULLs)
+                    UPDATE [dbo].[Customers] SET [phone] = '' WHERE [phone] IS NULL;
+                    ALTER TABLE [dbo].[Customers] ALTER COLUMN [phone] NVARCHAR(20) NOT NULL;
+                    """);
+
+                if (result.Exception is not null)
+                {
+                    throw new Exception($"Step 3 failed: {result.Exception.Message}", result.Exception);
+                }
+            },
+            new List<string> { "id", "firstName", "lastName", "email", "phone", "createdDate" }, // Initial order (unchanged)
+            new List<string> { "id", "firstName", "lastName", "email", "phone", "createdDate" }  // After property change (order unchanged)
+        );
+    }
+
+    [Test]
+    public async Task TestColumnReordering_PropertyAndPositionChange()
+    {
+        // Test scenario: Both property change AND ordinal position change
+        await RunColumnReorderTest(
+            "ColumnReorder_PropertyAndPosition",
+            async (connectionString, dbName) =>
+            {
+                // Change properties AND reorder columns
+                // 1. Change email length from 100 to 200
+                // 2. Change phone from NULL to NOT NULL
+                // 3. Reorder: swap firstName and lastName positions
+                SqlService sqlService = new SqlService(connectionString);
+                
+                // First, change properties
+                ResultOrException<int> propResult = await sqlService.Execute("""
+                    -- Change email column length from 100 to 200
+                    ALTER TABLE [dbo].[Customers] ALTER COLUMN [email] NVARCHAR(200) NOT NULL;
+                    
+                    -- Change phone column from NULL to NOT NULL (requires default for existing NULLs)
+                    UPDATE [dbo].[Customers] SET [phone] = '' WHERE [phone] IS NULL;
+                    ALTER TABLE [dbo].[Customers] ALTER COLUMN [phone] NVARCHAR(20) NOT NULL;
+                    """);
+
+                if (propResult.Exception is not null)
+                {
+                    throw new Exception($"Step 3a failed (property changes): {propResult.Exception.Message}", propResult.Exception);
+                }
+                
+                // Then, reorder columns (swap firstName and lastName)
+                await Step3_ReorderColumns(connectionString, dbName);
+            },
+            new List<string> { "id", "firstName", "lastName", "email", "phone", "createdDate" }, // Initial order
+            new List<string> { "id", "lastName", "firstName", "email", "phone", "createdDate" }  // After property change + reorder
+        );
+    }
+
+    private async Task RunColumnReorderTest(
+        string testSuffix,
+        Func<string, string, Task> modifySchema,
+        List<string> initialOrder,
+        List<string> expectedOrderAfterModify)
     {
         MigrationLogger.SetLogger(Console.WriteLine);
         
-        string tempDbName = $"MinfoldTest_ColumnReorder_{Guid.NewGuid():N}";
-        string tempProjectPath = Path.Combine(Path.GetTempPath(), $"MinfoldTestColumnReorder_{Guid.NewGuid():N}");
+        string tempDbName = $"MinfoldTest_{testSuffix}_{Guid.NewGuid():N}";
+        string tempProjectPath = Path.Combine(Path.GetTempPath(), $"MinfoldTest{testSuffix}_{Guid.NewGuid():N}");
         string? tempDbConnectionString = null;
 
         try
@@ -48,28 +134,27 @@ public class ColumnReorderIntegrationTests
             MigrationTestState step2State = await Step2_GenerateInitialMigration(tempProjectPath, tempDbConnectionString, tempDbName);
             
             // Verify initial column order
-            VerifyColumnOrder(step2State.Schema, "Customers", new List<string> { "id", "firstName", "lastName", "email", "phone", "createdDate" }, "Step 2: Initial migration");
+            VerifyColumnOrder(step2State.Schema, "Customers", initialOrder, "Step 2: Initial migration");
             
             // Record initial migration as applied
             Assert.That(step2State.MigrationName, Is.Not.Null, "Step 2: Initial migration name is null");
             await RecordMigrationApplied(tempDbConnectionString, tempDbName, step2State.MigrationName!);
             
-            // Step 3: Reorder columns in the database
-            // Change order to: id, lastName, firstName, email, phone, createdDate
-            await Step3_ReorderColumns(tempDbConnectionString, tempDbName);
+            // Step 3: Modify schema (property change, position change, or both)
+            await modifySchema(tempDbConnectionString, tempDbName);
             
-            // Step 4: Generate incremental migration for column reordering
+            // Step 4: Generate incremental migration
             MigrationTestState step4State = await Step4_GenerateIncrementalMigration(tempProjectPath, tempDbConnectionString, tempDbName);
             
-            // Verify column order after reordering
-            VerifyColumnOrder(step4State.Schema, "Customers", new List<string> { "id", "lastName", "firstName", "email", "phone", "createdDate" }, "Step 4: After reordering");
+            // Verify column order after modification
+            VerifyColumnOrder(step4State.Schema, "Customers", expectedOrderAfterModify, "Step 4: After modification");
             
             // Record incremental migration as applied
             Assert.That(step4State.MigrationName, Is.Not.Null, "Step 4: Incremental migration name is null");
             await RecordMigrationApplied(tempDbConnectionString, tempDbName, step4State.MigrationName!);
             
-            // Step 5: Apply migration to fresh database and verify column order
-            string freshDbName = $"MinfoldTest_ColumnReorder_Fresh_{Guid.NewGuid():N}";
+            // Step 5: Apply migration to fresh database and verify schema
+            string freshDbName = $"MinfoldTest_{testSuffix}_Fresh_{Guid.NewGuid():N}";
             string freshDbConnectionString = await CreateTempDatabase(connSettings.Connection, freshDbName);
             try
             {
@@ -80,11 +165,11 @@ public class ColumnReorderIntegrationTests
                 await DropTempDatabase(freshDbConnectionString, freshDbName);
             }
             
-            // Step 6: Rollback migration and verify column order is restored
+            // Step 6: Rollback migration and verify schema is restored
             Assert.That(step4State.MigrationName, Is.Not.Null, "Step 6: Incremental migration name is null");
             await Step6_RollbackMigration(tempProjectPath, tempDbConnectionString, tempDbName, step2State.Schema, step4State.MigrationName!);
             
-            // Step 7: Reapply migration and verify column order again
+            // Step 7: Reapply migration and verify schema again
             await Step7_ReapplyMigration(tempProjectPath, tempDbConnectionString, tempDbName, step4State.Schema);
         }
         finally
