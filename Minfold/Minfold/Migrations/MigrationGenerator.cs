@@ -439,400 +439,29 @@ public static class MigrationGenerator
             }
 
             // Generate migration scripts
-            StringBuilder phase0DropProcedures = new StringBuilder(); // DROP PROCEDURE statements
-            StringBuilder phase0DropSequences = new StringBuilder(); // DROP SEQUENCE statements
-            StringBuilder phase0DropFks = new StringBuilder(); // DROP FK constraints for tables that will be dropped
-            StringBuilder phase0DropTables = new StringBuilder(); // DROP TABLE statements
-            StringBuilder phase0DropPks = new StringBuilder(); // DROP PRIMARY KEY constraints
-            StringBuilder phase0_5Sequences = new StringBuilder(); // CREATE SEQUENCE statements (before tables)
-            StringBuilder phase1Tables = new StringBuilder(); // CREATE TABLE statements
-            StringBuilder phase2Columns = new StringBuilder(); // ALTER TABLE column modifications
-            StringBuilder phase3Constraints = new StringBuilder(); // ALTER TABLE FK constraints and PRIMARY KEY constraints
-            StringBuilder phase4Procedures = new StringBuilder(); // CREATE PROCEDURE statements (after constraints)
             StringBuilder downScript = new StringBuilder();
             downScript.AppendLine("-- Generated using Minfold, do not edit manually");
 
-            // Phase 0: Drop tables (drop FKs first, then tables)
-            // First, collect FKs from tables that will be dropped
-            foreach (string droppedTableName in diff.DroppedTableNames)
-            {
-                // Find the table schema from target schema to get its FKs
-                if (targetSchema.TryGetValue(droppedTableName.ToLowerInvariant(), out SqlTable? droppedTable))
-                {
-                    // Drop FKs for this table
-                    HashSet<string> processedFksDrop = new HashSet<string>();
-                    foreach (SqlTableColumn column in droppedTable.Columns.Values)
-                    {
-                        foreach (SqlForeignKey fk in column.ForeignKeys)
-                        {
-                            if (!processedFksDrop.Contains(fk.Name))
-                            {
-                                phase0DropFks.AppendLine(GenerateForeignKeys.GenerateDropForeignKeyStatement(fk));
-                                processedFksDrop.Add(fk.Name);
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // Then drop the tables themselves
-            foreach (string droppedTableName in diff.DroppedTableNames.OrderByDescending(t => t))
-            {
-                // Get schema from target schema (before migration)
-                string schema = "dbo";
-                if (targetSchema.TryGetValue(droppedTableName.ToLowerInvariant(), out SqlTable? droppedTable))
-                {
-                    schema = droppedTable.Schema;
-                }
-                phase0DropTables.AppendLine($"DROP TABLE IF EXISTS [{schema}].[{droppedTableName}];");
-            }
+            // Generate phases using dedicated phase generators
+            string phase0DropProceduresContent = GeneratePhase0DropProcedures.Generate(diff, targetProcedures);
+            string phase0DropSequencesContent = GeneratePhase0DropSequences.Generate(diff, targetSequences);
+            string phase0DropFksContent = GeneratePhase0DropForeignKeys.Generate(diff, targetSchema);
+            string phase0DropPksContent = GeneratePhase0DropPrimaryKeys.Generate(diff, targetSchema);
+            string phase0DropTablesContent = GeneratePhase0DropTables.Generate(diff, targetSchema);
+            string phase0_5SequencesContent = GeneratePhase0_5Sequences.Generate(diff);
+            string phase1TablesContent = GeneratePhase1Tables.Generate(diff);
+            string phase2ColumnsContent = GeneratePhase2Columns.Generate(
+                diff,
+                currentSchemaResult.Result ?? new ConcurrentDictionary<string, SqlTable>(StringComparer.OrdinalIgnoreCase),
+                targetSchema);
 
-            // Phase 1: Create new tables
-            foreach (SqlTable newTable in diff.NewTables.OrderBy(t => t.Name))
-            {
-                string createTableSql = GenerateTables.GenerateCreateTableStatement(newTable);
-                phase1Tables.AppendLine(createTableSql);
-                phase1Tables.AppendLine();
-            }
-
-            // Phase 0.5: Drop PRIMARY KEY constraints before column modifications
-            // Collect PK changes from modified tables
-            HashSet<string> tablesWithPkDropped = new HashSet<string>();
-            foreach (TableDiff tableDiff in diff.ModifiedTables.OrderBy(t => t.TableName))
-            {
-                // Check if any column is losing PK status
-                bool needsPkDropped = false;
-                foreach (ColumnChange change in tableDiff.ColumnChanges)
-                {
-                    if (change.OldColumn != null && change.OldColumn.IsPrimaryKey && 
-                        (change.ChangeType == ColumnChangeType.Drop || 
-                         (change.ChangeType == ColumnChangeType.Modify && change.NewColumn != null && !change.NewColumn.IsPrimaryKey)))
-                    {
-                        needsPkDropped = true;
-                        break;
-                    }
-                }
-                
-                if (needsPkDropped && !tablesWithPkDropped.Contains(tableDiff.TableName.ToLowerInvariant()))
-                {
-                    // Need to drop PK constraint before dropping/modifying the column
-                    // Get current PK columns from target schema to determine constraint name
-                    if (targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTable))
-                    {
-                        List<SqlTableColumn> pkColumns = targetTable.Columns.Values.Where(c => c.IsPrimaryKey).OrderBy(c => c.OrdinalPosition).ToList();
-                        if (pkColumns.Count > 0)
-                        {
-                            // Generate PK constraint name (SQL Server default pattern)
-                            string pkConstraintName = $"PK_{tableDiff.TableName}";
-                            phase0DropPks.AppendLine(GeneratePrimaryKeys.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, targetTable.Schema));
-                            tablesWithPkDropped.Add(tableDiff.TableName.ToLowerInvariant());
-                        }
-                    }
-                }
-            }
-
-            // Phase 2: Column modifications
-            foreach (TableDiff tableDiff in diff.ModifiedTables.OrderBy(t => t.TableName))
-            {
-                // Pass current schema (for dropping indexes) and target schema (for single-column detection)
-                string columnModifications = GenerateColumns.GenerateColumnModifications(
-                    tableDiff, 
-                    currentSchemaResult.Result ?? new ConcurrentDictionary<string, SqlTable>(StringComparer.OrdinalIgnoreCase),
-                    targetSchema);
-                if (!string.IsNullOrWhiteSpace(columnModifications))
-                {
-                    phase2Columns.Append(columnModifications);
-                    phase2Columns.AppendLine();
-                }
-            }
-
-            // Phase 3: Foreign key constraints
-            // Collect FK changes from modified tables
-            List<ForeignKeyChange> allFkChanges = new List<ForeignKeyChange>();
-            foreach (TableDiff tableDiff in diff.ModifiedTables)
-            {
-                allFkChanges.AddRange(tableDiff.ForeignKeyChanges);
-            }
-
-            // Group FK changes by constraint name for multi-column FKs
-            Dictionary<string, List<ForeignKeyChange>> fkGroups = new Dictionary<string, List<ForeignKeyChange>>();
-            foreach (ForeignKeyChange fkChange in allFkChanges)
-            {
-                string fkName = (fkChange.NewForeignKey ?? fkChange.OldForeignKey)?.Name ?? string.Empty;
-                if (!fkGroups.ContainsKey(fkName))
-                {
-                    fkGroups[fkName] = new List<ForeignKeyChange>();
-                }
-                fkGroups[fkName].Add(fkChange);
-            }
-
-            // Generate FK statements: Drop first, then Add
-            // Drop FKs that are being dropped or modified (need to drop old before adding new)
-            foreach (KeyValuePair<string, List<ForeignKeyChange>> fkGroup in fkGroups.OrderBy(g => g.Key))
-            {
-                ForeignKeyChange firstChange = fkGroup.Value[0];
-                if (firstChange.ChangeType == ForeignKeyChangeType.Drop && firstChange.OldForeignKey != null)
-                {
-                    phase3Constraints.AppendLine(GenerateForeignKeys.GenerateDropForeignKeyStatement(firstChange.OldForeignKey));
-                }
-                else if (firstChange.ChangeType == ForeignKeyChangeType.Modify && firstChange.OldForeignKey != null)
-                {
-                    // For modifications, drop the old FK before adding the new one
-                    phase3Constraints.AppendLine(GenerateForeignKeys.GenerateDropForeignKeyStatement(firstChange.OldForeignKey));
-                }
-            }
-
-            // Collect all FKs to be added (from new tables and modified tables)
-            // Use NOCHECK → CHECK pattern to handle circular dependencies and improve performance
-            List<(List<SqlForeignKey> FkGroup, bool WasNoCheck)> fksToAdd = new List<(List<SqlForeignKey>, bool)>();
-            HashSet<string> processedFks = new HashSet<string>();
-
-            // Add new FKs from new tables
-            foreach (SqlTable newTable in diff.NewTables)
-            {
-                foreach (SqlTableColumn column in newTable.Columns.Values)
-                {
-                    foreach (SqlForeignKey fk in column.ForeignKeys)
-                    {
-                        if (!processedFks.Contains(fk.Name))
-                        {
-                            List<SqlForeignKey> fkGroup = new List<SqlForeignKey> { fk };
-                            // Find other columns with same FK (multi-column FK)
-                            foreach (SqlTableColumn otherColumn in newTable.Columns.Values)
-                            {
-                                foreach (SqlForeignKey otherFk in otherColumn.ForeignKeys)
-                                {
-                                    if (otherFk.Name == fk.Name && otherFk.Table == fk.Table && otherFk != fk)
-                                    {
-                                        fkGroup.Add(otherFk);
-                                    }
-                                }
-                            }
-                            // Store original NotEnforced state
-                            bool wasNoCheck = fkGroup[0].NotEnforced;
-                            fksToAdd.Add((fkGroup, wasNoCheck));
-                            processedFks.Add(fk.Name);
-                        }
-                    }
-                }
-            }
-
-            // Add new/modified FKs from modified tables
-            foreach (ForeignKeyChange fkChange in allFkChanges.Where(c => c.ChangeType == ForeignKeyChangeType.Add || c.ChangeType == ForeignKeyChangeType.Modify))
-            {
-                if (fkChange.NewForeignKey != null && !processedFks.Contains(fkChange.NewForeignKey.Name))
-                {
-                    // Find all columns with this FK name
-                    TableDiff? tableDiff = diff.ModifiedTables.FirstOrDefault(t => t.TableName.Equals(fkChange.NewForeignKey.Table, StringComparison.OrdinalIgnoreCase));
-                    if (tableDiff != null)
-                    {
-                        // Group multi-column FKs
-                        List<SqlForeignKey> fkGroup = new List<SqlForeignKey> { fkChange.NewForeignKey };
-                        foreach (ForeignKeyChange otherFkChange in allFkChanges)
-                        {
-                            if (otherFkChange.NewForeignKey != null &&
-                                otherFkChange.NewForeignKey.Name == fkChange.NewForeignKey.Name &&
-                                otherFkChange.NewForeignKey.Table == fkChange.NewForeignKey.Table &&
-                                otherFkChange.NewForeignKey != fkChange.NewForeignKey)
-                            {
-                                fkGroup.Add(otherFkChange.NewForeignKey);
-                            }
-                        }
-                        // Store original NotEnforced state
-                        bool wasNoCheck = fkGroup[0].NotEnforced;
-                        fksToAdd.Add((fkGroup, wasNoCheck));
-                        processedFks.Add(fkChange.NewForeignKey.Name);
-                    }
-                }
-            }
-
-            // Create all FKs with NOCHECK first (avoids circular dependency issues and reduces lock time)
-            Dictionary<string, SqlTable> tablesDict = new Dictionary<string, SqlTable>(targetSchema);
-            foreach (var (fkGroup, wasNoCheck) in fksToAdd.OrderBy(g => g.FkGroup[0].Table).ThenBy(g => g.FkGroup[0].Name))
-            {
-                // Force NOCHECK during creation to avoid circular dependency issues
-                string fkSql = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, tablesDict, forceNoCheck: true);
-                phase3Constraints.Append(fkSql);
-                phase3Constraints.AppendLine();
-            }
-
-            // Restore CHECK state for FKs that weren't originally NOCHECK
-            // IMPORTANT: CHECK CONSTRAINT doesn't always restore is_not_trusted correctly after WITH NOCHECK
-            // So we need to drop and recreate the FK with WITH CHECK to ensure correct NotEnforced state
-            foreach (var (fkGroup, wasNoCheck) in fksToAdd.OrderBy(g => g.FkGroup[0].Table).ThenBy(g => g.FkGroup[0].Name))
-            {
-                if (!wasNoCheck)
-                {
-                    SqlForeignKey firstFk = fkGroup[0];
-                    // Drop the FK that was created with NOCHECK
-                    phase3Constraints.AppendLine($"ALTER TABLE [{firstFk.Schema}].[{firstFk.Table}] DROP CONSTRAINT [{firstFk.Name}];");
-                    
-                    // Recreate it with WITH CHECK to ensure correct NotEnforced state
-                    string fkSqlWithCheck = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, tablesDict, forceNoCheck: false);
-                    if (!string.IsNullOrEmpty(fkSqlWithCheck))
-                    {
-                        phase3Constraints.Append(fkSqlWithCheck);
-                        phase3Constraints.AppendLine();
-                    }
-                }
-            }
-
-            // Add PRIMARY KEY constraints for columns that are gaining PK status
-            // Get current schema (after modifications) to find new PK columns
-            ConcurrentDictionary<string, SqlTable> currentSchemaAfterChanges = MigrationSchemaSnapshot.ApplySchemaDiffToTarget(targetSchema, diff);
-            HashSet<string> tablesWithPkAdded = new HashSet<string>();
-            
-            foreach (TableDiff tableDiff in diff.ModifiedTables.OrderBy(t => t.TableName))
-            {
-                // Check if any columns are gaining PK status
-                bool hasNewPk = false;
-                foreach (ColumnChange change in tableDiff.ColumnChanges)
-                {
-                    if (change.NewColumn != null && change.NewColumn.IsPrimaryKey)
-                    {
-                        if (change.ChangeType == ColumnChangeType.Add || 
-                            (change.ChangeType == ColumnChangeType.Modify && change.OldColumn != null && !change.OldColumn.IsPrimaryKey))
-                        {
-                            hasNewPk = true;
-                            break;
-                        }
-                    }
-                }
-                
-                if (hasNewPk && !tablesWithPkAdded.Contains(tableDiff.TableName.ToLowerInvariant()))
-                {
-                    // Get all PK columns from the new schema (after changes)
-                    if (currentSchemaAfterChanges.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? newTable))
-                    {
-                        List<SqlTableColumn> allPkColumns = newTable.Columns.Values.Where(c => c.IsPrimaryKey).OrderBy(c => c.OrdinalPosition).ToList();
-                        if (allPkColumns.Count > 0)
-                        {
-                            List<string> pkColumnNames = allPkColumns.Select(c => c.Name).ToList();
-                            string pkConstraintName = $"PK_{tableDiff.TableName}";
-                            phase3Constraints.Append(GeneratePrimaryKeys.GenerateAddPrimaryKeyStatement(tableDiff.TableName, pkColumnNames, pkConstraintName, newTable.Schema));
-                            tablesWithPkAdded.Add(tableDiff.TableName.ToLowerInvariant());
-                        }
-                    }
-                }
-            }
-
-            // Add PRIMARY KEY constraints for new tables (already included in CREATE TABLE, but handle separately if needed)
-            foreach (SqlTable newTable in diff.NewTables)
-            {
-                List<SqlTableColumn> pkColumns = newTable.Columns.Values.Where(c => c.IsPrimaryKey).OrderBy(c => c.OrdinalPosition).ToList();
-                // PKs for new tables are already in CREATE TABLE statement, so we don't need to add them here
-            }
-
-            // Phase 3.5: Handle index changes (drop modified/dropped indexes, add new/modified indexes)
-            // Drop indexes that are being dropped or modified (need to drop old before adding new)
-            foreach (TableDiff tableDiff in diff.ModifiedTables.OrderBy(t => t.TableName))
-            {
-                foreach (IndexChange indexChange in tableDiff.IndexChanges)
-                {
-                    if (indexChange.ChangeType == IndexChangeType.Drop && indexChange.OldIndex != null)
-                    {
-                        phase3Constraints.AppendLine(GenerateIndexes.GenerateDropIndexStatement(indexChange.OldIndex));
-                    }
-                    else if (indexChange.ChangeType == IndexChangeType.Modify && indexChange.OldIndex != null)
-                    {
-                        // For modifications, drop the old index before adding the new one
-                        phase3Constraints.AppendLine(GenerateIndexes.GenerateDropIndexStatement(indexChange.OldIndex));
-                    }
-                }
-            }
-
-            // Add indexes for new tables
-            foreach (SqlTable newTable in diff.NewTables)
-            {
-                foreach (SqlIndex index in newTable.Indexes)
-                {
-                    phase3Constraints.Append(GenerateIndexes.GenerateCreateIndexStatement(index));
-                    phase3Constraints.AppendLine();
-                }
-            }
-
-            // Add new/modified indexes from modified tables
-            foreach (TableDiff tableDiff in diff.ModifiedTables.OrderBy(t => t.TableName))
-            {
-                foreach (IndexChange indexChange in tableDiff.IndexChanges.Where(c => c.ChangeType == IndexChangeType.Add || c.ChangeType == IndexChangeType.Modify))
-                {
-                    if (indexChange.NewIndex != null)
-                    {
-                        phase3Constraints.Append(GenerateIndexes.GenerateCreateIndexStatement(indexChange.NewIndex));
-                        phase3Constraints.AppendLine();
-                    }
-                }
-            }
-
-            // Phase 0: Drop sequences that are being dropped (before dropping tables)
-            foreach (string droppedSequenceName in diff.DroppedSequenceNames.OrderByDescending(s => s))
-            {
-                // Get schema from target schema (before migration)
-                string schema = "dbo";
-                if (targetSequences.TryGetValue(droppedSequenceName.ToLowerInvariant(), out SqlSequence? droppedSequence))
-                {
-                    schema = droppedSequence.Schema;
-                }
-                phase0DropSequences.Append(GenerateSequences.GenerateDropSequenceStatement(droppedSequenceName, schema));
-                phase0DropSequences.AppendLine();
-            }
-            
-            // Phase 0: Drop procedures that are being dropped or modified (before dropping tables)
-            foreach (string droppedProcedureName in diff.DroppedProcedureNames.OrderByDescending(p => p))
-            {
-                // Get schema from target schema (before migration)
-                string schema = "dbo";
-                if (targetProcedures.TryGetValue(droppedProcedureName.ToLowerInvariant(), out SqlStoredProcedure? droppedProcedure))
-                {
-                    schema = droppedProcedure.Schema;
-                }
-                phase0DropProcedures.Append(GenerateProcedures.GenerateDropProcedureStatement(droppedProcedureName, schema));
-                phase0DropProcedures.AppendLine();
-            }
-            
-            // Note: Modified sequences are handled in Phase 0.5 via GenerateAlterSequenceStatement which drops and recreates
-            
-            foreach (ProcedureChange procedureChange in diff.ModifiedProcedures)
-            {
-                if (procedureChange.ChangeType == ProcedureChangeType.Modify && procedureChange.OldProcedure != null)
-                {
-                    // For modifications, drop the old procedure before creating the new one
-                    phase0DropProcedures.Append(GenerateProcedures.GenerateDropProcedureStatement(procedureChange.OldProcedure.Name, procedureChange.OldProcedure.Schema));
-                    phase0DropProcedures.AppendLine();
-                }
-            }
-
-            // Phase 0.5: Create sequences (before tables, so they can be used in table defaults)
-            foreach (SqlSequence newSequence in diff.NewSequences.OrderBy(s => s.Name))
-            {
-                phase0_5Sequences.Append(GenerateSequences.GenerateCreateSequenceStatement(newSequence));
-                phase0_5Sequences.AppendLine();
-            }
-            foreach (SequenceChange sequenceChange in diff.ModifiedSequences)
-            {
-                if (sequenceChange.ChangeType == SequenceChangeType.Modify && sequenceChange.NewSequence != null)
-                {
-                    // For modifications, drop and recreate (handled by GenerateAlterSequenceStatement)
-                    phase0_5Sequences.Append(GenerateSequences.GenerateAlterSequenceStatement(sequenceChange.OldSequence!, sequenceChange.NewSequence));
-                    phase0_5Sequences.AppendLine();
-                }
-            }
-
-            // Phase 4: Create procedures (after constraints)
-            foreach (SqlStoredProcedure newProcedure in diff.NewProcedures.OrderBy(p => p.Name))
-            {
-                phase4Procedures.Append(GenerateProcedures.GenerateCreateProcedureStatement(newProcedure));
-                phase4Procedures.AppendLine();
-            }
-            foreach (ProcedureChange procedureChange in diff.ModifiedProcedures)
-            {
-                if (procedureChange.ChangeType == ProcedureChangeType.Modify && procedureChange.NewProcedure != null)
-                {
-                    // For modifications, create the new procedure (old one was already dropped in phase 0)
-                    phase4Procedures.Append(GenerateProcedures.GenerateCreateProcedureStatement(procedureChange.NewProcedure));
-                    phase4Procedures.AppendLine();
-                }
-            }
+            // Generate remaining phases
+            string phase3ConstraintsContent = GeneratePhase3Constraints.Generate(diff, targetSchema);
+            string phase3_5ColumnReorderContent = GeneratePhase3_5ColumnReorder.Generate(
+                upDiff,
+                targetSchema,
+                currentSchemaResult.Result);
+            string phase4ProceduresContent = GeneratePhase4Procedures.Generate(diff);
 
             // Generate down script using downDiff (reverse of upDiff)
             // Transaction is managed by MigrationApplier.ExecuteMigrationScript using ADO.NET transactions
@@ -1001,62 +630,293 @@ public static class MigrationGenerator
             }
 
             // Reverse FK changes
-            // For Modify: drop the new FK and add back the old FK
+            // Collect FK changes from modified tables for down script
+            List<ForeignKeyChange> allFkChanges = new List<ForeignKeyChange>();
+            foreach (TableDiff tableDiff in diff.ModifiedTables)
+            {
+                allFkChanges.AddRange(tableDiff.ForeignKeyChanges);
+            }
+            
+            // Also collect FKs from dropped tables (they need to be dropped before the table is dropped)
+            // When a table is dropped, FKs referencing it are also dropped, but FKs ON the dropped table need to be dropped first
+            foreach (string droppedTableName in diff.DroppedTableNames)
+            {
+                if (currentSchemaResult.Result != null && 
+                    currentSchemaResult.Result.TryGetValue(droppedTableName.ToLowerInvariant(), out SqlTable? droppedTable))
+                {
+                    foreach (SqlTableColumn column in droppedTable.Columns.Values)
+                    {
+                        foreach (SqlForeignKey fk in column.ForeignKeys)
+                        {
+                            // Add as a Drop change (FK exists in current schema but will be dropped)
+                            allFkChanges.Add(new ForeignKeyChange(ForeignKeyChangeType.Drop, fk, null));
+                        }
+                    }
+                }
+            }
+            
+            // Also collect FKs that reference dropped tables (they need to be dropped before the referenced table is dropped)
+            foreach (string droppedTableName in diff.DroppedTableNames)
+            {
+                foreach (TableDiff tableDiff in diff.ModifiedTables)
+                {
+                    foreach (SqlTableColumn column in (currentSchemaResult.Result?[tableDiff.TableName.ToLowerInvariant()]?.Columns.Values ?? Enumerable.Empty<SqlTableColumn>()))
+                    {
+                        foreach (SqlForeignKey fk in column.ForeignKeys)
+                        {
+                            if (fk.RefTable.Equals(droppedTableName, StringComparison.OrdinalIgnoreCase))
+                            {
+                                // FK references a dropped table, need to drop it
+                                if (!allFkChanges.Any(c => c.OldForeignKey?.Name == fk.Name && c.OldForeignKey?.Table == fk.Table))
+                                {
+                                    allFkChanges.Add(new ForeignKeyChange(ForeignKeyChangeType.Drop, fk, null));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            MigrationLogger.Log($"\n=== FK Changes for down script ===");
+            MigrationLogger.Log($"Total FK changes: {allFkChanges.Count}");
+            foreach (var fkChange in allFkChanges)
+            {
+                MigrationLogger.Log($"  ChangeType: {fkChange.ChangeType}, FK: {fkChange.OldForeignKey?.Name ?? fkChange.NewForeignKey?.Name ?? "null"}");
+            }
+            
+            // Drop FKs that need to be dropped or modified
+            // For Modify: drop the new FK (current state after migration)
             foreach (ForeignKeyChange fkChange in allFkChanges.Where(c => c.ChangeType == ForeignKeyChangeType.Modify))
             {
                 if (fkChange.NewForeignKey != null)
                 {
+                    MigrationLogger.Log($"  [DROP FK] {fkChange.NewForeignKey.Name} (Modify)");
                     downScript.AppendLine(GenerateForeignKeys.GenerateDropForeignKeyStatement(fkChange.NewForeignKey));
-                }
-                if (fkChange.OldForeignKey != null)
-                {
-                    // Group multi-column FKs for the old FK
-                    List<SqlForeignKey> fkGroup = new List<SqlForeignKey> { fkChange.OldForeignKey };
-                    foreach (ForeignKeyChange otherFkChange in allFkChanges)
-                    {
-                        if (otherFkChange.OldForeignKey != null &&
-                            otherFkChange.OldForeignKey.Name == fkChange.OldForeignKey.Name &&
-                            otherFkChange.OldForeignKey.Table == fkChange.OldForeignKey.Table &&
-                            otherFkChange.OldForeignKey != fkChange.OldForeignKey)
-                        {
-                            fkGroup.Add(otherFkChange.OldForeignKey);
-                        }
-                    }
-                    string fkSql = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchema));
-                    downScript.Append(fkSql);
-                    downScript.AppendLine();
                 }
             }
             
-            // Drop added FKs
+            // Drop added FKs (were added by migration, need to drop in down script)
             foreach (ForeignKeyChange fkChange in allFkChanges.Where(c => c.ChangeType == ForeignKeyChangeType.Add))
             {
                 if (fkChange.NewForeignKey != null)
                 {
+                    MigrationLogger.Log($"  [DROP FK] {fkChange.NewForeignKey.Name} (Add)");
                     downScript.AppendLine(GenerateForeignKeys.GenerateDropForeignKeyStatement(fkChange.NewForeignKey));
                 }
             }
             
-            // Add back dropped FKs
+            // Drop FKs that reference dropped tables (must be dropped before the referenced table)
             foreach (ForeignKeyChange fkChange in allFkChanges.Where(c => c.ChangeType == ForeignKeyChangeType.Drop))
             {
                 if (fkChange.OldForeignKey != null)
                 {
-                    // Group multi-column FKs
-                    List<SqlForeignKey> fkGroup = new List<SqlForeignKey> { fkChange.OldForeignKey };
+                    // Check if this FK references a dropped table
+                    bool referencesDroppedTable = diff.DroppedTableNames.Any(name => 
+                        name.Equals(fkChange.OldForeignKey.RefTable, StringComparison.OrdinalIgnoreCase));
+                    
+                    if (referencesDroppedTable)
+                    {
+                        MigrationLogger.Log($"  [DROP FK] {fkChange.OldForeignKey.Name} (references dropped table {fkChange.OldForeignKey.RefTable})");
+                        downScript.AppendLine(GenerateForeignKeys.GenerateDropForeignKeyStatement(fkChange.OldForeignKey));
+                    }
+                }
+            }
+            
+            // Collect all FKs to be restored (from Modify and Drop changes)
+            // Use NOCHECK → CHECK pattern to handle circular dependencies and preserve NotEnforced state
+            // IMPORTANT: Get the original FK state from targetSchema (before migration), not from OldForeignKey (after migration)
+            // IMPORTANT: Only restore FKs that existed before the migration (Modify/Drop), NOT FKs that were added (Add)
+            List<(List<SqlForeignKey> FkGroup, bool WasNoCheck)> fksToRestore = new List<(List<SqlForeignKey>, bool)>();
+            HashSet<string> processedFksDown = new HashSet<string>();
+            
+            // Track FKs that were added (should NOT be restored, only dropped)
+            HashSet<string> addedFkNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (ForeignKeyChange fkChange in allFkChanges.Where(c => c.ChangeType == ForeignKeyChangeType.Add))
+            {
+                if (fkChange.NewForeignKey != null)
+                {
+                    addedFkNames.Add(fkChange.NewForeignKey.Name);
+                }
+            }
+            
+            // Collect FKs from Modify changes (restore old FK)
+            foreach (ForeignKeyChange fkChange in allFkChanges.Where(c => c.ChangeType == ForeignKeyChangeType.Modify))
+            {
+                if (fkChange.OldForeignKey != null && 
+                    !processedFksDown.Contains(fkChange.OldForeignKey.Name) &&
+                    !addedFkNames.Contains(fkChange.OldForeignKey.Name))
+                {
+                    // Get the original FK from targetSchema to get correct NotEnforced state
+                    // IMPORTANT: If FK doesn't exist in targetSchema, it was added in the up migration and shouldn't be restored
+                    SqlForeignKey? originalFk = null;
+                    if (targetSchema.TryGetValue(fkChange.OldForeignKey.Table.ToLowerInvariant(), out SqlTable? targetTable))
+                    {
+                        foreach (SqlTableColumn column in targetTable.Columns.Values)
+                        {
+                            foreach (SqlForeignKey fk in column.ForeignKeys)
+                            {
+                                if (fk.Name.Equals(fkChange.OldForeignKey.Name, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    originalFk = fk;
+                                    break;
+                                }
+                            }
+                            if (originalFk != null) break;
+                        }
+                    }
+                    
+                    // Skip if FK doesn't exist in targetSchema (it was added in the up migration, not modified)
+                    if (originalFk == null)
+                    {
+                        continue;
+                    }
+                    
+                    // Use original FK from targetSchema if found, otherwise fall back to OldForeignKey
+                    SqlForeignKey fkToUse = originalFk ?? fkChange.OldForeignKey;
+                    
+                    // Group multi-column FKs (ensure no duplicate columns)
+                    List<SqlForeignKey> fkGroup = new List<SqlForeignKey> { fkToUse };
+                    HashSet<string> addedColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { fkToUse.Column };
                     foreach (ForeignKeyChange otherFkChange in allFkChanges)
                     {
                         if (otherFkChange.OldForeignKey != null &&
                             otherFkChange.OldForeignKey.Name == fkChange.OldForeignKey.Name &&
                             otherFkChange.OldForeignKey.Table == fkChange.OldForeignKey.Table &&
-                            otherFkChange.OldForeignKey != fkChange.OldForeignKey)
+                            !addedColumns.Contains(otherFkChange.OldForeignKey.Column))
                         {
-                            fkGroup.Add(otherFkChange.OldForeignKey);
+                            // Try to get original FK for this one too
+                            SqlForeignKey? otherOriginalFk = null;
+                            if (targetSchema.TryGetValue(otherFkChange.OldForeignKey.Table.ToLowerInvariant(), out SqlTable? otherTargetTable))
+                            {
+                                foreach (SqlTableColumn column in otherTargetTable.Columns.Values)
+                                {
+                                    foreach (SqlForeignKey fk in column.ForeignKeys)
+                                    {
+                                        if (fk.Name.Equals(otherFkChange.OldForeignKey.Name, StringComparison.OrdinalIgnoreCase) &&
+                                            fk.Column.Equals(otherFkChange.OldForeignKey.Column, StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            otherOriginalFk = fk;
+                                            break;
+                                        }
+                                    }
+                                    if (otherOriginalFk != null) break;
+                                }
+                            }
+                            SqlForeignKey fkToAdd = otherOriginalFk ?? otherFkChange.OldForeignKey;
+                            fkGroup.Add(fkToAdd);
+                            addedColumns.Add(fkToAdd.Column);
                         }
                     }
-                    string fkSql = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchema));
-                    downScript.Append(fkSql);
-                    downScript.AppendLine();
+                    // Store original NotEnforced state from targetSchema FK
+                    bool wasNoCheck = fkGroup[0].NotEnforced;
+                    fksToRestore.Add((fkGroup, wasNoCheck));
+                    processedFksDown.Add(fkChange.OldForeignKey.Name);
+                }
+            }
+            
+            // Collect FKs from Drop changes (restore dropped FK)
+            foreach (ForeignKeyChange fkChange in allFkChanges.Where(c => c.ChangeType == ForeignKeyChangeType.Drop))
+            {
+                if (fkChange.OldForeignKey != null && 
+                    !processedFksDown.Contains(fkChange.OldForeignKey.Name) &&
+                    !addedFkNames.Contains(fkChange.OldForeignKey.Name))
+                {
+                    // Get the original FK from targetSchema to get correct NotEnforced state
+                    // IMPORTANT: If FK doesn't exist in targetSchema, it was added in the up migration and shouldn't be restored
+                    SqlForeignKey? originalFk = null;
+                    if (targetSchema.TryGetValue(fkChange.OldForeignKey.Table.ToLowerInvariant(), out SqlTable? targetTable))
+                    {
+                        foreach (SqlTableColumn column in targetTable.Columns.Values)
+                        {
+                            foreach (SqlForeignKey fk in column.ForeignKeys)
+                            {
+                                if (fk.Name.Equals(fkChange.OldForeignKey.Name, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    originalFk = fk;
+                                    break;
+                                }
+                            }
+                            if (originalFk != null) break;
+                        }
+                    }
+                    
+                    // Skip if FK doesn't exist in targetSchema (it was added in the up migration, not dropped)
+                    if (originalFk == null)
+                    {
+                        continue;
+                    }
+                    
+                    // Use original FK from targetSchema if found, otherwise fall back to OldForeignKey
+                    SqlForeignKey fkToUse = originalFk ?? fkChange.OldForeignKey;
+                    
+                    // Group multi-column FKs (ensure no duplicate columns)
+                    List<SqlForeignKey> fkGroup = new List<SqlForeignKey> { fkToUse };
+                    HashSet<string> addedColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { fkToUse.Column };
+                    foreach (ForeignKeyChange otherFkChange in allFkChanges)
+                    {
+                        if (otherFkChange.OldForeignKey != null &&
+                            otherFkChange.OldForeignKey.Name == fkChange.OldForeignKey.Name &&
+                            otherFkChange.OldForeignKey.Table == fkChange.OldForeignKey.Table &&
+                            !addedColumns.Contains(otherFkChange.OldForeignKey.Column))
+                        {
+                            // Try to get original FK for this one too
+                            SqlForeignKey? otherOriginalFk = null;
+                            if (targetSchema.TryGetValue(otherFkChange.OldForeignKey.Table.ToLowerInvariant(), out SqlTable? otherTargetTable))
+                            {
+                                foreach (SqlTableColumn column in otherTargetTable.Columns.Values)
+                                {
+                                    foreach (SqlForeignKey fk in column.ForeignKeys)
+                                    {
+                                        if (fk.Name.Equals(otherFkChange.OldForeignKey.Name, StringComparison.OrdinalIgnoreCase) &&
+                                            fk.Column.Equals(otherFkChange.OldForeignKey.Column, StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            otherOriginalFk = fk;
+                                            break;
+                                        }
+                                    }
+                                    if (otherOriginalFk != null) break;
+                                }
+                            }
+                            SqlForeignKey fkToAdd = otherOriginalFk ?? otherFkChange.OldForeignKey;
+                            fkGroup.Add(fkToAdd);
+                            addedColumns.Add(fkToAdd.Column);
+                        }
+                    }
+                    // Store original NotEnforced state from targetSchema FK
+                    bool wasNoCheck = fkGroup[0].NotEnforced;
+                    fksToRestore.Add((fkGroup, wasNoCheck));
+                    processedFksDown.Add(fkChange.OldForeignKey.Name);
+                }
+            }
+            
+            // Create all FKs with NOCHECK first (avoids circular dependency issues and reduces lock time)
+            Dictionary<string, SqlTable> tablesDictDown = new Dictionary<string, SqlTable>(targetSchema);
+            foreach (var (fkGroup, wasNoCheck) in fksToRestore.OrderBy(g => g.FkGroup[0].Table).ThenBy(g => g.FkGroup[0].Name))
+            {
+                // Force NOCHECK during creation to avoid circular dependency issues
+                string fkSql = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, tablesDictDown, forceNoCheck: true);
+                downScript.Append(fkSql);
+                downScript.AppendLine();
+            }
+            
+            // Restore CHECK state for FKs that weren't originally NOCHECK
+            // IMPORTANT: CHECK CONSTRAINT doesn't always restore is_not_trusted correctly after WITH NOCHECK
+            // So we need to drop and recreate the FK with WITH CHECK to ensure correct NotEnforced state
+            foreach (var (fkGroup, wasNoCheck) in fksToRestore.OrderBy(g => g.FkGroup[0].Table).ThenBy(g => g.FkGroup[0].Name))
+            {
+                if (!wasNoCheck)
+                {
+                    SqlForeignKey firstFk = fkGroup[0];
+                    // Drop the FK that was created with NOCHECK
+                    downScript.AppendLine($"ALTER TABLE [{firstFk.Schema}].[{firstFk.Table}] DROP CONSTRAINT [{firstFk.Name}];");
+                    
+                    // Recreate it with WITH CHECK to ensure correct NotEnforced state
+                    string fkSqlWithCheck = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, tablesDictDown, forceNoCheck: false);
+                    if (!string.IsNullOrEmpty(fkSqlWithCheck))
+                    {
+                        downScript.Append(fkSqlWithCheck);
+                        downScript.AppendLine();
+                    }
                 }
             }
 
@@ -1757,414 +1617,62 @@ public static class MigrationGenerator
 
             downScript.AppendLine();
 
-            // Build up script with phases
-            // Transaction is managed by MigrationApplier.ExecuteMigrationScript using ADO.NET transactions
-            StringBuilder upScript = new StringBuilder();
-            upScript.AppendLine("-- Generated using Minfold, do not edit manually");
-            upScript.AppendLine("SET XACT_ABORT ON;");
-            upScript.AppendLine();
-
+            // Build up script using phase generators
+            List<PhaseContent> phases = new List<PhaseContent>();
             int phaseNumber = 1;
-
-            // Phase 0: Drop Procedures (before dropping tables)
-            string phase0DropProceduresContent = phase0DropProcedures.ToString().Trim();
-            if (!string.IsNullOrEmpty(phase0DropProceduresContent))
-            {
-                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Drop Stored Procedures"));
-                upScript.AppendLine(phase0DropProceduresContent);
-                upScript.AppendLine();
-                phaseNumber++;
-            }
-
-            // Phase 0: Drop Sequences (before dropping tables)
-            string phase0DropSequencesContent = phase0DropSequences.ToString().Trim();
-            if (!string.IsNullOrEmpty(phase0DropSequencesContent))
-            {
-                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Drop Sequences"));
-                upScript.AppendLine(phase0DropSequencesContent);
-                upScript.AppendLine();
-                phaseNumber++;
-            }
-
-            // Phase 0: Drop Foreign Keys for tables that will be dropped
-            string phase0DropFksContent = phase0DropFks.ToString().Trim();
-            if (!string.IsNullOrEmpty(phase0DropFksContent))
-            {
-                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Drop Foreign Keys"));
-                upScript.AppendLine(phase0DropFksContent);
-                upScript.AppendLine();
-                phaseNumber++;
-            }
-
-            // Phase 0: Drop Primary Key Constraints (before column modifications)
-            string phase0DropPksContent = phase0DropPks.ToString().Trim();
-            if (!string.IsNullOrEmpty(phase0DropPksContent))
-            {
-                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Drop Primary Key Constraints"));
-                upScript.AppendLine(phase0DropPksContent);
-                upScript.AppendLine();
-                phaseNumber++;
-            }
-
-            // Phase 0: Drop Tables
-            string phase0DropTablesContent = phase0DropTables.ToString().Trim();
-            if (!string.IsNullOrEmpty(phase0DropTablesContent))
-            {
-                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Drop Tables"));
-                upScript.AppendLine(phase0DropTablesContent);
-                upScript.AppendLine();
-                phaseNumber++;
-            }
-
-            // Phase 0.5: Create Sequences (before tables, so they can be used in table defaults)
-            string phase0_5SequencesContent = phase0_5Sequences.ToString().Trim();
-            if (!string.IsNullOrEmpty(phase0_5SequencesContent))
-            {
-                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Create Sequences"));
-                upScript.AppendLine(phase0_5SequencesContent);
-                upScript.AppendLine();
-                phaseNumber++;
-            }
-
-            // Phase 1: Create Tables
-            string phase1Content = phase1Tables.ToString().Trim();
-            if (!string.IsNullOrEmpty(phase1Content))
-            {
-                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Create Tables"));
-                upScript.AppendLine(phase1Content);
-                upScript.AppendLine();
-                phaseNumber++;
-            }
-
-            // Phase 2: Modify Columns
-            string phase2Content = phase2Columns.ToString().Trim();
-            if (!string.IsNullOrEmpty(phase2Content))
-            {
-                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Modify Columns"));
-                upScript.AppendLine(phase2Content);
-                upScript.AppendLine();
-                phaseNumber++;
-            }
-
-            // Phase 3: Add Foreign Key Constraints and Primary Key Constraints
-            string phase3Content = phase3Constraints.ToString().Trim();
-            if (!string.IsNullOrEmpty(phase3Content))
-            {
-                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Add Foreign Key Constraints and Primary Key Constraints"));
-                upScript.AppendLine(phase3Content);
-                upScript.AppendLine();
-                phaseNumber++;
-            }
-
-            // Phase 3.5: Reorder columns to match current schema order (after all column operations and constraints)
-            // Compare actual database column order (after Phase 2) with desired order
-            // Desired order: current schema order (the state we're migrating TO, which has the correct order)
-            StringBuilder phase3_5ColumnReorder = new StringBuilder();
             
-            // Calculate schema after all column changes (this is what the database looks like after Phase 2)
-            MigrationLogger.Log($"\n=== Computing schemaAfterAllColumnChanges ===");
-            MigrationLogger.Log($"  upDiff.ModifiedTables.Count: {upDiff.ModifiedTables.Count}");
-            foreach (TableDiff tableDiff in upDiff.ModifiedTables)
+            if (!string.IsNullOrWhiteSpace(phase0DropProceduresContent))
             {
-                MigrationLogger.Log($"  Table: {tableDiff.TableName}, ColumnChanges.Count: {tableDiff.ColumnChanges.Count}");
-                foreach (ColumnChange change in tableDiff.ColumnChanges)
-                {
-                    MigrationLogger.Log($"    ChangeType: {change.ChangeType}, Column: {change.OldColumn?.Name ?? change.NewColumn?.Name ?? "null"}");
-                }
+                phases.Add(new PhaseContent(phaseNumber++, "Drop Stored Procedures", phase0DropProceduresContent));
             }
-            // IMPORTANT: The diff passed here might not include Drop operations if they were already processed.
-            // We need to ensure schemaAfterAllColumnChanges reflects the state AFTER Phase 2, which means:
-            // - Columns that were dropped should NOT be in the result
-            // - Columns that were added should be in the result
-            // - Columns that were modified should reflect their new state
-            // 
-            // If the diff doesn't have Drop operations, we need to manually remove columns that are being dropped
-            // by checking the actual ColumnChanges in the diff.
-            // Filter out Drop operations from upDiff when computing schemaAfterAllColumnChanges for the up script
-            // Drop operations are for the down script (reversing the migration), not for the up script
-            // We only want to process Add and Modify operations to get the state after Phase 2
-            SchemaDiff upDiffFiltered = new SchemaDiff(
-                upDiff.NewTables,
-                upDiff.DroppedTableNames,
-                upDiff.ModifiedTables.Select(td => new TableDiff(
-                    td.TableName,
-                    td.ColumnChanges.Where(c => c.ChangeType != ColumnChangeType.Drop).ToList(),
-                    td.ForeignKeyChanges,
-                    td.IndexChanges
-                )).ToList(),
-                upDiff.NewSequences,
-                upDiff.DroppedSequenceNames,
-                upDiff.ModifiedSequences,
-                upDiff.NewProcedures,
-                upDiff.DroppedProcedureNames,
-                upDiff.ModifiedProcedures
-            );
-            
-            MigrationLogger.Log($"  Filtered upDiffFiltered.ModifiedTables.Count: {upDiffFiltered.ModifiedTables.Count}");
-            foreach (TableDiff tableDiff in upDiffFiltered.ModifiedTables)
+            if (!string.IsNullOrWhiteSpace(phase0DropSequencesContent))
             {
-                MigrationLogger.Log($"  Table: {tableDiff.TableName}, ColumnChanges.Count (after filtering): {tableDiff.ColumnChanges.Count}");
-                foreach (ColumnChange change in tableDiff.ColumnChanges)
-                {
-                    MigrationLogger.Log($"    ChangeType: {change.ChangeType}, Column: {change.OldColumn?.Name ?? change.NewColumn?.Name ?? "null"}");
-                }
+                phases.Add(new PhaseContent(phaseNumber++, "Drop Sequences", phase0DropSequencesContent));
+            }
+            if (!string.IsNullOrWhiteSpace(phase0DropFksContent))
+            {
+                phases.Add(new PhaseContent(phaseNumber++, "Drop Foreign Keys", phase0DropFksContent));
+            }
+            if (!string.IsNullOrWhiteSpace(phase0DropPksContent))
+            {
+                phases.Add(new PhaseContent(phaseNumber++, "Drop Primary Key Constraints", phase0DropPksContent));
+            }
+            if (!string.IsNullOrWhiteSpace(phase0DropTablesContent))
+            {
+                phases.Add(new PhaseContent(phaseNumber++, "Drop Tables", phase0DropTablesContent));
+            }
+            if (!string.IsNullOrWhiteSpace(phase0_5SequencesContent))
+            {
+                phases.Add(new PhaseContent(phaseNumber++, "Create Sequences", phase0_5SequencesContent));
+            }
+            if (!string.IsNullOrWhiteSpace(phase1TablesContent))
+            {
+                phases.Add(new PhaseContent(phaseNumber++, "Create Tables", phase1TablesContent));
+            }
+            if (!string.IsNullOrWhiteSpace(phase2ColumnsContent))
+            {
+                phases.Add(new PhaseContent(phaseNumber++, "Modify Columns", phase2ColumnsContent));
+            }
+            if (!string.IsNullOrWhiteSpace(phase3ConstraintsContent))
+            {
+                phases.Add(new PhaseContent(phaseNumber++, "Add Foreign Key Constraints and Primary Key Constraints", phase3ConstraintsContent));
+            }
+            if (!string.IsNullOrWhiteSpace(phase3_5ColumnReorderContent))
+            {
+                phases.Add(new PhaseContent(phaseNumber++, "Reorder Columns", phase3_5ColumnReorderContent));
+            }
+            if (!string.IsNullOrWhiteSpace(phase4ProceduresContent))
+            {
+                phases.Add(new PhaseContent(phaseNumber++, "Create Stored Procedures", phase4ProceduresContent));
             }
             
-            ConcurrentDictionary<string, SqlTable> schemaAfterAllColumnChanges = MigrationSchemaSnapshot.ApplySchemaDiffToTarget(targetSchema, upDiffFiltered);
-            
-            // Double-check: if upDiffFiltered has Drop operations but ApplySchemaDiffToTarget didn't remove them,
-            // manually remove them now. Also, if targetSchema has columns that currentSchema doesn't have,
-            // those columns were dropped, so remove them from schemaAfterAllColumnChanges.
-            // NOTE: We use upDiffFiltered (not diff) because we've already filtered out Drop operations
-            foreach (TableDiff tableDiff in upDiffFiltered.ModifiedTables)
-            {
-                if (schemaAfterAllColumnChanges.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? table))
-                {
-                    HashSet<string> droppedColumnNames = tableDiff.ColumnChanges
-                        .Where(c => c.ChangeType == ColumnChangeType.Drop && c.OldColumn != null)
-                        .Select(c => c.OldColumn!.Name.ToLowerInvariant())
-                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                    
-                    // Also check: if targetSchema has columns that currentSchema doesn't have, those were dropped
-                    // BUT: Only do this check if the diff actually has Drop operations, to avoid false positives
-                    // when comparing schemas that are in different states (e.g., during up vs down script generation)
-                    if (droppedColumnNames.Count == 0 && 
-                        targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTable) &&
-                        currentSchemaResult.Result != null &&
-                        currentSchemaResult.Result.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? currentTable))
-                    {
-                        // Only check for dropped columns if the diff doesn't already have Drop operations
-                        // This prevents false positives when comparing schemas in different states
-                        foreach (string targetColName in targetTable.Columns.Keys)
-                        {
-                            if (!currentTable.Columns.ContainsKey(targetColName))
-                            {
-                                // Column exists in targetSchema but not in currentSchema - it was dropped
-                                // But only add it if it's not already being added by the diff
-                                bool isBeingAdded = tableDiff.ColumnChanges.Any(c => 
-                                    c.ChangeType == ColumnChangeType.Add && 
-                                    c.NewColumn != null &&
-                                    c.NewColumn.Name.Equals(targetColName, StringComparison.OrdinalIgnoreCase));
-                                
-                                if (!isBeingAdded)
-                                {
-                                    droppedColumnNames.Add(targetColName);
-                                }
-                            }
-                        }
-                    }
-                    
-                    if (droppedColumnNames.Count > 0)
-                    {
-                        MigrationLogger.Log($"  Manually removing dropped columns from {tableDiff.TableName}: [{string.Join(", ", droppedColumnNames)}]");
-                        Dictionary<string, SqlTableColumn> newColumns = new Dictionary<string, SqlTableColumn>(table.Columns);
-                        foreach (string droppedCol in droppedColumnNames)
-                        {
-                            newColumns.Remove(droppedCol);
-                        }
-                        schemaAfterAllColumnChanges[tableDiff.TableName.ToLowerInvariant()] = new SqlTable(table.Name, newColumns, table.Indexes, table.Schema);
-                    }
-                }
-            }
-            
-            MigrationLogger.Log($"  schemaAfterAllColumnChanges tables: [{string.Join(", ", schemaAfterAllColumnChanges.Keys)}]");
-            foreach (var kvp in schemaAfterAllColumnChanges)
-            {
-                MigrationLogger.Log($"    {kvp.Key}: columns=[{string.Join(", ", kvp.Value.Columns.Values.OrderBy(c => c.OrdinalPosition).Select(c => c.Name))}]");
-            }
-            
-            // Build a complete schema dictionary for FK generation (includes all tables from schemaAfterAllColumnChanges)
-            ConcurrentDictionary<string, SqlTable> allTablesForFk = new ConcurrentDictionary<string, SqlTable>(schemaAfterAllColumnChanges, StringComparer.OrdinalIgnoreCase);
-            
-            // Use upDiff (not diff) for Phase 3.5 to ensure we're using the correct diff for the up script
-            foreach (TableDiff tableDiff in upDiff.ModifiedTables.OrderBy(t => t.TableName))
-            {
-                MigrationLogger.Log($"\n=== Phase 3.5: Reorder Columns for table: {tableDiff.TableName} ===");
-                
-                // Skip reordering if there are no Add or Modify (DROP+ADD) operations that would change column order
-                // Drop operations don't change the order of remaining columns, so no reorder needed
-                bool hasColumnAddOrModify = tableDiff.ColumnChanges.Any(c => 
-                    c.ChangeType == ColumnChangeType.Add || 
-                    (c.ChangeType == ColumnChangeType.Modify && c.OldColumn != null && c.NewColumn != null &&
-                     ((c.OldColumn.IsIdentity != c.NewColumn.IsIdentity) || (c.OldColumn.IsComputed != c.NewColumn.IsComputed))));
-                
-                bool hasDropOperations = tableDiff.ColumnChanges.Any(c => c.ChangeType == ColumnChangeType.Drop);
-                
-                MigrationLogger.Log($"  hasColumnAddOrModify: {hasColumnAddOrModify}, hasDropOperations: {hasDropOperations}");
-                
-                if (!hasColumnAddOrModify)
-                {
-                    // No column Add/Modify operations that would change order, skip reordering
-                    // Drop operations don't change the order of remaining columns
-                    // IMPORTANT: If we only have Drop operations, skip reordering entirely
-                    // This prevents trying to reorder columns that were already dropped
-                    MigrationLogger.Log($"  Skipping reordering: no Add/Modify operations that change order");
-                    continue;
-                }
-                
-                // Get actual table from schemaAfterAllColumnChanges (what database has after Phase 2 - reflects actual column order)
-                if (schemaAfterAllColumnChanges.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? actualTable))
-                {
-                    MigrationLogger.Log($"  actualTable columns after Phase 2: [{string.Join(", ", actualTable.Columns.Values.OrderBy(c => c.OrdinalPosition).Select(c => c.Name))}]");
-                    
-                    // Safety check: ensure table has columns before attempting reorder
-                    if (actualTable.Columns.Count == 0)
-                    {
-                        MigrationLogger.Log($"  Skipping reordering: table has no columns");
-                        continue;
-                    }
-                    
-                    // Build desired table with correct column order
-                    // Desired order: use actualTable (state after Phase 2) when columns are dropped
-                    // Otherwise use currentSchema (the state we're migrating TO) to preserve manual reordering
-                    // This ensures we only include columns that actually exist after Phase 2
-                    SqlTable? desiredTable = null;
-                    
-                    // Check if there are Drop operations - if so, use actualTable (state after Phase 2) as order source
-                    // This ensures we don't include dropped columns in the desired order
-                    // Otherwise, use currentSchema (preserves manual reordering)
-                    // Note: hasDropOperations was already computed above
-                    
-                    if (hasDropOperations)
-                    {
-                        // Columns are being dropped - use actualTable (the state after Phase 2) directly as desiredTable
-                        // This ensures we only include columns that exist after drops
-                        // Since orderSourceTable would be actualTable, and actualTable already has the correct state,
-                        // we can use it directly without rebuilding
-                        desiredTable = actualTable;
-                        MigrationLogger.Log($"  Using actualTable directly as desiredTable (hasDropOperations=true)");
-                        MigrationLogger.Log($"  desiredTable columns: [{string.Join(", ", desiredTable.Columns.Values.OrderBy(c => c.OrdinalPosition).Select(c => c.Name))}]");
-                    }
-                    else
-                    {
-                        // No drops - use currentSchema to preserve manual reordering
-                        SqlTable? orderSourceTable = null;
-                        if (currentSchemaResult.Result != null && currentSchemaResult.Result.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? currentTable))
-                        {
-                            orderSourceTable = currentTable;
-                        }
-                        else if (targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTableFallback))
-                        {
-                            orderSourceTable = targetTableFallback;
-                        }
-                        
-                        if (orderSourceTable == null)
-                        {
-                            continue;
-                        }
-                        
-                        // Build desired column order: use order from orderSourceTable, but only include columns that exist in actualTable
-                        Dictionary<string, SqlTableColumn> desiredColumns = new Dictionary<string, SqlTableColumn>(StringComparer.OrdinalIgnoreCase);
-                            
-                            // Start with order source columns (preserve their order - this is the desired order)
-                            List<SqlTableColumn> orderSourceColumns = orderSourceTable.Columns.Values.OrderBy(c => c.OrdinalPosition).ToList();
-                            
-                            // Track which columns we've already added
-                            HashSet<string> addedColumnNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                            
-                            int position = 1;
-                            
-                            // Add columns from order source in their order (this is the desired order)
-                            // BUT only include columns that exist in actualTable (after Phase 2)
-                            // This ensures we don't try to copy columns that were dropped
-                            // IMPORTANT: Use column properties directly from orderSourceTable (current or target schema)
-                            // This represents the final desired state after the migration, so it has all correct properties
-                            // including IDENTITY, PK, FKs, etc.
-                            foreach (SqlTableColumn col in orderSourceColumns)
-                            {
-                                // Only include columns that exist in actualTable (after Phase 2)
-                                // Columns that were dropped won't be in actualTable, so skip them
-                                if (actualTable.Columns.ContainsKey(col.Name.ToLowerInvariant()))
-                                {
-                                    // Use column from order source directly (has all correct properties)
-                                    // Reassign OrdinalPosition to reflect desired order (from order source)
-                                    desiredColumns[col.Name.ToLowerInvariant()] = col with { OrdinalPosition = position++ };
-                                    addedColumnNames.Add(col.Name.ToLowerInvariant());
-                                }
-                            }
-                            
-                            // Include any columns from actualTable that aren't in order source (shouldn't happen, but safety check)
-                            foreach (SqlTableColumn actualCol in actualTable.Columns.Values)
-                            {
-                                if (!addedColumnNames.Contains(actualCol.Name.ToLowerInvariant()))
-                                {
-                                    // Column exists in actualTable but not in order source - append at end
-                                    desiredColumns[actualCol.Name.ToLowerInvariant()] = actualCol with { OrdinalPosition = position++ };
-                                    addedColumnNames.Add(actualCol.Name.ToLowerInvariant());
-                                }
-                            }
-                            
-                        // Create desired table with correct column order
-                        desiredTable = new SqlTable(actualTable.Name, desiredColumns, actualTable.Indexes, actualTable.Schema);
-                    }
-                    
-                    if (desiredTable == null)
-                    {
-                        continue;
-                    }
-                    
-                    if (desiredTable != null)
-                    {
-                        // Safety check: if desiredTable is the same reference as actualTable, and they have the same columns,
-                        // then the order should already match (since they're the same object)
-                        // This prevents reordering when we're using actualTable directly as desiredTable (e.g., when columns are dropped)
-                        bool isSameReference = ReferenceEquals(desiredTable, actualTable);
-                        bool hasSameColumns = isSameReference || 
-                            (desiredTable.Columns.Count == actualTable.Columns.Count &&
-                             desiredTable.Columns.Keys.All(k => actualTable.Columns.ContainsKey(k)) &&
-                             actualTable.Columns.Keys.All(k => desiredTable.Columns.ContainsKey(k)));
-                        
-                        MigrationLogger.Log($"  isSameReference: {isSameReference}, hasSameColumns: {hasSameColumns}");
-                        MigrationLogger.Log($"  actualTable.Columns.Count: {actualTable.Columns.Count}, desiredTable.Columns.Count: {desiredTable.Columns.Count}");
-                        
-                        if (isSameReference && hasSameColumns)
-                        {
-                            // Same reference and same columns - order already matches, skip reordering
-                            MigrationLogger.Log($"  Skipping reordering: same reference and same columns (order already matches)");
-                            continue;
-                        }
-                        
-                        MigrationLogger.Log($"  Calling GenerateColumnReorderStatement with:");
-                        MigrationLogger.Log($"    actualTable columns: [{string.Join(", ", actualTable.Columns.Values.OrderBy(c => c.OrdinalPosition).Select(c => c.Name))}]");
-                        MigrationLogger.Log($"    desiredTable columns: [{string.Join(", ", desiredTable.Columns.Values.OrderBy(c => c.OrdinalPosition).Select(c => c.Name))}]");
-                        
-                        (string reorderSql, List<string> constraintSql) = GenerateTables.GenerateColumnReorderStatement(
-                            actualTable,      // Actual database state (from schemaAfterAllColumnChanges - reflects state after Phase 2)
-                            desiredTable,     // Desired state (with columns in correct order)
-                            allTablesForFk);
-                        
-                        if (!string.IsNullOrEmpty(reorderSql))
-                        {
-                            phase3_5ColumnReorder.Append(reorderSql);
-                            
-                            // Recreate all constraints and indexes that were dropped during table recreation
-                            foreach (string constraint in constraintSql)
-                            {
-                                phase3_5ColumnReorder.Append(constraint);
-                                phase3_5ColumnReorder.AppendLine();
-                            }
-                        }
-                    }
-                }
-            }
-            
-            string phase3_5Content = phase3_5ColumnReorder.ToString().Trim();
-            if (!string.IsNullOrEmpty(phase3_5Content))
-            {
-                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Reorder Columns"));
-                upScript.AppendLine(phase3_5Content);
-                upScript.AppendLine();
-                phaseNumber++;
-            }
-
-            // Phase 4: Create Stored Procedures (after constraints)
             string phase4ProceduresContent = phase4Procedures.ToString().Trim();
             if (!string.IsNullOrEmpty(phase4ProceduresContent))
             {
                 upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Create Stored Procedures"));
                 upScript.AppendLine(phase4ProceduresContent);
                 upScript.AppendLine();
-            }
+            string upScript = BuildUpScript.Build(phases);
 
             string timestamp = MigrationUtilities.GetNextMigrationTimestamp(codePath);
             string migrationName = string.IsNullOrWhiteSpace(description) ? timestamp : $"{timestamp}_{description}";
