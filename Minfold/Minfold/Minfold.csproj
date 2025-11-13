@@ -23,4 +23,16 @@
       <Folder Include="Migrations\" />
     </ItemGroup>
 
+    <ItemGroup>
+      <Compile Remove="reference\**" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <EmbeddedResource Remove="reference\**" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <None Remove="reference\**" />
+    </ItemGroup>
+
 </Project>

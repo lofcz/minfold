@@ -414,7 +414,7 @@ public class ZeroColumnTableTests
         // Since id is now the only column, we need to use the safe wrapper approach:
         // Add new column with temporary name, drop old column, rename new column
         string tempColumnName = $"id_tmp_{Guid.NewGuid():N}";
-        string addTempColumnSql = MigrationSqlGenerator.GenerateAddColumnStatement(
+        string addTempColumnSql = GenerateColumns.GenerateAddColumnStatement(
             new SqlTableColumn(
                 Name: tempColumnName,
                 OrdinalPosition: 0,
@@ -428,8 +428,8 @@ public class ZeroColumnTableTests
                 LengthOrPrecision: null
             ), 
             "TestTable");
-        string dropOldColumnSql = MigrationSqlGenerator.GenerateDropColumnStatement("id", "TestTable");
-        string renameColumnSql = MigrationSqlGenerator.GenerateRenameColumnStatement("TestTable", tempColumnName, "id");
+        string dropOldColumnSql = GenerateColumns.GenerateDropColumnStatement("id", "TestTable");
+        string renameColumnSql = GenerateColumns.GenerateRenameColumnStatement("TestTable", tempColumnName, "id");
         
         ResultOrException<int> result5 = await sqlService.Execute($"""
             {addTempColumnSql}
@@ -590,7 +590,7 @@ public class ZeroColumnTableTests
         // Since id is now the only column, we need to use the safe wrapper approach:
         // Add new column with temporary name, drop old column, rename new column
         string tempColumnName = $"id_tmp_{Guid.NewGuid():N}";
-        string addTempColumnSql = MigrationSqlGenerator.GenerateAddColumnStatement(
+        string addTempColumnSql = GenerateColumns.GenerateAddColumnStatement(
             new SqlTableColumn(
                 Name: tempColumnName,
                 OrdinalPosition: 0,
@@ -604,8 +604,8 @@ public class ZeroColumnTableTests
                 LengthOrPrecision: null
             ), 
             "TestTable");
-        string dropOldColumnSql = MigrationSqlGenerator.GenerateDropColumnStatement("id", "TestTable");
-        string renameColumnSql = MigrationSqlGenerator.GenerateRenameColumnStatement("TestTable", tempColumnName, "id");
+        string dropOldColumnSql = GenerateColumns.GenerateDropColumnStatement("id", "TestTable");
+        string renameColumnSql = GenerateColumns.GenerateRenameColumnStatement("TestTable", tempColumnName, "id");
         
         ResultOrException<int> result4 = await sqlService.Execute($"""
             {addTempColumnSql}
@@ -835,7 +835,7 @@ public class ZeroColumnTableTests
         // Use safe wrapper approach since we now have 2 columns
         // This will drop and add id, which puts it at the end: [text, id]
         string tempColumnName = $"id_tmp_{Guid.NewGuid():N}";
-        string addTempColumnSql = MigrationSqlGenerator.GenerateAddColumnStatement(
+        string addTempColumnSql = GenerateColumns.GenerateAddColumnStatement(
             new SqlTableColumn(
                 Name: tempColumnName,
                 OrdinalPosition: 0,
@@ -851,8 +851,8 @@ public class ZeroColumnTableTests
                 IdentityIncrement: 1
             ), 
             "SampleTable");
-        string dropOldColumnSql = MigrationSqlGenerator.GenerateDropColumnStatement("id", "SampleTable");
-        string renameColumnSql = MigrationSqlGenerator.GenerateRenameColumnStatement("SampleTable", tempColumnName, "id");
+        string dropOldColumnSql = GenerateColumns.GenerateDropColumnStatement("id", "SampleTable");
+        string renameColumnSql = GenerateColumns.GenerateRenameColumnStatement("SampleTable", tempColumnName, "id");
         
         ResultOrException<int> result2 = await sqlService.Execute($"""
             {addTempColumnSql}
@@ -899,7 +899,7 @@ public class ZeroColumnTableTests
         SqlTable desiredTable = new SqlTable(actualTable.Name, desiredColumns, actualTable.Indexes, actualTable.Schema);
         
         // Generate reorder SQL
-        (string reorderSql, List<string> constraintSql) = MigrationSqlGenerator.GenerateColumnReorderStatement(
+        (string reorderSql, List<string> constraintSql) = GenerateTables.GenerateColumnReorderStatement(
             actualTable,
             desiredTable,
             new ConcurrentDictionary<string, SqlTable>(currentSchema, StringComparer.OrdinalIgnoreCase));

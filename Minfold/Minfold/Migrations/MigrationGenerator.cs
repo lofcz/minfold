@@ -103,14 +103,15 @@ public static class MigrationGenerator
 
             foreach (KeyValuePair<string, SqlTable> tablePair in tables)
             {
-                string createTableSql = MigrationSqlGenerator.GenerateCreateTableStatement(tablePair.Value);
+                string createTableSql = GenerateTables.GenerateCreateTableStatement(tablePair.Value);
                 phase1Tables.AppendLine(createTableSql);
                 phase1Tables.AppendLine();
             }
 
             // Collect all foreign keys first, then generate ALTER TABLE statements (Phase 3)
+            // Use NOCHECK → CHECK pattern to handle circular dependencies and improve performance
             HashSet<string> processedFks = new HashSet<string>();
-            List<List<SqlForeignKey>> allFkGroups = new List<List<SqlForeignKey>>();
+            List<(List<SqlForeignKey> FkGroup, bool WasNoCheck)> allFkGroupsWithState = new List<(List<SqlForeignKey>, bool)>();
             
             foreach (KeyValuePair<string, SqlTable> tablePair in tables)
             {
@@ -137,19 +138,44 @@ public static class MigrationGenerator
                                 }
                             }
 
-                            allFkGroups.Add(fkGroup);
+                            // Store original NotEnforced state (all FKs in a group have the same state)
+                            bool wasNoCheck = fkGroup[0].NotEnforced;
+                            allFkGroupsWithState.Add((fkGroup, wasNoCheck));
                             processedFks.Add(fk.Name);
                         }
                     }
                 }
             }
 
-            // Generate all ALTER TABLE FK statements
-            foreach (List<SqlForeignKey> fkGroup in allFkGroups.OrderBy(g => g[0].Table).ThenBy(g => g[0].Name))
+            // Create all FKs with NOCHECK first (avoids circular dependency issues and reduces lock time)
+            Dictionary<string, SqlTable> tablesDict = new Dictionary<string, SqlTable>(schemaResult.Result);
+            foreach (var (fkGroup, wasNoCheck) in allFkGroupsWithState.OrderBy(g => g.FkGroup[0].Table).ThenBy(g => g.FkGroup[0].Name))
             {
-                string fkSql = MigrationSqlGenerator.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(schemaResult.Result));
+                // Force NOCHECK during creation to avoid circular dependency issues
+                string fkSql = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, tablesDict, forceNoCheck: true);
                 phase3Constraints.Append(fkSql);
                 phase3Constraints.AppendLine();
+            }
+
+            // Restore CHECK state for FKs that weren't originally NOCHECK
+            // IMPORTANT: CHECK CONSTRAINT doesn't always restore is_not_trusted correctly after WITH NOCHECK
+            // So we need to drop and recreate the FK with WITH CHECK to ensure correct NotEnforced state
+            foreach (var (fkGroup, wasNoCheck) in allFkGroupsWithState.OrderBy(g => g.FkGroup[0].Table).ThenBy(g => g.FkGroup[0].Name))
+            {
+                if (!wasNoCheck)
+                {
+                    SqlForeignKey firstFk = fkGroup[0];
+                    // Drop the FK that was created with NOCHECK
+                    phase3Constraints.AppendLine($"ALTER TABLE [{firstFk.Schema}].[{firstFk.Table}] DROP CONSTRAINT [{firstFk.Name}];");
+                    
+                    // Recreate it with WITH CHECK to ensure correct NotEnforced state
+                    string fkSqlWithCheck = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, tablesDict, forceNoCheck: false);
+                    if (!string.IsNullOrEmpty(fkSqlWithCheck))
+                    {
+                        phase3Constraints.Append(fkSqlWithCheck);
+                        phase3Constraints.AppendLine();
+                    }
+                }
             }
 
             // Build up script with phases (only include phases with content)
@@ -165,7 +191,7 @@ public static class MigrationGenerator
             StringBuilder phase0_5Sequences = new StringBuilder();
             foreach (SqlSequence sequence in sequences.Values.OrderBy(s => s.Name))
             {
-                phase0_5Sequences.Append(MigrationSqlGenerator.GenerateCreateSequenceStatement(sequence));
+                phase0_5Sequences.Append(GenerateSequences.GenerateCreateSequenceStatement(sequence));
                 phase0_5Sequences.AppendLine();
             }
             string phase0_5Content = phase0_5Sequences.ToString().Trim();
@@ -211,7 +237,7 @@ public static class MigrationGenerator
             StringBuilder phase4Procedures = new StringBuilder();
             foreach (SqlStoredProcedure procedure in procedures.Values.OrderBy(p => p.Name))
             {
-                phase4Procedures.Append(MigrationSqlGenerator.GenerateCreateProcedureStatement(procedure));
+                phase4Procedures.Append(GenerateProcedures.GenerateCreateProcedureStatement(procedure));
                 phase4Procedures.AppendLine();
             }
             string phase4Content = phase4Procedures.ToString().Trim();
@@ -230,7 +256,7 @@ public static class MigrationGenerator
             // Drop procedures (reverse order)
             foreach (SqlStoredProcedure procedure in procedures.Values.OrderByDescending(p => p.Name))
             {
-                downScript.AppendLine(MigrationSqlGenerator.GenerateDropProcedureStatement(procedure.Name, procedure.Schema));
+                downScript.AppendLine(GenerateProcedures.GenerateDropProcedureStatement(procedure.Name, procedure.Schema));
             }
             
             // Drop tables (reverse order)
@@ -244,7 +270,7 @@ public static class MigrationGenerator
             // Drop sequences (reverse order)
             foreach (SqlSequence sequence in sequences.Values.OrderByDescending(s => s.Name))
             {
-                downScript.AppendLine(MigrationSqlGenerator.GenerateDropSequenceStatement(sequence.Name, sequence.Schema));
+                downScript.AppendLine(GenerateSequences.GenerateDropSequenceStatement(sequence.Name, sequence.Schema));
             }
             
             downScript.AppendLine();
@@ -434,15 +460,15 @@ public static class MigrationGenerator
                 if (targetSchema.TryGetValue(droppedTableName.ToLowerInvariant(), out SqlTable? droppedTable))
                 {
                     // Drop FKs for this table
-                    HashSet<string> processedFks = new HashSet<string>();
+                    HashSet<string> processedFksDrop = new HashSet<string>();
                     foreach (SqlTableColumn column in droppedTable.Columns.Values)
                     {
                         foreach (SqlForeignKey fk in column.ForeignKeys)
                         {
-                            if (!processedFks.Contains(fk.Name))
+                            if (!processedFksDrop.Contains(fk.Name))
                             {
-                                phase0DropFks.AppendLine(MigrationSqlGenerator.GenerateDropForeignKeyStatement(fk));
-                                processedFks.Add(fk.Name);
+                                phase0DropFks.AppendLine(GenerateForeignKeys.GenerateDropForeignKeyStatement(fk));
+                                processedFksDrop.Add(fk.Name);
                             }
                         }
                     }
@@ -464,7 +490,7 @@ public static class MigrationGenerator
             // Phase 1: Create new tables
             foreach (SqlTable newTable in diff.NewTables.OrderBy(t => t.Name))
             {
-                string createTableSql = MigrationSqlGenerator.GenerateCreateTableStatement(newTable);
+                string createTableSql = GenerateTables.GenerateCreateTableStatement(newTable);
                 phase1Tables.AppendLine(createTableSql);
                 phase1Tables.AppendLine();
             }
@@ -498,7 +524,7 @@ public static class MigrationGenerator
                         {
                             // Generate PK constraint name (SQL Server default pattern)
                             string pkConstraintName = $"PK_{tableDiff.TableName}";
-                            phase0DropPks.AppendLine(MigrationSqlGenerator.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, targetTable.Schema));
+                            phase0DropPks.AppendLine(GeneratePrimaryKeys.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, targetTable.Schema));
                             tablesWithPkDropped.Add(tableDiff.TableName.ToLowerInvariant());
                         }
                     }
@@ -509,7 +535,7 @@ public static class MigrationGenerator
             foreach (TableDiff tableDiff in diff.ModifiedTables.OrderBy(t => t.TableName))
             {
                 // Pass current schema (for dropping indexes) and target schema (for single-column detection)
-                string columnModifications = MigrationSqlGenerator.GenerateColumnModifications(
+                string columnModifications = GenerateColumns.GenerateColumnModifications(
                     tableDiff, 
                     currentSchemaResult.Result ?? new ConcurrentDictionary<string, SqlTable>(StringComparer.OrdinalIgnoreCase),
                     targetSchema);
@@ -547,19 +573,23 @@ public static class MigrationGenerator
                 ForeignKeyChange firstChange = fkGroup.Value[0];
                 if (firstChange.ChangeType == ForeignKeyChangeType.Drop && firstChange.OldForeignKey != null)
                 {
-                    phase3Constraints.AppendLine(MigrationSqlGenerator.GenerateDropForeignKeyStatement(firstChange.OldForeignKey));
+                    phase3Constraints.AppendLine(GenerateForeignKeys.GenerateDropForeignKeyStatement(firstChange.OldForeignKey));
                 }
                 else if (firstChange.ChangeType == ForeignKeyChangeType.Modify && firstChange.OldForeignKey != null)
                 {
                     // For modifications, drop the old FK before adding the new one
-                    phase3Constraints.AppendLine(MigrationSqlGenerator.GenerateDropForeignKeyStatement(firstChange.OldForeignKey));
+                    phase3Constraints.AppendLine(GenerateForeignKeys.GenerateDropForeignKeyStatement(firstChange.OldForeignKey));
                 }
             }
+
+            // Collect all FKs to be added (from new tables and modified tables)
+            // Use NOCHECK → CHECK pattern to handle circular dependencies and improve performance
+            List<(List<SqlForeignKey> FkGroup, bool WasNoCheck)> fksToAdd = new List<(List<SqlForeignKey>, bool)>();
+            HashSet<string> processedFks = new HashSet<string>();
 
             // Add new FKs from new tables
             foreach (SqlTable newTable in diff.NewTables)
             {
-                HashSet<string> processedFks = new HashSet<string>();
                 foreach (SqlTableColumn column in newTable.Columns.Values)
                 {
                     foreach (SqlForeignKey fk in column.ForeignKeys)
@@ -578,9 +608,9 @@ public static class MigrationGenerator
                                     }
                                 }
                             }
-                            string fkSql = MigrationSqlGenerator.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchema));
-                            phase3Constraints.Append(fkSql);
-                            phase3Constraints.AppendLine();
+                            // Store original NotEnforced state
+                            bool wasNoCheck = fkGroup[0].NotEnforced;
+                            fksToAdd.Add((fkGroup, wasNoCheck));
                             processedFks.Add(fk.Name);
                         }
                     }
@@ -590,7 +620,7 @@ public static class MigrationGenerator
             // Add new/modified FKs from modified tables
             foreach (ForeignKeyChange fkChange in allFkChanges.Where(c => c.ChangeType == ForeignKeyChangeType.Add || c.ChangeType == ForeignKeyChangeType.Modify))
             {
-                if (fkChange.NewForeignKey != null)
+                if (fkChange.NewForeignKey != null && !processedFks.Contains(fkChange.NewForeignKey.Name))
                 {
                     // Find all columns with this FK name
                     TableDiff? tableDiff = diff.ModifiedTables.FirstOrDefault(t => t.TableName.Equals(fkChange.NewForeignKey.Table, StringComparison.OrdinalIgnoreCase));
@@ -608,8 +638,40 @@ public static class MigrationGenerator
                                 fkGroup.Add(otherFkChange.NewForeignKey);
                             }
                         }
-                        string fkSql = MigrationSqlGenerator.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchema));
-                        phase3Constraints.Append(fkSql);
+                        // Store original NotEnforced state
+                        bool wasNoCheck = fkGroup[0].NotEnforced;
+                        fksToAdd.Add((fkGroup, wasNoCheck));
+                        processedFks.Add(fkChange.NewForeignKey.Name);
+                    }
+                }
+            }
+
+            // Create all FKs with NOCHECK first (avoids circular dependency issues and reduces lock time)
+            Dictionary<string, SqlTable> tablesDict = new Dictionary<string, SqlTable>(targetSchema);
+            foreach (var (fkGroup, wasNoCheck) in fksToAdd.OrderBy(g => g.FkGroup[0].Table).ThenBy(g => g.FkGroup[0].Name))
+            {
+                // Force NOCHECK during creation to avoid circular dependency issues
+                string fkSql = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, tablesDict, forceNoCheck: true);
+                phase3Constraints.Append(fkSql);
+                phase3Constraints.AppendLine();
+            }
+
+            // Restore CHECK state for FKs that weren't originally NOCHECK
+            // IMPORTANT: CHECK CONSTRAINT doesn't always restore is_not_trusted correctly after WITH NOCHECK
+            // So we need to drop and recreate the FK with WITH CHECK to ensure correct NotEnforced state
+            foreach (var (fkGroup, wasNoCheck) in fksToAdd.OrderBy(g => g.FkGroup[0].Table).ThenBy(g => g.FkGroup[0].Name))
+            {
+                if (!wasNoCheck)
+                {
+                    SqlForeignKey firstFk = fkGroup[0];
+                    // Drop the FK that was created with NOCHECK
+                    phase3Constraints.AppendLine($"ALTER TABLE [{firstFk.Schema}].[{firstFk.Table}] DROP CONSTRAINT [{firstFk.Name}];");
+                    
+                    // Recreate it with WITH CHECK to ensure correct NotEnforced state
+                    string fkSqlWithCheck = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, tablesDict, forceNoCheck: false);
+                    if (!string.IsNullOrEmpty(fkSqlWithCheck))
+                    {
+                        phase3Constraints.Append(fkSqlWithCheck);
                         phase3Constraints.AppendLine();
                     }
                 }
@@ -647,7 +709,7 @@ public static class MigrationGenerator
                         {
                             List<string> pkColumnNames = allPkColumns.Select(c => c.Name).ToList();
                             string pkConstraintName = $"PK_{tableDiff.TableName}";
-                            phase3Constraints.Append(MigrationSqlGenerator.GenerateAddPrimaryKeyStatement(tableDiff.TableName, pkColumnNames, pkConstraintName, newTable.Schema));
+                            phase3Constraints.Append(GeneratePrimaryKeys.GenerateAddPrimaryKeyStatement(tableDiff.TableName, pkColumnNames, pkConstraintName, newTable.Schema));
                             tablesWithPkAdded.Add(tableDiff.TableName.ToLowerInvariant());
                         }
                     }
@@ -669,12 +731,12 @@ public static class MigrationGenerator
                 {
                     if (indexChange.ChangeType == IndexChangeType.Drop && indexChange.OldIndex != null)
                     {
-                        phase3Constraints.AppendLine(MigrationSqlGenerator.GenerateDropIndexStatement(indexChange.OldIndex));
+                        phase3Constraints.AppendLine(GenerateIndexes.GenerateDropIndexStatement(indexChange.OldIndex));
                     }
                     else if (indexChange.ChangeType == IndexChangeType.Modify && indexChange.OldIndex != null)
                     {
                         // For modifications, drop the old index before adding the new one
-                        phase3Constraints.AppendLine(MigrationSqlGenerator.GenerateDropIndexStatement(indexChange.OldIndex));
+                        phase3Constraints.AppendLine(GenerateIndexes.GenerateDropIndexStatement(indexChange.OldIndex));
                     }
                 }
             }
@@ -684,7 +746,7 @@ public static class MigrationGenerator
             {
                 foreach (SqlIndex index in newTable.Indexes)
                 {
-                    phase3Constraints.Append(MigrationSqlGenerator.GenerateCreateIndexStatement(index));
+                    phase3Constraints.Append(GenerateIndexes.GenerateCreateIndexStatement(index));
                     phase3Constraints.AppendLine();
                 }
             }
@@ -696,7 +758,7 @@ public static class MigrationGenerator
                 {
                     if (indexChange.NewIndex != null)
                     {
-                        phase3Constraints.Append(MigrationSqlGenerator.GenerateCreateIndexStatement(indexChange.NewIndex));
+                        phase3Constraints.Append(GenerateIndexes.GenerateCreateIndexStatement(indexChange.NewIndex));
                         phase3Constraints.AppendLine();
                     }
                 }
@@ -711,7 +773,7 @@ public static class MigrationGenerator
                 {
                     schema = droppedSequence.Schema;
                 }
-                phase0DropSequences.Append(MigrationSqlGenerator.GenerateDropSequenceStatement(droppedSequenceName, schema));
+                phase0DropSequences.Append(GenerateSequences.GenerateDropSequenceStatement(droppedSequenceName, schema));
                 phase0DropSequences.AppendLine();
             }
             
@@ -724,7 +786,7 @@ public static class MigrationGenerator
                 {
                     schema = droppedProcedure.Schema;
                 }
-                phase0DropProcedures.Append(MigrationSqlGenerator.GenerateDropProcedureStatement(droppedProcedureName, schema));
+                phase0DropProcedures.Append(GenerateProcedures.GenerateDropProcedureStatement(droppedProcedureName, schema));
                 phase0DropProcedures.AppendLine();
             }
             
@@ -735,7 +797,7 @@ public static class MigrationGenerator
                 if (procedureChange.ChangeType == ProcedureChangeType.Modify && procedureChange.OldProcedure != null)
                 {
                     // For modifications, drop the old procedure before creating the new one
-                    phase0DropProcedures.Append(MigrationSqlGenerator.GenerateDropProcedureStatement(procedureChange.OldProcedure.Name, procedureChange.OldProcedure.Schema));
+                    phase0DropProcedures.Append(GenerateProcedures.GenerateDropProcedureStatement(procedureChange.OldProcedure.Name, procedureChange.OldProcedure.Schema));
                     phase0DropProcedures.AppendLine();
                 }
             }
@@ -743,7 +805,7 @@ public static class MigrationGenerator
             // Phase 0.5: Create sequences (before tables, so they can be used in table defaults)
             foreach (SqlSequence newSequence in diff.NewSequences.OrderBy(s => s.Name))
             {
-                phase0_5Sequences.Append(MigrationSqlGenerator.GenerateCreateSequenceStatement(newSequence));
+                phase0_5Sequences.Append(GenerateSequences.GenerateCreateSequenceStatement(newSequence));
                 phase0_5Sequences.AppendLine();
             }
             foreach (SequenceChange sequenceChange in diff.ModifiedSequences)
@@ -751,7 +813,7 @@ public static class MigrationGenerator
                 if (sequenceChange.ChangeType == SequenceChangeType.Modify && sequenceChange.NewSequence != null)
                 {
                     // For modifications, drop and recreate (handled by GenerateAlterSequenceStatement)
-                    phase0_5Sequences.Append(MigrationSqlGenerator.GenerateAlterSequenceStatement(sequenceChange.OldSequence!, sequenceChange.NewSequence));
+                    phase0_5Sequences.Append(GenerateSequences.GenerateAlterSequenceStatement(sequenceChange.OldSequence!, sequenceChange.NewSequence));
                     phase0_5Sequences.AppendLine();
                 }
             }
@@ -759,7 +821,7 @@ public static class MigrationGenerator
             // Phase 4: Create procedures (after constraints)
             foreach (SqlStoredProcedure newProcedure in diff.NewProcedures.OrderBy(p => p.Name))
             {
-                phase4Procedures.Append(MigrationSqlGenerator.GenerateCreateProcedureStatement(newProcedure));
+                phase4Procedures.Append(GenerateProcedures.GenerateCreateProcedureStatement(newProcedure));
                 phase4Procedures.AppendLine();
             }
             foreach (ProcedureChange procedureChange in diff.ModifiedProcedures)
@@ -767,7 +829,7 @@ public static class MigrationGenerator
                 if (procedureChange.ChangeType == ProcedureChangeType.Modify && procedureChange.NewProcedure != null)
                 {
                     // For modifications, create the new procedure (old one was already dropped in phase 0)
-                    phase4Procedures.Append(MigrationSqlGenerator.GenerateCreateProcedureStatement(procedureChange.NewProcedure));
+                    phase4Procedures.Append(GenerateProcedures.GenerateCreateProcedureStatement(procedureChange.NewProcedure));
                     phase4Procedures.AppendLine();
                 }
             }
@@ -792,11 +854,11 @@ public static class MigrationGenerator
                     // Drop current index (OldIndex) and add back target index (NewIndex)
                     if (indexChange.OldIndex != null)
                     {
-                        downScript.AppendLine(MigrationSqlGenerator.GenerateDropIndexStatement(indexChange.OldIndex));
+                        downScript.AppendLine(GenerateIndexes.GenerateDropIndexStatement(indexChange.OldIndex));
                     }
                     if (indexChange.NewIndex != null)
                     {
-                        downScript.Append(MigrationSqlGenerator.GenerateCreateIndexStatement(indexChange.NewIndex));
+                        downScript.Append(GenerateIndexes.GenerateCreateIndexStatement(indexChange.NewIndex));
                         downScript.AppendLine();
                     }
                 }
@@ -807,7 +869,7 @@ public static class MigrationGenerator
                 {
                     if (indexChange.OldIndex != null)
                     {
-                        downScript.AppendLine(MigrationSqlGenerator.GenerateDropIndexStatement(indexChange.OldIndex));
+                        downScript.AppendLine(GenerateIndexes.GenerateDropIndexStatement(indexChange.OldIndex));
                     }
                 }
                 
@@ -817,7 +879,7 @@ public static class MigrationGenerator
                 {
                     if (indexChange.NewIndex != null)
                     {
-                        downScript.Append(MigrationSqlGenerator.GenerateCreateIndexStatement(indexChange.NewIndex));
+                        downScript.Append(GenerateIndexes.GenerateCreateIndexStatement(indexChange.NewIndex));
                         downScript.AppendLine();
                     }
                 }
@@ -882,7 +944,7 @@ public static class MigrationGenerator
                         if (newPkColumns.Count > 0)
                         {
                             string pkConstraintName = $"PK_{tableDiff.TableName}";
-                            downScript.AppendLine(MigrationSqlGenerator.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, newTable.Schema));
+                            downScript.AppendLine(GeneratePrimaryKeys.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, newTable.Schema));
                         }
                     }
                 }
@@ -932,7 +994,7 @@ public static class MigrationGenerator
                         {
                             List<string> pkColumnNames = originalPkColumns.Select(c => c.Name).ToList();
                             string pkConstraintName = $"PK_{tableDiff.TableName}";
-                            pkRestoreScript.Append(MigrationSqlGenerator.GenerateAddPrimaryKeyStatement(tableDiff.TableName, pkColumnNames, pkConstraintName, targetTable.Schema));
+                            pkRestoreScript.Append(GeneratePrimaryKeys.GenerateAddPrimaryKeyStatement(tableDiff.TableName, pkColumnNames, pkConstraintName, targetTable.Schema));
                         }
                     }
                 }
@@ -944,7 +1006,7 @@ public static class MigrationGenerator
             {
                 if (fkChange.NewForeignKey != null)
                 {
-                    downScript.AppendLine(MigrationSqlGenerator.GenerateDropForeignKeyStatement(fkChange.NewForeignKey));
+                    downScript.AppendLine(GenerateForeignKeys.GenerateDropForeignKeyStatement(fkChange.NewForeignKey));
                 }
                 if (fkChange.OldForeignKey != null)
                 {
@@ -960,7 +1022,7 @@ public static class MigrationGenerator
                             fkGroup.Add(otherFkChange.OldForeignKey);
                         }
                     }
-                    string fkSql = MigrationSqlGenerator.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchema));
+                    string fkSql = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchema));
                     downScript.Append(fkSql);
                     downScript.AppendLine();
                 }
@@ -971,7 +1033,7 @@ public static class MigrationGenerator
             {
                 if (fkChange.NewForeignKey != null)
                 {
-                    downScript.AppendLine(MigrationSqlGenerator.GenerateDropForeignKeyStatement(fkChange.NewForeignKey));
+                    downScript.AppendLine(GenerateForeignKeys.GenerateDropForeignKeyStatement(fkChange.NewForeignKey));
                 }
             }
             
@@ -992,7 +1054,7 @@ public static class MigrationGenerator
                             fkGroup.Add(otherFkChange.OldForeignKey);
                         }
                     }
-                    string fkSql = MigrationSqlGenerator.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchema));
+                    string fkSql = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchema));
                     downScript.Append(fkSql);
                     downScript.AppendLine();
                 }
@@ -1063,7 +1125,7 @@ public static class MigrationGenerator
                             string columnKey = $"{tableDiff.TableName}.{change.OldColumn.Name}";
                             columnsBeingDropped.Add(columnKey);
                             MigrationLogger.Log($"  [DROP] {columnKey}");
-                            downScript.AppendLine(MigrationSqlGenerator.GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName));
+                            downScript.AppendLine(GenerateColumns.GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName));
                         }
                     }
                 }
@@ -1143,7 +1205,7 @@ public static class MigrationGenerator
                                 if (change.OldColumn.IsPrimaryKey)
                                 {
                                     string pkConstraintName = $"PK_{tableDiff.TableName}";
-                                    downScript.AppendLine(MigrationSqlGenerator.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, schema));
+                                    downScript.AppendLine(GeneratePrimaryKeys.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, schema));
                                     MigrationLogger.Log($"    Dropped PK constraint before dropping column {change.OldColumn.Name}");
                                 }
                                 
@@ -1166,7 +1228,7 @@ public static class MigrationGenerator
                                 
                                 // Use currentSchema (state after up migration) to check if safe
                                 // Drop OldColumn (current state) and add NewColumn (target state)
-                                string safeDropAdd = MigrationSqlGenerator.GenerateSafeColumnDropAndAdd(
+                                string safeDropAdd = GenerateColumns.GenerateSafeColumnDropAndAdd(
                                     change.OldColumn,  // Drop this (current state after migration)
                                     change.NewColumn,  // Add this (target state before migration)
                                     tableDiff.TableName,
@@ -1182,7 +1244,7 @@ public static class MigrationGenerator
                             {
                                 // No identity/computed change, can use ALTER COLUMN
                                 // Generate ALTER COLUMN statement to reverse the modification
-                                string reverseAlter = MigrationSqlGenerator.GenerateAlterColumnStatement(change.OldColumn, change.NewColumn, tableDiff.TableName, schema);
+                                string reverseAlter = GenerateColumns.GenerateAlterColumnStatement(change.OldColumn, change.NewColumn, tableDiff.TableName, schema);
                                 if (!string.IsNullOrEmpty(reverseAlter))
                                 {
                                     downScript.Append(reverseAlter);
@@ -1203,7 +1265,7 @@ public static class MigrationGenerator
                             {
                                 columnsBeingAdded.Add(columnKey);
                                 MigrationLogger.Log($"  [ADD] {columnKey}");
-                                downScript.Append(MigrationSqlGenerator.GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName));
+                                downScript.Append(GenerateColumns.GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName));
                             }
                             else
                             {
@@ -1249,7 +1311,7 @@ public static class MigrationGenerator
                             if (change.OldColumn.IsPrimaryKey)
                             {
                                 string pkConstraintName = $"PK_{tableDiff.TableName}";
-                                downScript.AppendLine(MigrationSqlGenerator.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, schema));
+                                downScript.AppendLine(GeneratePrimaryKeys.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, schema));
                                 MigrationLogger.Log($"    Dropped PK constraint before dropping column {change.OldColumn.Name}");
                             }
                             
@@ -1272,7 +1334,7 @@ public static class MigrationGenerator
                             
                             // Use currentSchema (state after up migration) to check if safe
                             // Drop OldColumn (current state) and add NewColumn (target state)
-                            string safeDropAdd = MigrationSqlGenerator.GenerateSafeColumnDropAndAdd(
+                            string safeDropAdd = GenerateColumns.GenerateSafeColumnDropAndAdd(
                                 change.OldColumn,  // Drop this (current state after migration)
                                 change.NewColumn,  // Add this (target state before migration)
                                 tableDiff.TableName,
@@ -1302,7 +1364,7 @@ public static class MigrationGenerator
                             if (change.OldColumn.IsPrimaryKey)
                             {
                                 string pkConstraintName = $"PK_{tableDiff.TableName}";
-                                downScript.AppendLine(MigrationSqlGenerator.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, schema));
+                                downScript.AppendLine(GeneratePrimaryKeys.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, schema));
                                 MigrationLogger.Log($"    Dropped PK constraint before dropping column {change.OldColumn.Name}");
                             }
                             
@@ -1320,7 +1382,7 @@ public static class MigrationGenerator
                                 new List<IndexChange>()
                             );
                             
-                            string safeDropAdd = MigrationSqlGenerator.GenerateSafeColumnDropAndAdd(
+                            string safeDropAdd = GenerateColumns.GenerateSafeColumnDropAndAdd(
                                 change.OldColumn,  // Drop this (current state after migration)
                                 change.NewColumn,  // Add this (target state before migration)
                                 tableDiff.TableName,
@@ -1337,7 +1399,7 @@ public static class MigrationGenerator
                         else
                         {
                             // Reverse the modification: change from OldColumn (current) to NewColumn (target)
-                            string reverseAlter = MigrationSqlGenerator.GenerateAlterColumnStatement(change.OldColumn, change.NewColumn, tableDiff.TableName, schema);
+                            string reverseAlter = GenerateColumns.GenerateAlterColumnStatement(change.OldColumn, change.NewColumn, tableDiff.TableName, schema);
                             if (!string.IsNullOrEmpty(reverseAlter))
                             {
                                 downScript.Append(reverseAlter);
@@ -1356,7 +1418,7 @@ public static class MigrationGenerator
                             string columnKey = $"{tableDiff.TableName}.{change.OldColumn.Name}";
                             columnsBeingDropped.Add(columnKey);
                             MigrationLogger.Log($"  [DROP] {columnKey} (after Modify to avoid only-column error)");
-                            downScript.AppendLine(MigrationSqlGenerator.GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName));
+                            downScript.AppendLine(GenerateColumns.GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName));
                         }
                     }
                 }
@@ -1376,17 +1438,17 @@ public static class MigrationGenerator
                 if (targetSchema.TryGetValue(droppedTableName.ToLowerInvariant(), out SqlTable? droppedTable))
                 {
                     // Generate CREATE TABLE statement
-                    string createTableSql = MigrationSqlGenerator.GenerateCreateTableStatement(droppedTable);
+                    string createTableSql = GenerateTables.GenerateCreateTableStatement(droppedTable);
                     downScript.AppendLine(createTableSql);
                     downScript.AppendLine();
                     
                     // Generate FK constraints for the recreated table
-                    HashSet<string> processedFks = new HashSet<string>();
+                    HashSet<string> processedFksDown1 = new HashSet<string>();
                     foreach (SqlTableColumn column in droppedTable.Columns.Values)
                     {
                         foreach (SqlForeignKey fk in column.ForeignKeys)
                         {
-                            if (!processedFks.Contains(fk.Name))
+                            if (!processedFksDown1.Contains(fk.Name))
                             {
                                 // Group multi-column FKs
                                 List<SqlForeignKey> fkGroup = new List<SqlForeignKey> { fk };
@@ -1400,10 +1462,10 @@ public static class MigrationGenerator
                                         }
                                     }
                                 }
-                                string fkSql = MigrationSqlGenerator.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchema));
+                                string fkSql = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchema));
                                 downScript.Append(fkSql);
                                 downScript.AppendLine();
-                                processedFks.Add(fk.Name);
+                                processedFksDown1.Add(fk.Name);
                             }
                         }
                     }
@@ -1420,17 +1482,17 @@ public static class MigrationGenerator
             foreach (SqlTable newTable in diff.NewTables.OrderBy(t => t.Name))
             {
                 // Generate CREATE TABLE statement
-                string createTableSql = MigrationSqlGenerator.GenerateCreateTableStatement(newTable);
+                string createTableSql = GenerateTables.GenerateCreateTableStatement(newTable);
                 downScript.AppendLine(createTableSql);
                 downScript.AppendLine();
                 
                 // Generate FK constraints for the recreated table
-                HashSet<string> processedFks = new HashSet<string>();
+                HashSet<string> processedFksDown2 = new HashSet<string>();
                 foreach (SqlTableColumn column in newTable.Columns.Values)
                 {
                     foreach (SqlForeignKey fk in column.ForeignKeys)
                     {
-                        if (!processedFks.Contains(fk.Name))
+                        if (!processedFksDown2.Contains(fk.Name))
                         {
                             // Group multi-column FKs
                             List<SqlForeignKey> fkGroup = new List<SqlForeignKey> { fk };
@@ -1444,10 +1506,10 @@ public static class MigrationGenerator
                                     }
                                 }
                             }
-                            string fkSql = MigrationSqlGenerator.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchema));
+                            string fkSql = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, new Dictionary<string, SqlTable>(targetSchema));
                             downScript.Append(fkSql);
                             downScript.AppendLine();
-                            processedFks.Add(fk.Name);
+                            processedFksDown2.Add(fk.Name);
                         }
                     }
                 }
@@ -1484,14 +1546,14 @@ public static class MigrationGenerator
                 {
                     schema = droppedSequence.Schema;
                 }
-                downScript.AppendLine(MigrationSqlGenerator.GenerateDropSequenceStatement(droppedSequenceName, schema));
+                downScript.AppendLine(GenerateSequences.GenerateDropSequenceStatement(droppedSequenceName, schema));
             }
             // For Modify: drop the current sequence (OldSequence - after modification) before recreating the old one
             foreach (SequenceChange sequenceChange in diff.ModifiedSequences)
             {
                 if (sequenceChange.ChangeType == SequenceChangeType.Modify && sequenceChange.OldSequence != null)
                 {
-                    downScript.AppendLine(MigrationSqlGenerator.GenerateDropSequenceStatement(sequenceChange.OldSequence.Name, sequenceChange.OldSequence.Schema));
+                    downScript.AppendLine(GenerateSequences.GenerateDropSequenceStatement(sequenceChange.OldSequence.Name, sequenceChange.OldSequence.Schema));
                 }
             }
 
@@ -1506,7 +1568,7 @@ public static class MigrationGenerator
                 {
                     schema = droppedProcedure.Schema;
                 }
-                downScript.Append(MigrationSqlGenerator.GenerateDropProcedureStatement(droppedProcedureName, schema));
+                downScript.Append(GenerateProcedures.GenerateDropProcedureStatement(droppedProcedureName, schema));
                 downScript.AppendLine();
             }
             // For Modify: drop the current procedure (OldProcedure - after modification) before recreating the old one
@@ -1514,7 +1576,7 @@ public static class MigrationGenerator
             {
                 if (procedureChange.ChangeType == ProcedureChangeType.Modify && procedureChange.OldProcedure != null)
                 {
-                    downScript.Append(MigrationSqlGenerator.GenerateDropProcedureStatement(procedureChange.OldProcedure.Name, procedureChange.OldProcedure.Schema));
+                    downScript.Append(GenerateProcedures.GenerateDropProcedureStatement(procedureChange.OldProcedure.Name, procedureChange.OldProcedure.Schema));
                     downScript.AppendLine();
                 }
             }
@@ -1529,7 +1591,7 @@ public static class MigrationGenerator
             foreach (SqlSequence newSequence in diff.NewSequences.OrderBy(s => s.Name))
             {
                 MigrationLogger.Log($"  [CREATE SEQUENCE] {newSequence.Name}");
-                downScript.Append(MigrationSqlGenerator.GenerateCreateSequenceStatement(newSequence));
+                downScript.Append(GenerateSequences.GenerateCreateSequenceStatement(newSequence));
                 downScript.AppendLine();
             }
             // For Modify: restore the old sequence (NewSequence - before modification)
@@ -1537,7 +1599,7 @@ public static class MigrationGenerator
             {
                 if (sequenceChange.ChangeType == SequenceChangeType.Modify && sequenceChange.NewSequence != null)
                 {
-                    downScript.Append(MigrationSqlGenerator.GenerateCreateSequenceStatement(sequenceChange.NewSequence));
+                    downScript.Append(GenerateSequences.GenerateCreateSequenceStatement(sequenceChange.NewSequence));
                     downScript.AppendLine();
                 }
             }
@@ -1547,7 +1609,7 @@ public static class MigrationGenerator
             // These are procedures that were DROPPED by the migration, so we need to RECREATE them in the down script
             foreach (SqlStoredProcedure newProcedure in diff.NewProcedures.OrderBy(p => p.Name))
             {
-                downScript.Append(MigrationSqlGenerator.GenerateCreateProcedureStatement(newProcedure));
+                downScript.Append(GenerateProcedures.GenerateCreateProcedureStatement(newProcedure));
                 downScript.AppendLine();
             }
             // For Modify: restore the old procedure (NewProcedure - before modification)
@@ -1555,7 +1617,7 @@ public static class MigrationGenerator
             {
                 if (procedureChange.ChangeType == ProcedureChangeType.Modify && procedureChange.NewProcedure != null)
                 {
-                    downScript.Append(MigrationSqlGenerator.GenerateCreateProcedureStatement(procedureChange.NewProcedure));
+                    downScript.Append(GenerateProcedures.GenerateCreateProcedureStatement(procedureChange.NewProcedure));
                     downScript.AppendLine();
                 }
             }
@@ -1662,7 +1724,7 @@ public static class MigrationGenerator
                     
                     // Desired table is targetSchema (what we're rolling back to)
                     // Both should have the same columns, but order might differ
-                    (string reorderSql, List<string> constraintSql) = MigrationSqlGenerator.GenerateColumnReorderStatement(
+                    (string reorderSql, List<string> constraintSql) = GenerateTables.GenerateColumnReorderStatement(
                         actualTableForReorder,      // Actual database state after down script (with correct order)
                         targetTableDown,            // Desired state (target schema - what we're rolling back to)
                         allTablesForFkDown);
@@ -2066,7 +2128,7 @@ public static class MigrationGenerator
                         MigrationLogger.Log($"    actualTable columns: [{string.Join(", ", actualTable.Columns.Values.OrderBy(c => c.OrdinalPosition).Select(c => c.Name))}]");
                         MigrationLogger.Log($"    desiredTable columns: [{string.Join(", ", desiredTable.Columns.Values.OrderBy(c => c.OrdinalPosition).Select(c => c.Name))}]");
                         
-                        (string reorderSql, List<string> constraintSql) = MigrationSqlGenerator.GenerateColumnReorderStatement(
+                        (string reorderSql, List<string> constraintSql) = GenerateTables.GenerateColumnReorderStatement(
                             actualTable,      // Actual database state (from schemaAfterAllColumnChanges - reflects state after Phase 2)
                             desiredTable,     // Desired state (with columns in correct order)
                             allTablesForFk);

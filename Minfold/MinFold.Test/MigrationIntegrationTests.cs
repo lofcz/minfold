@@ -423,8 +423,8 @@ public class MigrationIntegrationTests
         await DropPrimaryKeyConstraint(sqlService, "Categories");
 
         // Now drop and recreate the id column without identity
-        string dropIdColumnSql = MigrationSqlGenerator.GenerateDropColumnStatement("id", "Categories");
-        string addIdColumnSql = MigrationSqlGenerator.GenerateAddColumnStatement(
+        string dropIdColumnSql = GenerateColumns.GenerateDropColumnStatement("id", "Categories");
+        string addIdColumnSql = GenerateColumns.GenerateAddColumnStatement(
             new SqlTableColumn(
                 Name: "id",
                 OrdinalPosition: 0,
@@ -460,8 +460,8 @@ public class MigrationIntegrationTests
 
         // Step 1d: Change sequenceNumber to identity - use the same SQL that the migration generator would produce
         // This tests that the migration generator correctly handles default constraints
-        string dropSequenceNumberSql = MigrationSqlGenerator.GenerateDropColumnStatement("sequenceNumber", "Categories");
-        string addSequenceNumberSql = MigrationSqlGenerator.GenerateAddColumnStatement(
+        string dropSequenceNumberSql = GenerateColumns.GenerateDropColumnStatement("sequenceNumber", "Categories");
+        string addSequenceNumberSql = GenerateColumns.GenerateAddColumnStatement(
             new SqlTableColumn(
                 Name: "sequenceNumber",
                 OrdinalPosition: 0,
@@ -521,8 +521,8 @@ public class MigrationIntegrationTests
         await DropPrimaryKeyConstraint(sqlService, "Posts");
 
         // Remove identity from id column (SQL Server only allows one identity per table)
-        string dropPostsIdColumnSql = MigrationSqlGenerator.GenerateDropColumnStatement("id", "Posts");
-        string addPostsIdColumnSql = MigrationSqlGenerator.GenerateAddColumnStatement(
+        string dropPostsIdColumnSql = GenerateColumns.GenerateDropColumnStatement("id", "Posts");
+        string addPostsIdColumnSql = GenerateColumns.GenerateAddColumnStatement(
             new SqlTableColumn(
                 Name: "id",
                 OrdinalPosition: 0,
