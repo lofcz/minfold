@@ -1666,12 +1666,6 @@ public static class MigrationGenerator
                 phases.Add(new PhaseContent(phaseNumber++, "Create Stored Procedures", phase4ProceduresContent));
             }
             
-            string phase4ProceduresContent = phase4Procedures.ToString().Trim();
-            if (!string.IsNullOrEmpty(phase4ProceduresContent))
-            {
-                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Create Stored Procedures"));
-                upScript.AppendLine(phase4ProceduresContent);
-                upScript.AppendLine();
             string upScript = BuildUpScript.Build(phases);
 
             string timestamp = MigrationUtilities.GetNextMigrationTimestamp(codePath);
