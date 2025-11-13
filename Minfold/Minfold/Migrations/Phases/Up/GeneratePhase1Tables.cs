@@ -1,6 +1,6 @@
 using System.Text;
 
-namespace Minfold;
+namespace Minfold.Migrations.Phases.Up;
 
 public static class GeneratePhase1Tables
 {

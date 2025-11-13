@@ -1,6 +1,6 @@
 using System.Text;
 
-namespace Minfold;
+namespace Minfold.Migrations.Phases.Up;
 
 public static class BuildUpScript
 {
@@ -15,7 +15,7 @@ public static class BuildUpScript
         {
             if (!string.IsNullOrWhiteSpace(phase.Content))
             {
-                upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phase.PhaseNumber, phase.Description));
+                upScript.Append(MigrationGenerator.GenerateSectionHeader(phase.PhaseNumber, phase.Description));
                 upScript.AppendLine(phase.Content);
                 upScript.AppendLine();
             }

@@ -1,7 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
 
-namespace Minfold;
+namespace Minfold.Migrations.Phases.Up;
 
 public static class GeneratePhase3Constraints
 {

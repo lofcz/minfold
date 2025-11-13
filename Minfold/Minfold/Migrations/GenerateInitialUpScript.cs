@@ -112,7 +112,7 @@ public static class GenerateInitialUpScript
         string phase0_5Content = phase0_5Sequences.ToString().Trim();
         if (!string.IsNullOrEmpty(phase0_5Content))
         {
-            upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Create Sequences"));
+            upScript.Append(MigrationGenerator.GenerateSectionHeader(phaseNumber, "Create Sequences"));
             upScript.AppendLine(phase0_5Content);
             upScript.AppendLine();
             phaseNumber++;
@@ -122,7 +122,7 @@ public static class GenerateInitialUpScript
         string phase1Content = phase1Tables.ToString().Trim();
         if (!string.IsNullOrEmpty(phase1Content))
         {
-            upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Create Tables"));
+            upScript.Append(MigrationGenerator.GenerateSectionHeader(phaseNumber, "Create Tables"));
             upScript.AppendLine(phase1Content);
             upScript.AppendLine();
             phaseNumber++;
@@ -135,7 +135,7 @@ public static class GenerateInitialUpScript
         string phase3Content = phase3Constraints.ToString().Trim();
         if (!string.IsNullOrEmpty(phase3Content))
         {
-            upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Add Foreign Key Constraints"));
+            upScript.Append(MigrationGenerator.GenerateSectionHeader(phaseNumber, "Add Foreign Key Constraints"));
             upScript.AppendLine(phase3Content);
             upScript.AppendLine();
             phaseNumber++;
@@ -151,7 +151,7 @@ public static class GenerateInitialUpScript
         string phase4Content = phase4Procedures.ToString().Trim();
         if (!string.IsNullOrEmpty(phase4Content))
         {
-            upScript.Append(MigrationSqlGenerator.GenerateSectionHeader(phaseNumber, "Create Stored Procedures"));
+            upScript.Append(MigrationGenerator.GenerateSectionHeader(phaseNumber, "Create Stored Procedures"));
             upScript.AppendLine(phase4Content);
             upScript.AppendLine();
         }

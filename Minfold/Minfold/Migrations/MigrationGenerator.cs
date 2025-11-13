@@ -342,4 +342,14 @@ public static class MigrationGenerator
             return new ResultOrException<MigrationGenerationResult>(null, ex);
         }
     }
+    
+    public static string GenerateSectionHeader(int phaseNumber, string phaseDescription)
+    {
+        StringBuilder sb = new StringBuilder();
+        sb.AppendLine("-- =============================================");
+        sb.AppendLine($"-- Phase {phaseNumber}: {phaseDescription}");
+        sb.AppendLine("-- =============================================");
+        sb.AppendLine();
+        return sb.ToString();
+    }
 }
