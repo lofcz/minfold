@@ -35,11 +35,12 @@ public static class GenerateDownPhase3ReverseColumns
             List<ColumnChange> dropChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Drop).ToList();
             List<ColumnChange> addChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Add).ToList();
             List<ColumnChange> modifyChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Modify).ToList();
+            List<ColumnChange> rebuildChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Rebuild).ToList();
             
-            // Check if we have Modify changes that require DROP+ADD, and Drop changes that would leave the modified column as the only one
-            // In this case, we need to process Modify BEFORE Drop to avoid the "only column" error
+            // Check if we have Modify/Rebuild changes that require DROP+ADD, and Drop changes that would leave the modified column as the only one
+            // In this case, we need to process Modify/Rebuild BEFORE Drop to avoid the "only column" error
             bool needsModifyBeforeDrop = false;
-            if (modifyChanges.Count > 0 && dropChanges.Count > 0 && currentSchema != null)
+            if ((modifyChanges.Count > 0 || rebuildChanges.Count > 0) && dropChanges.Count > 0 && currentSchema != null)
             {
                 if (currentSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? currentTable))
                 {
@@ -60,6 +61,12 @@ public static class GenerateDownPhase3ReverseColumns
                                 break;
                             }
                         }
+                    }
+                    
+                    // Check if any Rebuild change would be the only column after drops
+                    if (!needsModifyBeforeDrop && rebuildChanges.Count > 0 && currentDataColumnCount - dropChanges.Count == 1)
+                    {
+                        needsModifyBeforeDrop = true;
                     }
                 }
             }
@@ -94,8 +101,8 @@ public static class GenerateDownPhase3ReverseColumns
                 targetTable = null;
             }
             
-            // Create a combined list of Add and Modify operations, ordered by original position
-            List<(ColumnChange Change, int OriginalPosition, bool IsModify)> allRestoreOperations = new List<(ColumnChange, int, bool)>();
+            // Create a combined list of Add, Modify, and Rebuild operations, ordered by original position
+            List<(ColumnChange Change, int OriginalPosition, bool IsModify, bool IsRebuild)> allRestoreOperations = new List<(ColumnChange, int, bool, bool)>();
             
             // Add Modify operations (these restore modified columns)
             foreach (ColumnChange change in modifyChanges)
@@ -104,7 +111,19 @@ public static class GenerateDownPhase3ReverseColumns
                 {
                     if (targetTable.Columns.TryGetValue(change.NewColumn.Name.ToLowerInvariant(), out SqlTableColumn? targetCol))
                     {
-                        allRestoreOperations.Add((change, targetCol.OrdinalPosition, true));
+                        allRestoreOperations.Add((change, targetCol.OrdinalPosition, true, false));
+                    }
+                }
+            }
+            
+            // Add Rebuild operations (these restore rebuilt columns - same as Modify for down script)
+            foreach (ColumnChange change in rebuildChanges)
+            {
+                if (change.NewColumn != null && targetTable != null)
+                {
+                    if (targetTable.Columns.TryGetValue(change.NewColumn.Name.ToLowerInvariant(), out SqlTableColumn? targetCol))
+                    {
+                        allRestoreOperations.Add((change, targetCol.OrdinalPosition, true, true));
                     }
                 }
             }
@@ -116,7 +135,7 @@ public static class GenerateDownPhase3ReverseColumns
                 {
                     if (targetTable.Columns.TryGetValue(change.NewColumn.Name.ToLowerInvariant(), out SqlTableColumn? targetCol))
                     {
-                        allRestoreOperations.Add((change, targetCol.OrdinalPosition, false));
+                        allRestoreOperations.Add((change, targetCol.OrdinalPosition, false, false));
                     }
                 }
             }
@@ -124,10 +143,10 @@ public static class GenerateDownPhase3ReverseColumns
             // Sort by original position to preserve column order
             allRestoreOperations = allRestoreOperations.OrderBy(op => op.OriginalPosition).ToList();
             
-            // Process operations in order, but handle Modify operations specially (they need DROP+ADD logic)
-            foreach (var (change, originalPosition, isModify) in allRestoreOperations)
+            // Process operations in order, but handle Modify/Rebuild operations specially (they need DROP+ADD logic)
+            foreach (var (change, originalPosition, isModify, isRebuild) in allRestoreOperations)
             {
-                if (isModify)
+                if (isModify || isRebuild)
                 {
                     // Handle Modify operation (restore modified column)
                     if (change.OldColumn != null && change.NewColumn != null)

@@ -33,9 +33,9 @@ public static class GenerateDownPhase1DropPrimaryKeys
                 }
             }
             
-            // Also check if any columns that are currently PKs need to be modified or dropped
+            // Also check if any columns that are currently PKs need to be modified, dropped, or rebuilt
             // For dropped columns: OldColumn is from current schema (after migration), so check OldColumn.IsPrimaryKey
-            // For modified columns: NewColumn is from current schema (after migration), so check if it's a PK that will lose PK status
+            // For modified/rebuild columns: NewColumn is from current schema (after migration), so check if it's a PK
             if (!needsPkDropped)
             {
                 foreach (ColumnChange change in tableDiff.ColumnChanges)
@@ -51,6 +51,14 @@ public static class GenerateDownPhase1DropPrimaryKeys
                     // NewColumn represents the current state (after migration)
                     if (change.ChangeType == ColumnChangeType.Modify && change.NewColumn != null && change.NewColumn.IsPrimaryKey && 
                         change.OldColumn != null && !change.OldColumn.IsPrimaryKey)
+                    {
+                        needsPkDropped = true;
+                        break;
+                    }
+                    // Check if a column that is currently a PK is being rebuilt
+                    // NewColumn represents the current state (after migration), so check if it's a PK
+                    // PK must be dropped before column can be dropped during rebuild
+                    if (change.ChangeType == ColumnChangeType.Rebuild && change.NewColumn != null && change.NewColumn.IsPrimaryKey)
                     {
                         needsPkDropped = true;
                         break;

@@ -16,16 +16,23 @@ public static class GeneratePhase0DropPrimaryKeys
         HashSet<string> tablesWithPkDropped = new HashSet<string>();
         foreach (TableDiff tableDiff in diff.ModifiedTables.OrderBy(t => t.TableName))
         {
-            // Check if any column is losing PK status
+            // Check if any column is losing PK status or being rebuilt with PK
             bool needsPkDropped = false;
             foreach (ColumnChange change in tableDiff.ColumnChanges)
             {
-                if (change.OldColumn != null && change.OldColumn.IsPrimaryKey && 
-                    (change.ChangeType == ColumnChangeType.Drop || 
-                     (change.ChangeType == ColumnChangeType.Modify && change.NewColumn != null && !change.NewColumn.IsPrimaryKey)))
+                if (change.OldColumn != null && change.OldColumn.IsPrimaryKey)
                 {
-                    needsPkDropped = true;
-                    break;
+                    // Drop PK if:
+                    // 1. Column is being dropped
+                    // 2. Column is being modified and losing PK status
+                    // 3. Column is being rebuilt (DROP+ADD) - PK must be dropped before column can be dropped
+                    if (change.ChangeType == ColumnChangeType.Drop || 
+                        change.ChangeType == ColumnChangeType.Rebuild ||
+                        (change.ChangeType == ColumnChangeType.Modify && change.NewColumn != null && !change.NewColumn.IsPrimaryKey))
+                    {
+                        needsPkDropped = true;
+                        break;
+                    }
                 }
             }
             

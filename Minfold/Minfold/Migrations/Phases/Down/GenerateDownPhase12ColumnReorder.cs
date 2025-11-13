@@ -32,12 +32,13 @@ public static class GenerateDownPhase12ColumnReorder
                 continue;
             }
             
-            // Only reorder if there were column Add or Modify operations that could have changed column order
+            // Only reorder if there were column Add, Modify (DROP+ADD), or Rebuild operations that could have changed column order
             // Drop operations don't change the order of remaining columns, so no reorder needed
-            // IMPORTANT: Only reorder if we have Add operations OR Modify operations that require DROP+ADD
+            // IMPORTANT: Only reorder if we have Add operations OR Modify operations that require DROP+ADD OR Rebuild operations
             // This is because these operations add columns at the end, which can change the order
             bool hasColumnAddOrModify = tableDiff.ColumnChanges.Any(c => 
                 c.ChangeType == ColumnChangeType.Add || 
+                c.ChangeType == ColumnChangeType.Rebuild ||
                 (c.ChangeType == ColumnChangeType.Modify && c.OldColumn != null && c.NewColumn != null &&
                  ((c.OldColumn.IsIdentity != c.NewColumn.IsIdentity) || (c.OldColumn.IsComputed != c.NewColumn.IsComputed))));
             

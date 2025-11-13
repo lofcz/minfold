@@ -117,7 +117,8 @@ public enum ColumnChangeType
 {
     Add,
     Drop,
-    Modify
+    Modify,
+    Rebuild  // Requires DROP+ADD, not ALTER COLUMN
 }
 
 public enum ForeignKeyChangeType

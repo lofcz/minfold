@@ -42,6 +42,16 @@ public static class GenerateDownPhase4RestorePrimaryKeys
                         break;
                     }
                 }
+                else if (change.ChangeType == ColumnChangeType.Rebuild && change.NewColumn != null)
+                {
+                    // For Rebuild changes, NewColumn is from target schema (what we want to restore to)
+                    // If it was a PK in the target schema, we need to restore it
+                    if (change.NewColumn.IsPrimaryKey)
+                    {
+                        needsPkRestored = true;
+                        break;
+                    }
+                }
             }
             
             if (needsPkRestored)

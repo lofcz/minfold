@@ -388,6 +388,12 @@ public static class GenerateColumns
             }
         }
         
+        // Remove columns being rebuilt (always DROP+ADD)
+        foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Rebuild && c.OldColumn != null))
+        {
+            remainingColumns.Remove(change.OldColumn!.Name);
+        }
+        
         // Add columns being added
         foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Add && c.NewColumn != null))
         {
@@ -407,6 +413,12 @@ public static class GenerateColumns
                     remainingColumns.Add(change.NewColumn.Name);
                 }
             }
+        }
+        
+        // Add columns being rebuilt (always re-added)
+        foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Rebuild && c.NewColumn != null))
+        {
+            remainingColumns.Add(change.NewColumn!.Name);
         }
         
         return remainingColumns;
@@ -451,6 +463,20 @@ public static class GenerateColumns
                 tempRemaining.Remove(columnName);
                 return tempRemaining.Count == 0;
             }
+        }
+        
+        // Check if this column is being rebuilt
+        ColumnChange? rebuildChange = tableDiff.ColumnChanges.FirstOrDefault(c => 
+            c.ChangeType == ColumnChangeType.Rebuild && 
+            c.OldColumn != null && 
+            string.Equals(c.OldColumn.Name, columnName, StringComparison.OrdinalIgnoreCase));
+        
+        if (rebuildChange != null)
+        {
+            // Temporarily remove this column from count to check if it's the only one
+            HashSet<string> tempRemaining = new HashSet<string>(remainingColumns, StringComparer.OrdinalIgnoreCase);
+            tempRemaining.Remove(columnName);
+            return tempRemaining.Count == 0;
         }
         
         return remainingColumns.Count == 1 && remainingColumns.Contains(columnName, StringComparer.OrdinalIgnoreCase);
@@ -614,16 +640,17 @@ public static class GenerateColumns
         List<ColumnChange> dropChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Drop).ToList();
         List<ColumnChange> addChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Add).ToList();
         List<ColumnChange> modifyChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Modify).ToList();
+        List<ColumnChange> rebuildChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Rebuild).ToList();
         
         // Check if dropping columns would reduce table to 0 columns
         // If so, we need to ensure at least one column is added first (from Add operations)
         bool wouldReduceToZero = WouldReduceToZeroColumns(tableDiff, currentSchema);
         
-        // Check if we have Modify changes that require DROP+ADD on the only column, AND we have Add changes
+        // Check if we have Modify/Rebuild changes that require DROP+ADD on the only column, AND we have Add changes
         // In this case, we need to add columns FIRST before modifying the only column
         // We check the TARGET schema (before migration) to see if it has only 1 column
         bool needsAddBeforeModify = false;
-        if (modifyChanges.Count > 0 && addChanges.Count > 0 && targetSchema != null)
+        if ((modifyChanges.Count > 0 || rebuildChanges.Count > 0) && addChanges.Count > 0 && targetSchema != null)
         {
             if (targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTableForCheck))
             {
@@ -639,6 +666,22 @@ public static class GenerateColumns
                         
                         if (requiresDropAdd && dataColumnCount == 1 && 
                             targetTableForCheck.Columns.TryGetValue(modifyChange.OldColumn.Name.ToLowerInvariant(), out SqlTableColumn? col) &&
+                            !col.IsComputed)
+                        {
+                            needsAddBeforeModify = true;
+                            break;
+                        }
+                    }
+                }
+                
+                // Check if any Rebuild change is on the only column in TARGET schema
+                if (!needsAddBeforeModify)
+                {
+                    foreach (ColumnChange rebuildChange in rebuildChanges)
+                    {
+                        if (rebuildChange.OldColumn != null && 
+                            dataColumnCount == 1 && 
+                            targetTableForCheck.Columns.TryGetValue(rebuildChange.OldColumn.Name.ToLowerInvariant(), out SqlTableColumn? col) &&
                             !col.IsComputed)
                         {
                             needsAddBeforeModify = true;
@@ -680,6 +723,32 @@ public static class GenerateColumns
             if (change.OldColumn != null)
             {
                 sb.AppendLine(GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName, schema));
+            }
+        }
+
+        // Handle Rebuild changes (require DROP+ADD)
+        foreach (ColumnChange change in rebuildChanges)
+        {
+            if (change.OldColumn != null && change.NewColumn != null)
+            {
+                // Check TARGET schema (before migration) to see if this was the only column
+                bool isSingleColumnRebuild = needsAddBeforeModify && targetSchema != null &&
+                    targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTableForCheck) &&
+                    targetTableForCheck.Columns.Values.Count(c => !c.IsComputed) == 1 &&
+                    targetTableForCheck.Columns.TryGetValue(change.OldColumn.Name.ToLowerInvariant(), out SqlTableColumn? col) &&
+                    !col.IsComputed;
+                
+                if (isSingleColumnRebuild)
+                {
+                    // Columns already added first, safe to use normal DROP+ADD
+                    sb.AppendLine(GenerateDropColumnStatement(change.OldColumn.Name, tableDiff.TableName, schema));
+                    sb.Append(GenerateAddColumnStatement(change.NewColumn, tableDiff.TableName, schema));
+                }
+                else
+                {
+                    // Use safe wrapper for rebuild changes
+                    sb.Append(GenerateSafeColumnDropAndAdd(change.OldColumn, change.NewColumn, tableDiff.TableName, schema, tableDiff, currentSchema));
+                }
             }
         }
 

@@ -184,7 +184,13 @@ public static class MigrationSchemaComparer
                 // Column exists in both - check if modified
                 if (!AreColumnsEqual(currentColumn, targetColumn.Value))
                 {
-                    columnChanges.Add(new ColumnChange(ColumnChangeType.Modify, currentColumn, targetColumn.Value));
+                    // Check if this change requires rebuild (DROP+ADD) vs simple ALTER COLUMN
+                    ColumnChangeType changeType = ColumnRebuildDetector.RequiresRebuild(
+                        currentColumn, targetColumn.Value, currentTable)
+                        ? ColumnChangeType.Rebuild
+                        : ColumnChangeType.Modify;
+                    
+                    columnChanges.Add(new ColumnChange(changeType, currentColumn, targetColumn.Value));
                 }
             }
             else

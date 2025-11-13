@@ -236,10 +236,11 @@ public static class MigrationSchemaSnapshot
                     .Select(c => c.OldColumn!.Name.ToLowerInvariant())
                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-                // Apply column changes in order: Add first, then Modify, then Drop
+                // Apply column changes in order: Add first, then Modify/Rebuild, then Drop
                 // This ensures that columns are added before they might be dropped (e.g., in down scripts)
                 List<ColumnChange> addChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Add).ToList();
                 List<ColumnChange> modifyChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Modify).ToList();
+                List<ColumnChange> rebuildChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Rebuild).ToList();
                 List<ColumnChange> dropChanges = tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Drop).ToList();
                 
                 // Process Add operations first
@@ -262,6 +263,16 @@ public static class MigrationSchemaSnapshot
                     }
                 }
                 
+                // Then process Rebuild operations (always DROP+ADD)
+                foreach (ColumnChange change in rebuildChanges)
+                {
+                    if (change.NewColumn != null)
+                    {
+                        // Rebuild changes always DROP+ADD, so column goes to the end
+                        newColumns[change.NewColumn.Name.ToLowerInvariant()] = change.NewColumn;
+                    }
+                }
+                
                 // Finally process Drop operations (after Add and Modify, so we don't drop columns that were just added)
                 foreach (ColumnChange change in dropChanges)
                 {
@@ -279,10 +290,12 @@ public static class MigrationSchemaSnapshot
                 // 2. Modified columns that require DROP+ADD go to the end (like new columns)
                 // 3. New columns go to the end
                 
-                // Identify columns that require DROP+ADD (identity or computed changes)
+                // Identify columns that require DROP+ADD (identity or computed changes, or Rebuild changes)
                 HashSet<string> dropAddColumnNames = tableDiff.ColumnChanges
-                    .Where(c => c.ChangeType == ColumnChangeType.Modify && c.OldColumn != null && c.NewColumn != null &&
-                        ((c.OldColumn.IsIdentity != c.NewColumn.IsIdentity) || (c.OldColumn.IsComputed != c.NewColumn.IsComputed)))
+                    .Where(c => 
+                        (c.ChangeType == ColumnChangeType.Modify && c.OldColumn != null && c.NewColumn != null &&
+                         ((c.OldColumn.IsIdentity != c.NewColumn.IsIdentity) || (c.OldColumn.IsComputed != c.NewColumn.IsComputed))) ||
+                        (c.ChangeType == ColumnChangeType.Rebuild && c.NewColumn != null))
                     .Select(c => c.NewColumn!.Name.ToLowerInvariant())
                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
@@ -349,6 +362,19 @@ public static class MigrationSchemaSnapshot
                                 newOrDropAddColumns.Add(modifiedCol);
                                 processedColumnNames.Add(modifiedCol.Name.ToLowerInvariant());
                             }
+                        }
+                    }
+                }
+                
+                // Then, process all Rebuild operations (these go after Modify operations with DROP+ADD)
+                foreach (ColumnChange change in tableDiff.ColumnChanges.Where(c => c.ChangeType == ColumnChangeType.Rebuild))
+                {
+                    if (change.NewColumn != null && newColumns.TryGetValue(change.NewColumn.Name.ToLowerInvariant(), out SqlTableColumn? rebuiltCol))
+                    {
+                        if (!processedColumnNames.Contains(rebuiltCol.Name.ToLowerInvariant()))
+                        {
+                            newOrDropAddColumns.Add(rebuiltCol);
+                            processedColumnNames.Add(rebuiltCol.Name.ToLowerInvariant());
                         }
                     }
                 }

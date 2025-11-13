@@ -129,10 +129,11 @@ public static class GeneratePhase3_5ColumnReorder
         {
             MigrationLogger.Log($"\n=== Phase 3.5: Reorder Columns for table: {tableDiff.TableName} ===");
             
-            // Skip reordering if there are no Add or Modify (DROP+ADD) operations that would change column order
+            // Skip reordering if there are no Add, Modify (DROP+ADD), or Rebuild operations that would change column order
             // Drop operations don't change the order of remaining columns, so no reorder needed
             bool hasColumnAddOrModify = tableDiff.ColumnChanges.Any(c => 
                 c.ChangeType == ColumnChangeType.Add || 
+                c.ChangeType == ColumnChangeType.Rebuild ||
                 (c.ChangeType == ColumnChangeType.Modify && c.OldColumn != null && c.NewColumn != null &&
                  ((c.OldColumn.IsIdentity != c.NewColumn.IsIdentity) || (c.OldColumn.IsComputed != c.NewColumn.IsComputed))));
             
