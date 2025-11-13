@@ -141,18 +141,62 @@ public static class GeneratePhase3_5ColumnReorder
             
             MigrationLogger.Log($"  hasColumnAddOrModify: {hasColumnAddOrModify}, hasDropOperations: {hasDropOperations}");
             
-            if (!hasColumnAddOrModify)
+            // Check if there's a column order difference even if there are no column changes
+            // This handles the case where columns are manually reordered (only OrdinalPosition differs)
+            bool hasColumnOrderDifference = false;
+            if (!hasColumnAddOrModify && tableDiff.ColumnChanges.Count == 0)
             {
-                // No column Add/Modify operations that would change order, skip reordering
+                // No column changes, but check if column order differs
+                if (currentSchema != null && currentSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? currentTable) &&
+                    targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTable))
+                {
+                    List<SqlTableColumn> currentOrdered = currentTable.Columns.Values
+                        .OrderBy(c => c.OrdinalPosition)
+                        .ToList();
+                    List<SqlTableColumn> targetOrdered = targetTable.Columns.Values
+                        .OrderBy(c => c.OrdinalPosition)
+                        .ToList();
+                    
+                    if (currentOrdered.Count == targetOrdered.Count && currentOrdered.Count > 0)
+                    {
+                        hasColumnOrderDifference = !currentOrdered.Select(c => c.Name)
+                            .SequenceEqual(targetOrdered.Select(c => c.Name), StringComparer.OrdinalIgnoreCase);
+                    }
+                }
+            }
+            
+            if (!hasColumnAddOrModify && !hasColumnOrderDifference)
+            {
+                // No column Add/Modify operations that would change order, and no order difference, skip reordering
                 // Drop operations don't change the order of remaining columns
                 // IMPORTANT: If we only have Drop operations, skip reordering entirely
                 // This prevents trying to reorder columns that were already dropped
-                MigrationLogger.Log($"  Skipping reordering: no Add/Modify operations that change order");
+                MigrationLogger.Log($"  Skipping reordering: no Add/Modify operations that change order and no column order difference");
                 continue;
             }
             
             // Get actual table from schemaAfterAllColumnChanges (what database has after Phase 2 - reflects actual column order)
-            if (schemaAfterAllColumnChanges.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? actualTable))
+            // However, if there are no column changes, schemaAfterAllColumnChanges equals targetSchema (no changes applied)
+            // So we need to use targetSchema as actualTable (what database SHOULD have) and currentSchema as desiredTable (what we want)
+            SqlTable? actualTable = null;
+            if (hasColumnOrderDifference && !hasColumnAddOrModify)
+            {
+                // No column changes, but order differs
+                // actualTable = targetSchema (what database SHOULD have according to migrations)
+                // desiredTable = currentSchema (what database ACTUALLY has, which is what we want to migrate TO)
+                if (targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTable))
+                {
+                    actualTable = targetTable;
+                    MigrationLogger.Log($"  Using targetSchema as actualTable (no column changes, order-only difference)");
+                }
+            }
+            
+            if (actualTable == null && schemaAfterAllColumnChanges.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? actualTableFromSchema))
+            {
+                actualTable = actualTableFromSchema;
+            }
+            
+            if (actualTable != null)
             {
                 MigrationLogger.Log($"  actualTable columns after Phase 2: [{string.Join(", ", actualTable.Columns.Values.OrderBy(c => c.OrdinalPosition).Select(c => c.Name))}]");
                 
@@ -182,11 +226,22 @@ public static class GeneratePhase3_5ColumnReorder
                 }
                 else
                 {
-                    // No drops - use currentSchema to preserve manual reordering
+                    // No drops - determine order source based on whether we have column order differences
+                    // For order-only differences: use currentSchema as desired (what we're migrating TO)
+                    // For other cases: use currentSchema to preserve manual reordering
                     SqlTable? orderSourceTable = null;
-                    if (currentSchema != null && currentSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? currentTable))
+                    if (hasColumnOrderDifference && !hasColumnAddOrModify)
                     {
-                        orderSourceTable = currentTable;
+                        // Order-only difference: use currentSchema as desired order (what we're migrating TO)
+                        if (currentSchema != null && currentSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? currentTable))
+                        {
+                            orderSourceTable = currentTable;
+                            MigrationLogger.Log($"  Using currentSchema as order source (order-only difference, migrating TO currentSchema)");
+                        }
+                    }
+                    else if (currentSchema != null && currentSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? currentTableForReorder))
+                    {
+                        orderSourceTable = currentTableForReorder;
                     }
                     else if (targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTableFallback))
                     {

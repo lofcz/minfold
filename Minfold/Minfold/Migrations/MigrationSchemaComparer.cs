@@ -40,7 +40,9 @@ public static class MigrationSchemaComparer
             if (currentSchema.TryGetValue(targetTable.Key, out SqlTable? currentTable))
             {
                 TableDiff? tableDiff = CompareTables(currentTable, targetTable.Value);
-                if (tableDiff != null && (tableDiff.ColumnChanges.Count > 0 || tableDiff.ForeignKeyChanges.Count > 0 || tableDiff.IndexChanges.Count > 0))
+                // Include TableDiff if it has changes OR if it exists (which means there's a difference, possibly column order)
+                // CompareTables returns null only when there are no differences at all
+                if (tableDiff != null)
                 {
                     modifiedTables.Add(tableDiff);
                 }
@@ -294,7 +296,29 @@ public static class MigrationSchemaComparer
             }
         }
 
-        if (columnChanges.Count == 0 && foreignKeyChanges.Count == 0 && indexChanges.Count == 0)
+        // Check for column order differences even if all columns are "equal"
+        // Column order is tracked via OrdinalPosition, but AreColumnsEqual doesn't compare it
+        // So we need to check separately if columns are in different order
+        bool hasColumnOrderDifference = false;
+        if (columnChanges.Count == 0 && currentTable.Columns.Count == targetTable.Columns.Count)
+        {
+            // All columns are "equal" (same properties), but check if order differs
+            List<SqlTableColumn> currentOrdered = currentTable.Columns.Values
+                .OrderBy(c => c.OrdinalPosition)
+                .ToList();
+            List<SqlTableColumn> targetOrdered = targetTable.Columns.Values
+                .OrderBy(c => c.OrdinalPosition)
+                .ToList();
+            
+            if (currentOrdered.Count == targetOrdered.Count)
+            {
+                // Check if column names are in different order
+                hasColumnOrderDifference = !currentOrdered.Select(c => c.Name)
+                    .SequenceEqual(targetOrdered.Select(c => c.Name), StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
+        if (columnChanges.Count == 0 && foreignKeyChanges.Count == 0 && indexChanges.Count == 0 && !hasColumnOrderDifference)
         {
             return null;
         }
