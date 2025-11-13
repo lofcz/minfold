@@ -27,7 +27,7 @@ public static class GenerateIncrementalUpScript
             targetSchema);
 
         // Generate remaining phases
-        string phase3ConstraintsContent = GeneratePhase3Constraints.Generate(diff, targetSchema);
+        string phase3ConstraintsContent = GeneratePhase3Constraints.Generate(diff, targetSchema, currentSchema);
         string phase3_5ColumnReorderContent = GeneratePhase3_5ColumnReorder.Generate(
             upDiff,
             targetSchema,

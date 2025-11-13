@@ -280,6 +280,12 @@ public static class GenerateColumns
         bool isTemporaryConstraint = false;
         
         // Always assume tables may have data - we can't query the database during migration generation
+        // SQL Server requires dropping default constraints before ALTER COLUMN, even if the default value isn't changing
+        // Check if old column has a default constraint that needs to be dropped before ALTER COLUMN
+        bool oldColumnHasDefault = !string.IsNullOrWhiteSpace(oldColumn.DefaultConstraintValue);
+        bool newColumnHasDefault = !string.IsNullOrWhiteSpace(newColumn.DefaultConstraintValue);
+        bool needsToDropDefaultBeforeAlter = oldColumnHasDefault && !changingToNotNull && !changingToNullable && !newColumn.IsIdentity;
+        
         // When changing from nullable to NOT NULL, we need to:
         // 1. Drop any existing DEFAULT constraint (always drop to be safe - constraint may exist from previous migration steps)
         // 2. Add a DEFAULT constraint (temporary if column doesn't have one)
@@ -321,6 +327,13 @@ public static class GenerateColumns
             
             // Update existing NULL values to the default
             sb.AppendLine($"UPDATE [{schema}].[{tableName}] SET [{newColumn.Name}] = {defaultValue} WHERE [{newColumn.Name}] IS NULL;");
+        }
+        
+        // Drop default constraint before ALTER COLUMN if old column has one and we're not already handling it above
+        // This is required by SQL Server even if the default value isn't changing
+        if (needsToDropDefaultBeforeAlter)
+        {
+            sb.Append(GenerateDropDefaultConstraintStatement(newColumn.Name, tableName, null, schema));
         }
 
         sb.Append($"ALTER TABLE [{schema}].[{tableName}] ALTER COLUMN [");
@@ -389,18 +402,24 @@ public static class GenerateColumns
         }
         
         // Handle default constraint changes (value changes, additions, removals) when nullability doesn't change
+        // Note: If we already dropped the default constraint above (needsToDropDefaultBeforeAlter), we need to re-add it
         if (!changingToNotNull && !changingToNullable && !newColumn.IsIdentity)
         {
-            if (defaultRemoved || defaultValueChanged || defaultAdded)
+            if (defaultRemoved || defaultValueChanged || defaultAdded || needsToDropDefaultBeforeAlter)
             {
-                // Drop old default constraint if it exists
+                // Drop old default constraint if it exists (if not already dropped above)
+                if (!needsToDropDefaultBeforeAlter)
+                {
                 sb.Append(GenerateDropDefaultConstraintStatement(newColumn.Name, tableName, null, schema));
+                }
                 
-                // Add new default constraint if needed
+                // Add new default constraint if needed (or re-add if we dropped it above)
                 if (!defaultRemoved && !string.IsNullOrWhiteSpace(newColumn.DefaultConstraintValue))
                 {
                     string defaultValue = NormalizeDefaultConstraintValue(newColumn.DefaultConstraintValue);
                     // Use newColumn's constraint name if specified, otherwise try to preserve oldColumn's name, otherwise generate deterministic
+                    // When needsToDropDefaultBeforeAlter is true, we're just dropping/re-adding due to ALTER COLUMN requirements,
+                    // so preserve the old constraint name if the default value hasn't changed
                     string newConstraintName = !string.IsNullOrWhiteSpace(newColumn.DefaultConstraintName)
                         ? newColumn.DefaultConstraintName
                         : (!string.IsNullOrWhiteSpace(oldColumn.DefaultConstraintName) && !defaultValueChanged
@@ -997,7 +1016,11 @@ public static class GenerateColumns
                         sb.Append(alterSql);
                         
                         // Handle default constraint changes separately (ALTER COLUMN doesn't support DEFAULT)
-                        if (defaultConstraintChanged)
+                        // BUT: Skip if we're changing nullable to NOT NULL - GenerateAlterColumnStatement already handles that
+                        bool changingToNotNull = change.OldColumn.IsNullable && !change.NewColumn.IsNullable;
+                        bool changingToNullable = !change.OldColumn.IsNullable && change.NewColumn.IsNullable;
+                        
+                        if (defaultConstraintChanged && !changingToNotNull && !changingToNullable)
                         {
                             // Drop old default constraint if it exists
                             if (!string.IsNullOrWhiteSpace(change.OldColumn.DefaultConstraintValue))

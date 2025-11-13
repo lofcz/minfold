@@ -172,6 +172,39 @@ public static class MigrationGenerator
             ConcurrentDictionary<string, SqlSequence> targetSequences = targetSchemaResult.Result.Sequences;
             ConcurrentDictionary<string, SqlStoredProcedure> targetProcedures = targetSchemaResult.Result.Procedures;
 
+            // Attach foreign keys to target schema (needed for FK restoration in Phase 3)
+            // Get FKs from database for target schema tables - these represent what FKs SHOULD exist
+            ResultOrException<Dictionary<string, List<SqlForeignKey>>> targetFksResult = await sqlService.GetForeignKeys(targetSchema.Keys.ToList());
+            if (targetFksResult.Exception is not null)
+            {
+                return new ResultOrException<MigrationGenerationResult>(null, targetFksResult.Exception);
+            }
+
+            foreach (KeyValuePair<string, List<SqlForeignKey>> fkList in targetFksResult.Result ?? new Dictionary<string, List<SqlForeignKey>>())
+            {
+                MigrationLogger.Log($"  [ATTACH TARGET FKs] Attaching {fkList.Value.Count} FKs to target table: {fkList.Key}");
+                if (targetSchema.TryGetValue(fkList.Key, out SqlTable? table))
+                {
+                    foreach (SqlForeignKey fk in fkList.Value)
+                    {
+                        MigrationLogger.Log($"    [ATTACH TARGET FK] {fk.Name}: {fk.Table}.{fk.Column} -> {fk.RefTable}.{fk.RefColumn}");
+                        if (table.Columns.TryGetValue(fk.Column.ToLowerInvariant(), out SqlTableColumn? column))
+                        {
+                            column.ForeignKeys.Add(fk);
+                            MigrationLogger.Log($"      [ATTACHED TARGET FK] FK {fk.Name} attached to {fk.Table}.{fk.Column}");
+                        }
+                        else
+                        {
+                            MigrationLogger.Log($"      [ERROR] Column {fk.Column} not found in target table {fk.Table}");
+                        }
+                    }
+                }
+                else
+                {
+                    MigrationLogger.Log($"    [ERROR] Target table {fkList.Key} not found in targetSchema");
+                }
+            }
+
             // Attach foreign keys to current schema for comparison
             ResultOrException<Dictionary<string, List<SqlForeignKey>>> currentFksResult = await sqlService.GetForeignKeys(currentSchemaResult.Result.Keys.ToList());
             if (currentFksResult.Exception is not null)
@@ -181,15 +214,26 @@ public static class MigrationGenerator
 
             foreach (KeyValuePair<string, List<SqlForeignKey>> fkList in currentFksResult.Result ?? new Dictionary<string, List<SqlForeignKey>>())
             {
+                MigrationLogger.Log($"  [ATTACH FKs] Attaching {fkList.Value.Count} FKs to table: {fkList.Key}");
                 if (currentSchemaResult.Result.TryGetValue(fkList.Key, out SqlTable? table))
                 {
                     foreach (SqlForeignKey fk in fkList.Value)
                     {
+                        MigrationLogger.Log($"    [ATTACH FK] {fk.Name}: {fk.Table}.{fk.Column} -> {fk.RefTable}.{fk.RefColumn}");
                         if (table.Columns.TryGetValue(fk.Column.ToLowerInvariant(), out SqlTableColumn? column))
                         {
                             column.ForeignKeys.Add(fk);
+                            MigrationLogger.Log($"      [ATTACHED] FK {fk.Name} attached to {fk.Table}.{fk.Column}");
+                        }
+                        else
+                        {
+                            MigrationLogger.Log($"      [ERROR] Column {fk.Column} not found in table {fk.Table}");
                         }
                     }
+                }
+                else
+                {
+                    MigrationLogger.Log($"    [ERROR] Table {fkList.Key} not found in currentSchema");
                 }
             }
 

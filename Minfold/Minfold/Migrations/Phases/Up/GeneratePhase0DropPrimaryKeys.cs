@@ -16,7 +16,8 @@ public static class GeneratePhase0DropPrimaryKeys
         HashSet<string> tablesWithPkDropped = new HashSet<string>();
         foreach (TableDiff tableDiff in diff.ModifiedTables.OrderBy(t => t.TableName))
         {
-            // Check if any column is losing PK status or being rebuilt with PK
+            // Check if any column that is part of the PK is being modified
+            // SQL Server requires PK to be dropped before ALTER COLUMN on any PK column
             bool needsPkDropped = false;
             foreach (ColumnChange change in tableDiff.ColumnChanges)
             {
@@ -24,11 +25,12 @@ public static class GeneratePhase0DropPrimaryKeys
                 {
                     // Drop PK if:
                     // 1. Column is being dropped
-                    // 2. Column is being modified and losing PK status
-                    // 3. Column is being rebuilt (DROP+ADD) - PK must be dropped before column can be dropped
+                    // 2. Column is being rebuilt (DROP+ADD) - PK must be dropped before column can be dropped
+                    // 3. Column is being modified (even if it keeps PK status) - SQL Server requires PK drop before ALTER COLUMN
+                    // 4. Column is being modified and losing PK status
                     if (change.ChangeType == ColumnChangeType.Drop || 
                         change.ChangeType == ColumnChangeType.Rebuild ||
-                        (change.ChangeType == ColumnChangeType.Modify && change.NewColumn != null && !change.NewColumn.IsPrimaryKey))
+                        change.ChangeType == ColumnChangeType.Modify)
                     {
                         needsPkDropped = true;
                         break;

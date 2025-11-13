@@ -121,6 +121,13 @@ public static class GeneratePhase3_5ColumnReorder
             MigrationLogger.Log($"    {kvp.Key}: columns=[{string.Join(", ", kvp.Value.Columns.Values.OrderBy(c => c.OrdinalPosition).Select(c => c.Name))}]");
         }
         
+        // Build a merged schema dictionary with FK metadata from base/target/current schemas
+        Dictionary<string, SqlTable> schemaForFkOperations = BuildSchemaForFkOperations(
+            schemaAfterAllColumnChanges,
+            targetSchema,
+            currentSchema,
+            upDiff);
+        
         // Build a complete schema dictionary for FK generation (includes all tables from schemaAfterAllColumnChanges)
         ConcurrentDictionary<string, SqlTable> allTablesForFk = new ConcurrentDictionary<string, SqlTable>(schemaAfterAllColumnChanges, StringComparer.OrdinalIgnoreCase);
         
@@ -315,12 +322,74 @@ public static class GeneratePhase3_5ColumnReorder
                 MigrationLogger.Log($"  isSameReference: {isSameReference}, hasSameColumns: {hasSameColumns}");
                 MigrationLogger.Log($"  actualTable.Columns.Count: {actualTable.Columns.Count}, desiredTable.Columns.Count: {desiredTable.Columns.Count}");
                 
-                if (isSameReference && hasSameColumns)
+                // Check if column order actually differs before proceeding
+                // This matches the logic in GenerateColumnReorderStatement to avoid dropping FKs unnecessarily
+                List<SqlTableColumn> actualOrdered = actualTable.Columns.Values
+                    .OrderBy(c => c.OrdinalPosition)
+                    .ToList();
+                List<SqlTableColumn> desiredOrdered = desiredTable.Columns.Values
+                    .OrderBy(c => c.OrdinalPosition)
+                    .ToList();
+                
+                bool orderActuallyDiffers = !isSameReference && 
+                    (actualOrdered.Count != desiredOrdered.Count ||
+                     !actualOrdered.Select(c => c.Name)
+                         .SequenceEqual(desiredOrdered.Select(c => c.Name), StringComparer.OrdinalIgnoreCase));
+                
+                if (!orderActuallyDiffers)
                 {
-                    // Same reference and same columns - order already matches, skip reordering
-                    MigrationLogger.Log($"  Skipping reordering: same reference and same columns (order already matches)");
+                    // Order already matches, skip reordering (don't drop FKs)
+                    MigrationLogger.Log($"  Skipping reordering: order already matches (checked column sequence)");
                     continue;
                 }
+                
+                // Before reordering (which drops and recreates the table), we need to drop FKs that reference this table
+                // IMPORTANT: Use schemaAfterAllColumnChanges (state after Phase 2) to find FKs, not currentSchema
+                // This ensures we drop FKs that were added during the migration (like FK_Projects_Owner added in Phase 2)
+                HashSet<string> processedFksForReorder = new HashSet<string>();
+                foreach (KeyValuePair<string, SqlTable> tablePair in schemaForFkOperations)
+                {
+                    foreach (SqlTableColumn column in tablePair.Value.Columns.Values)
+                    {
+                        foreach (SqlForeignKey fk in column.ForeignKeys)
+                        {
+                            // Check if this FK references the table being reordered
+                            if (fk.RefTable.Equals(tableDiff.TableName, StringComparison.OrdinalIgnoreCase))
+                            {
+                                if (!processedFksForReorder.Contains(fk.Name))
+                                {
+                                    MigrationLogger.Log($"  [DROP FK for reorder] {fk.Name} (references {tableDiff.TableName} being reordered)");
+                                    // Use unique suffix to avoid conflicts with Phase 0 FK drops
+                                    string uniqueSuffix = MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(fk.Schema, fk.Table, fk.Name, "reorder");
+                                    sb.AppendLine(GenerateForeignKeys.GenerateDropForeignKeyStatement(fk, uniqueSuffix));
+                                    processedFksForReorder.Add(fk.Name);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Safety net: drop any remaining FKs that still reference this table (in case they weren't captured above)
+                string fkCleanupSuffix = MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(actualTable.Schema, actualTable.Name, tableDiff.TableName, "reorder", "cleanup");
+                sb.AppendLine($"""
+                    DECLARE @fkName_{fkCleanupSuffix} NVARCHAR(128);
+                    DECLARE @fkSchema_{fkCleanupSuffix} NVARCHAR(128);
+                    DECLARE @fkTable_{fkCleanupSuffix} NVARCHAR(128);
+                    DECLARE fk_cursor_{fkCleanupSuffix} CURSOR LOCAL FAST_FORWARD FOR
+                        SELECT fk.name, OBJECT_SCHEMA_NAME(fk.parent_object_id), OBJECT_NAME(fk.parent_object_id)
+                        FROM sys.foreign_keys fk
+                        WHERE fk.referenced_object_id = OBJECT_ID('[{actualTable.Schema}].[{tableDiff.TableName}]');
+                    OPEN fk_cursor_{fkCleanupSuffix};
+                    FETCH NEXT FROM fk_cursor_{fkCleanupSuffix} INTO @fkName_{fkCleanupSuffix}, @fkSchema_{fkCleanupSuffix}, @fkTable_{fkCleanupSuffix};
+                    WHILE @@FETCH_STATUS = 0
+                    BEGIN
+                        DECLARE @dropSql_{fkCleanupSuffix} NVARCHAR(MAX) = N'ALTER TABLE [' + @fkSchema_{fkCleanupSuffix} + '].[' + @fkTable_{fkCleanupSuffix} + '] DROP CONSTRAINT [' + @fkName_{fkCleanupSuffix} + ']';
+                        EXEC sp_executesql @dropSql_{fkCleanupSuffix};
+                        FETCH NEXT FROM fk_cursor_{fkCleanupSuffix} INTO @fkName_{fkCleanupSuffix}, @fkSchema_{fkCleanupSuffix}, @fkTable_{fkCleanupSuffix};
+                    END
+                    CLOSE fk_cursor_{fkCleanupSuffix};
+                    DEALLOCATE fk_cursor_{fkCleanupSuffix};
+                    """);
                 
                 MigrationLogger.Log($"  Calling GenerateColumnReorderStatement with:");
                 MigrationLogger.Log($"    actualTable columns: [{string.Join(", ", actualTable.Columns.Values.OrderBy(c => c.OrdinalPosition).Select(c => c.Name))}]");
@@ -341,11 +410,236 @@ public static class GeneratePhase3_5ColumnReorder
                         sb.Append(constraint);
                         sb.AppendLine();
                     }
+                    
+                    // Also restore FKs from other tables that reference this reordered table
+                    // These FKs were dropped when we dropped the table, but GenerateColumnReorderStatement
+                    // only restores FKs that belong to the reordered table itself
+                    // IMPORTANT: Skip FKs that belong to the reordered table itself (they're already restored by GenerateColumnReorderStatement)
+                    // IMPORTANT: Use schemaAfterAllColumnChanges (not targetSchema) because it includes FKs added in Phase 2
+                    HashSet<string> restoredFkNames = new HashSet<string>();
+                    HashSet<string> fksBelongingToReorderedTable = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    
+                    // Collect FKs that belong to the reordered table (these are already restored by GenerateColumnReorderStatement)
+                    if (desiredTable != null)
+                    {
+                        foreach (SqlTableColumn column in desiredTable.Columns.Values)
+                        {
+                            foreach (SqlForeignKey fk in column.ForeignKeys)
+                            {
+                                fksBelongingToReorderedTable.Add(fk.Name);
+                            }
+                        }
+                    }
+                    
+                    // Use merged schema (state after Phase 2 plus target metadata) instead of targetSchema
+                    // This ensures we restore FKs that were added during the migration (like FK_Projects_Owner)
+                    foreach (KeyValuePair<string, SqlTable> tablePair in schemaForFkOperations)
+                    {
+                        // Skip the reordered table itself - its FKs are already restored
+                        if (tablePair.Key.Equals(tableDiff.TableName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+                        
+                        foreach (SqlTableColumn column in tablePair.Value.Columns.Values)
+                        {
+                            foreach (SqlForeignKey fk in column.ForeignKeys)
+                            {
+                                // Check if this FK references the table being reordered
+                                // AND it doesn't belong to the reordered table itself
+                                if (fk.RefTable.Equals(tableDiff.TableName, StringComparison.OrdinalIgnoreCase) &&
+                                    !fksBelongingToReorderedTable.Contains(fk.Name) &&
+                                    !restoredFkNames.Contains(fk.Name))
+                                {
+                                    MigrationLogger.Log($"  [RESTORE FK after reorder] {fk.Name} (references {tableDiff.TableName} that was reordered)");
+                                    
+                                    // Group multi-column FKs
+                                    List<SqlForeignKey> fkGroup = new List<SqlForeignKey> { fk };
+                                    foreach (SqlTableColumn otherColumn in tablePair.Value.Columns.Values)
+                                    {
+                                        foreach (SqlForeignKey otherFk in otherColumn.ForeignKeys)
+                                        {
+                                            if (otherFk.Name == fk.Name && otherFk.Table == fk.Table && otherFk != fk)
+                                            {
+                                                fkGroup.Add(otherFk);
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Generate FK statement (after table is recreated, so it's safe)
+                                    bool wasNoCheck = fkGroup[0].NotEnforced;
+                                    // Convert ConcurrentDictionary to Dictionary for GenerateForeignKeyStatement
+                                    Dictionary<string, SqlTable> tablesDictForFk = new Dictionary<string, SqlTable>(allTablesForFk, StringComparer.OrdinalIgnoreCase);
+                                    string fkSql = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, tablesDictForFk, forceNoCheck: true);
+                                    sb.Append(fkSql);
+                                    sb.AppendLine();
+                                    
+                                    // Restore CHECK state if needed
+                                    if (!wasNoCheck)
+                                    {
+                                        SqlForeignKey firstFk = fkGroup[0];
+                                        sb.AppendLine($"ALTER TABLE [{firstFk.Schema}].[{firstFk.Table}] DROP CONSTRAINT [{firstFk.Name}];");
+                                        string fkSqlWithCheck = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, tablesDictForFk, forceNoCheck: false);
+                                        if (!string.IsNullOrEmpty(fkSqlWithCheck))
+                                        {
+                                            sb.Append(fkSqlWithCheck);
+                                            sb.AppendLine();
+                                        }
+                                    }
+                                    
+                                    restoredFkNames.Add(fk.Name);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
         
         return sb.ToString().Trim();
     }
-}
 
+    private static Dictionary<string, SqlTable> BuildSchemaForFkOperations(
+        ConcurrentDictionary<string, SqlTable> baseSchema,
+        ConcurrentDictionary<string, SqlTable> targetSchema,
+        ConcurrentDictionary<string, SqlTable>? currentSchema,
+        SchemaDiff diff)
+    {
+        Dictionary<string, SqlTable> result = new Dictionary<string, SqlTable>(StringComparer.OrdinalIgnoreCase);
+
+        void MergeTable(SqlTable sourceTable)
+        {
+            string tableKey = sourceTable.Name.ToLowerInvariant();
+
+            if (!result.TryGetValue(tableKey, out SqlTable? mergedTable))
+            {
+                Dictionary<string, SqlTableColumn> clonedColumns = new Dictionary<string, SqlTableColumn>(sourceTable.Columns.Count, StringComparer.OrdinalIgnoreCase);
+                foreach (KeyValuePair<string, SqlTableColumn> columnPair in sourceTable.Columns)
+                {
+                    clonedColumns[columnPair.Key] = columnPair.Value with
+                    {
+                        ForeignKeys = new List<SqlForeignKey>(columnPair.Value.ForeignKeys)
+                    };
+                }
+
+                List<SqlIndex> clonedIndexes = new List<SqlIndex>(sourceTable.Indexes);
+                result[tableKey] = new SqlTable(sourceTable.Name, clonedColumns, clonedIndexes, sourceTable.Schema);
+                return;
+            }
+
+            foreach (KeyValuePair<string, SqlTableColumn> columnPair in sourceTable.Columns)
+            {
+                if (!mergedTable.Columns.TryGetValue(columnPair.Key, out SqlTableColumn? mergedColumn))
+                {
+                    mergedTable.Columns[columnPair.Key] = columnPair.Value with
+                    {
+                        ForeignKeys = new List<SqlForeignKey>(columnPair.Value.ForeignKeys)
+                    };
+                    continue;
+                }
+
+                foreach (SqlForeignKey fk in columnPair.Value.ForeignKeys)
+                {
+                    bool alreadyExists = mergedColumn.ForeignKeys.Any(existingFk =>
+                        existingFk.Name.Equals(fk.Name, StringComparison.OrdinalIgnoreCase) &&
+                        existingFk.Column.Equals(fk.Column, StringComparison.OrdinalIgnoreCase));
+
+                    if (!alreadyExists)
+                    {
+                        mergedColumn.ForeignKeys.Add(fk);
+                    }
+                }
+            }
+        }
+
+        foreach (SqlTable table in baseSchema.Values)
+        {
+            MergeTable(table);
+        }
+
+        foreach (SqlTable table in targetSchema.Values)
+        {
+            MergeTable(table);
+        }
+
+        if (currentSchema is not null)
+        {
+            foreach (SqlTable table in currentSchema.Values)
+            {
+                MergeTable(table);
+            }
+        }
+
+        foreach (TableDiff tableDiff in diff.ModifiedTables)
+        {
+            foreach (ForeignKeyChange fkChange in tableDiff.ForeignKeyChanges)
+            {
+                SqlForeignKey? fkToAdd = fkChange.NewForeignKey ?? fkChange.OldForeignKey;
+                if (fkToAdd == null)
+                {
+                    continue;
+                }
+
+                string tableKey = fkToAdd.Table.ToLowerInvariant();
+                if (!result.TryGetValue(tableKey, out SqlTable? mergedTable))
+                {
+                    SqlTable? sourceTable = baseSchema.TryGetValue(tableKey, out SqlTable? baseTable)
+                        ? baseTable
+                        : targetSchema.TryGetValue(tableKey, out SqlTable? targetTable)
+                            ? targetTable
+                            : currentSchema != null && currentSchema.TryGetValue(tableKey, out SqlTable? currentTable)
+                                ? currentTable
+                                : null;
+
+                    if (sourceTable == null)
+                    {
+                        continue;
+                    }
+
+                    MergeTable(sourceTable);
+                    mergedTable = result[tableKey];
+                }
+
+                if (!mergedTable.Columns.TryGetValue(fkToAdd.Column.ToLowerInvariant(), out SqlTableColumn? mergedColumn))
+                {
+                    SqlTableColumn? sourceColumn = null;
+                    if (baseSchema.TryGetValue(tableKey, out SqlTable? baseTable) &&
+                        baseTable.Columns.TryGetValue(fkToAdd.Column.ToLowerInvariant(), out SqlTableColumn? baseColumn))
+                    {
+                        sourceColumn = baseColumn;
+                    }
+                    else if (targetSchema.TryGetValue(tableKey, out SqlTable? targetTable) &&
+                             targetTable.Columns.TryGetValue(fkToAdd.Column.ToLowerInvariant(), out SqlTableColumn? targetColumn))
+                    {
+                        sourceColumn = targetColumn;
+                    }
+                    else if (currentSchema != null &&
+                             currentSchema.TryGetValue(tableKey, out SqlTable? currentTable) &&
+                             currentTable.Columns.TryGetValue(fkToAdd.Column.ToLowerInvariant(), out SqlTableColumn? currentColumn))
+                    {
+                        sourceColumn = currentColumn;
+                    }
+
+                    if (sourceColumn == null)
+                    {
+                        continue;
+                    }
+
+                    mergedColumn = sourceColumn with { ForeignKeys = new List<SqlForeignKey>() };
+                    mergedTable.Columns[fkToAdd.Column.ToLowerInvariant()] = mergedColumn;
+                }
+
+                bool fkAlreadyExists = mergedColumn.ForeignKeys.Any(existingFk =>
+                    existingFk.Name.Equals(fkToAdd.Name, StringComparison.OrdinalIgnoreCase) &&
+                    existingFk.Column.Equals(fkToAdd.Column, StringComparison.OrdinalIgnoreCase));
+
+                if (!fkAlreadyExists)
+                {
+                    mergedColumn.ForeignKeys.Add(fkToAdd);
+                }
+            }
+        }
+
+        return result;
+    }
+}

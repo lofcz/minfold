@@ -59,7 +59,141 @@ public static class MigrationSchemaComparer
         List<string> droppedProcedureNames = new List<string>();
         List<ProcedureChange> modifiedProcedures = CompareProcedures(currentProcedures ?? new ConcurrentDictionary<string, SqlStoredProcedure>(), targetProcedures ?? new ConcurrentDictionary<string, SqlStoredProcedure>(), newProcedures, droppedProcedureNames);
 
+        // Propagate column type changes to foreign key referencing columns
+        // When a column that is referenced by foreign keys changes type, the referencing columns must also change
+        PropagateColumnTypeChangesToForeignKeys(modifiedTables, currentSchema, targetSchema);
+
         return new SchemaDiff(newTables, droppedTableNames, modifiedTables, newSequences, droppedSequenceNames, modifiedSequences, newProcedures, droppedProcedureNames, modifiedProcedures);
+    }
+
+    /// <summary>
+    /// Propagates column type changes to foreign key referencing columns.
+    /// When a column that is referenced by foreign keys changes type (especially Rebuild changes),
+    /// the referencing columns must also be updated to match the new type.
+    /// </summary>
+    private static void PropagateColumnTypeChangesToForeignKeys(
+        List<TableDiff> modifiedTables,
+        ConcurrentDictionary<string, SqlTable> currentSchema,
+        ConcurrentDictionary<string, SqlTable> targetSchema)
+    {
+        // Build a map of (table, column) -> new column type for columns that are being changed
+        // Use lowercase keys for case-insensitive matching
+        Dictionary<(string Table, string Column), SqlTableColumn> changedColumns = new Dictionary<(string, string), SqlTableColumn>();
+        
+        MigrationLogger.Log("=== PropagateColumnTypeChangesToForeignKeys: Building changed columns map ===");
+        foreach (TableDiff tableDiff in modifiedTables)
+        {
+            foreach (ColumnChange change in tableDiff.ColumnChanges)
+            {
+                if (change.NewColumn != null && 
+                    (change.ChangeType == ColumnChangeType.Rebuild || change.ChangeType == ColumnChangeType.Modify))
+                {
+                    // Only propagate if the type actually changed
+                    if (change.OldColumn != null && change.OldColumn.SqlType != change.NewColumn.SqlType)
+                    {
+                        string tableKey = tableDiff.TableName.ToLowerInvariant();
+                        string columnKey = change.NewColumn.Name.ToLowerInvariant();
+                        changedColumns[(tableKey, columnKey)] = change.NewColumn;
+                        MigrationLogger.Log($"  [TYPE CHANGE] {tableDiff.TableName}.{change.NewColumn.Name}: {change.OldColumn.SqlType} -> {change.NewColumn.SqlType}");
+                    }
+                }
+            }
+        }
+
+        MigrationLogger.Log($"=== PropagateColumnTypeChangesToForeignKeys: Found {changedColumns.Count} columns with type changes ===");
+
+        // Find all foreign keys that reference changed columns and update the referencing columns
+        foreach (KeyValuePair<string, SqlTable> tablePair in currentSchema)
+        {
+            foreach (SqlTableColumn column in tablePair.Value.Columns.Values)
+            {
+                foreach (SqlForeignKey fk in column.ForeignKeys)
+                {
+                    // Check if this FK references a column that changed type
+                    string refTableKey = fk.RefTable.ToLowerInvariant();
+                    string refColumnKey = fk.RefColumn.ToLowerInvariant();
+                    if (changedColumns.TryGetValue((refTableKey, refColumnKey), out SqlTableColumn? newRefColumn))
+                    {
+                        // The referenced column changed type - we need to update this referencing column
+                        string fkTableKey = fk.Table.ToLowerInvariant();
+                        string fkColumnName = fk.Column;
+                        
+                        MigrationLogger.Log($"  [FK PROPAGATION] Found FK {fk.Name}: {fk.Table}.{fk.Column} references {fk.RefTable}.{fk.RefColumn} (type changed)");
+                        
+                        // Get the current referencing column
+                        SqlTableColumn? currentFkColumn = tablePair.Value.Columns.TryGetValue(fkColumnName.ToLowerInvariant(), out SqlTableColumn? col) ? col : null;
+                        
+                        if (currentFkColumn != null)
+                        {
+                            // Check if the current referencing column type doesn't match the new referenced column type
+                            // Foreign key columns MUST match the referenced column type
+                            if (currentFkColumn.SqlType != newRefColumn.SqlType)
+                            {
+                                MigrationLogger.Log($"    [PROPAGATING] {fk.Table}.{fk.Column}: {currentFkColumn.SqlType} -> {newRefColumn.SqlType} (to match {fk.RefTable}.{fk.RefColumn})");
+                                
+                                // The referencing column needs to be updated to match the new referenced column type
+                                // Find or create the TableDiff for this table
+                                TableDiff? fkTableDiff = modifiedTables.FirstOrDefault(t => t.TableName.Equals(fk.Table, StringComparison.OrdinalIgnoreCase));
+                                
+                                if (fkTableDiff == null)
+                                {
+                                    // Create a new TableDiff for this table
+                                    fkTableDiff = new TableDiff(fk.Table, new List<ColumnChange>(), new List<ForeignKeyChange>(), new List<IndexChange>());
+                                    modifiedTables.Add(fkTableDiff);
+                                    MigrationLogger.Log($"    [NEW TABLEDIFF] Created TableDiff for {fk.Table}");
+                                }
+                                
+                                // Check if this column change already exists
+                                ColumnChange? existingChange = fkTableDiff.ColumnChanges.FirstOrDefault(
+                                    c => c.NewColumn != null && c.NewColumn.Name.Equals(fkColumnName, StringComparison.OrdinalIgnoreCase));
+                                
+                                if (existingChange == null)
+                                {
+                                    // Add a new column change to update the referencing column
+                                    // Create a new column with the same type as the new referenced column
+                                    // Preserve all other properties from the current column
+                                    SqlTableColumn updatedColumn = currentFkColumn with { SqlType = newRefColumn.SqlType };
+                                    
+                                    // Determine change type - if it's a type change, it might need rebuild
+                                    ColumnChangeType changeType = ColumnRebuildDetector.RequiresRebuild(
+                                        currentFkColumn, updatedColumn, tablePair.Value)
+                                        ? ColumnChangeType.Rebuild
+                                        : ColumnChangeType.Modify;
+                                    
+                                    fkTableDiff.ColumnChanges.Add(new ColumnChange(changeType, currentFkColumn, updatedColumn));
+                                    MigrationLogger.Log($"    [ADDED CHANGE] {fk.Table}.{fk.Column}: {changeType} (IsPrimaryKey={currentFkColumn.IsPrimaryKey})");
+                                }
+                                else if (existingChange.NewColumn != null && existingChange.NewColumn.SqlType != newRefColumn.SqlType)
+                                {
+                                    // Update existing change to use the correct target type (matching the new referenced column)
+                                    // Replace the existing change with one that has the correct target column
+                                    int index = fkTableDiff.ColumnChanges.IndexOf(existingChange);
+                                    if (index >= 0 && existingChange.OldColumn != null)
+                                    {
+                                        // Update the new column to match the referenced column type
+                                        SqlTableColumn updatedColumn = existingChange.NewColumn with { SqlType = newRefColumn.SqlType };
+                                        
+                                        ColumnChangeType changeType = ColumnRebuildDetector.RequiresRebuild(
+                                            existingChange.OldColumn, updatedColumn, tablePair.Value)
+                                            ? ColumnChangeType.Rebuild
+                                            : ColumnChangeType.Modify;
+                                        
+                                        fkTableDiff.ColumnChanges[index] = new ColumnChange(changeType, existingChange.OldColumn, updatedColumn);
+                                        MigrationLogger.Log($"    [UPDATED CHANGE] {fk.Table}.{fk.Column}: {changeType} (IsPrimaryKey={existingChange.OldColumn.IsPrimaryKey})");
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                MigrationLogger.Log($"    [SKIP] {fk.Table}.{fk.Column} already matches type {newRefColumn.SqlType}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        MigrationLogger.Log("=== PropagateColumnTypeChangesToForeignKeys: Complete ===");
     }
 
     private static List<SequenceChange> CompareSequences(
@@ -313,8 +447,16 @@ public static class MigrationSchemaComparer
             if (currentOrdered.Count == targetOrdered.Count)
             {
                 // Check if column names are in different order
-                hasColumnOrderDifference = !currentOrdered.Select(c => c.Name)
-                    .SequenceEqual(targetOrdered.Select(c => c.Name), StringComparer.OrdinalIgnoreCase);
+                List<string> currentNames = currentOrdered.Select(c => c.Name).ToList();
+                List<string> targetNames = targetOrdered.Select(c => c.Name).ToList();
+                hasColumnOrderDifference = !currentNames.SequenceEqual(targetNames, StringComparer.OrdinalIgnoreCase);
+                
+                if (hasColumnOrderDifference)
+                {
+                    MigrationLogger.Log($"  [COLUMN ORDER DIFF] Table {currentTable.Name}:");
+                    MigrationLogger.Log($"    Current order: [{string.Join(", ", currentNames)}]");
+                    MigrationLogger.Log($"    Target order: [{string.Join(", ", targetNames)}]");
+                }
             }
         }
 
@@ -398,4 +540,3 @@ public static class MigrationSchemaComparer
                fk1.UpdateAction == fk2.UpdateAction;
     }
 }
-

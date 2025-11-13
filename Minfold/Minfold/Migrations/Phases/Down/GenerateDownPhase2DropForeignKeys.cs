@@ -44,6 +44,22 @@ public static class GenerateDownPhase2DropForeignKeys
         }
         
         // Drop FKs that reference dropped tables (must be dropped before the referenced table)
+        // Also drop FKs that reference columns being dropped (must be dropped before the column)
+        HashSet<string> columnsBeingDropped = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (TableDiff tableDiff in diff.ModifiedTables)
+        {
+            foreach (ColumnChange change in tableDiff.ColumnChanges)
+            {
+                // For down script: Drop changes mean columns that were added by migration (exist in currentSchema but not targetSchema)
+                // These columns need to be dropped, so FKs referencing them must be dropped first
+                if (change.ChangeType == ColumnChangeType.Drop && change.OldColumn != null)
+                {
+                    string columnKey = $"{tableDiff.TableName}.{change.OldColumn.Name}";
+                    columnsBeingDropped.Add(columnKey);
+                }
+            }
+        }
+        
         foreach (ForeignKeyChange fkChange in allFkChanges.Where(c => c.ChangeType == ForeignKeyChangeType.Drop))
         {
             if (fkChange.OldForeignKey != null)
@@ -52,9 +68,16 @@ public static class GenerateDownPhase2DropForeignKeys
                 bool referencesDroppedTable = diff.DroppedTableNames.Any(name => 
                     name.Equals(fkChange.OldForeignKey.RefTable, StringComparison.OrdinalIgnoreCase));
                 
-                if (referencesDroppedTable)
+                // Check if this FK references a column being dropped
+                string fkColumnKey = $"{fkChange.OldForeignKey.Table}.{fkChange.OldForeignKey.Column}";
+                bool referencesDroppedColumn = columnsBeingDropped.Contains(fkColumnKey);
+                
+                if (referencesDroppedTable || referencesDroppedColumn)
                 {
-                    MigrationLogger.Log($"  [DROP FK] {fkChange.OldForeignKey.Name} (references dropped table {fkChange.OldForeignKey.RefTable})");
+                    string reason = referencesDroppedTable 
+                        ? $"references dropped table {fkChange.OldForeignKey.RefTable}"
+                        : $"references dropped column {fkColumnKey}";
+                    MigrationLogger.Log($"  [DROP FK] {fkChange.OldForeignKey.Name} ({reason})");
                     content.AppendLine(GenerateForeignKeys.GenerateDropForeignKeyStatement(fkChange.OldForeignKey));
                 }
             }
