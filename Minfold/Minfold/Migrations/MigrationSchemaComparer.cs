@@ -354,7 +354,9 @@ public static class MigrationSchemaComparer
                col1.IsComputed == col2.IsComputed &&
                col1.IsPrimaryKey == col2.IsPrimaryKey &&
                col1.SqlType == col2.SqlType &&
-               col1.LengthOrPrecision == col2.LengthOrPrecision &&
+               col1.Length == col2.Length &&
+               col1.Precision == col2.Precision &&
+               col1.Scale == col2.Scale &&
                (col1.ComputedSql ?? string.Empty) == (col2.ComputedSql ?? string.Empty) &&
                NormalizeDefaultValue(col1.DefaultConstraintValue) == NormalizeDefaultValue(col2.DefaultConstraintValue);
     }

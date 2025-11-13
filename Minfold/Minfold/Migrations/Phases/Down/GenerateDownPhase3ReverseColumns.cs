@@ -164,19 +164,26 @@ public static class GenerateDownPhase3ReverseColumns
                         }
                         
                         // Check if identity or computed property changed - SQL Server requires DROP + ADD
-                        bool requiresDropAdd = (change.OldColumn.IsIdentity != change.NewColumn.IsIdentity) ||
+                        // OR if this is a Rebuild change (always requires DROP+ADD, e.g., type changes like NVARCHAR to NTEXT)
+                        bool requiresDropAdd = isRebuild ||
+                                               (change.OldColumn.IsIdentity != change.NewColumn.IsIdentity) ||
                                                (change.OldColumn.IsComputed != change.NewColumn.IsComputed);
                         
                         if (requiresDropAdd)
                         {
-                            string changeType = change.OldColumn.IsIdentity != change.NewColumn.IsIdentity ? "identity" : "computed";
+                            string changeType = isRebuild ? "rebuild" : 
+                                               (change.OldColumn.IsIdentity != change.NewColumn.IsIdentity ? "identity" : "computed");
                             MigrationLogger.Log($"    Reversing {changeType} change: {change.OldColumn.Name} -> {change.NewColumn.Name}");
                             
                             // If the column being dropped has a primary key constraint, drop it first
-                            if (change.OldColumn.IsPrimaryKey)
+                            // BUT: Skip if this is a Rebuild change where NewColumn.IsPrimaryKey is true,
+                            // because Phase 1 already dropped the PK for Rebuild changes
+                            if (change.OldColumn.IsPrimaryKey && !(isRebuild && change.NewColumn != null && change.NewColumn.IsPrimaryKey))
                             {
                                 string pkConstraintName = $"PK_{tableDiff.TableName}";
-                                content.AppendLine(GeneratePrimaryKeys.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, schema));
+                                // Use unique suffix to avoid conflicts with Phase 1
+                                string uniqueSuffix = MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(schema, tableDiff.TableName, pkConstraintName, "droppkphase3");
+                                content.AppendLine(GeneratePrimaryKeys.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, schema, uniqueSuffix));
                                 MigrationLogger.Log($"    Dropped PK constraint before dropping column {change.OldColumn.Name}");
                             }
                             
@@ -246,9 +253,13 @@ public static class GenerateDownPhase3ReverseColumns
                 }
             }
 
-            // Third pass: Handle any remaining Modify operations that weren't processed above
-            // (Modify operations should have been processed in second pass, but check for any missed ones)
-            foreach (ColumnChange change in modifyChanges)
+            // Third pass: Handle any remaining Modify and Rebuild operations that weren't processed above
+            // (These should have been processed in second pass, but check for any missed ones)
+            List<ColumnChange> allRemainingChanges = new List<ColumnChange>();
+            allRemainingChanges.AddRange(modifyChanges);
+            allRemainingChanges.AddRange(rebuildChanges);
+            
+            foreach (ColumnChange change in allRemainingChanges)
             {
                 if (change.OldColumn != null && change.NewColumn != null)
                 {
@@ -261,7 +272,8 @@ public static class GenerateDownPhase3ReverseColumns
                         continue;
                     }
                     
-                    MigrationLogger.Log($"  [MODIFY] {columnKey}: OldColumn.IsIdentity={change.OldColumn.IsIdentity}, NewColumn.IsIdentity={change.NewColumn.IsIdentity}");
+                    bool isRebuildChange = rebuildChanges.Contains(change);
+                    MigrationLogger.Log($"  [{(isRebuildChange ? "REBUILD" : "MODIFY")}] {columnKey}: OldColumn.IsIdentity={change.OldColumn.IsIdentity}, NewColumn.IsIdentity={change.NewColumn.IsIdentity}");
                     
                     // Get schema from current schema or default to dbo
                     string schema = "dbo";
@@ -270,19 +282,25 @@ public static class GenerateDownPhase3ReverseColumns
                         schema = currentTable.Schema;
                     }
                     
-                    // Check if identity property changed - SQL Server requires DROP + ADD (same as up script)
-                    if (change.OldColumn.IsIdentity != change.NewColumn.IsIdentity)
+                    // Rebuild changes always require DROP+ADD
+                    // Also check if identity property changed - SQL Server requires DROP + ADD (same as up script)
+                    if (isRebuildChange || change.OldColumn.IsIdentity != change.NewColumn.IsIdentity)
                     {
                         // For down script: reverse the change (from OldColumn back to NewColumn)
                         // Current state is OldColumn (after up migration), target is NewColumn (before up migration)
                         // We need to drop OldColumn (current) and add NewColumn (target)
-                        MigrationLogger.Log($"    Reversing identity change: {change.OldColumn.Name} (IsIdentity={change.OldColumn.IsIdentity}) -> {change.NewColumn.Name} (IsIdentity={change.NewColumn.IsIdentity})");
+                        string changeType = isRebuildChange ? "rebuild" : "identity";
+                        MigrationLogger.Log($"    Reversing {changeType} change: {change.OldColumn.Name} (IsIdentity={change.OldColumn.IsIdentity}) -> {change.NewColumn.Name} (IsIdentity={change.NewColumn.IsIdentity})");
                         
                         // If the column being dropped has a primary key constraint, drop it first
-                        if (change.OldColumn.IsPrimaryKey)
+                        // BUT: Skip if this is a Rebuild change where NewColumn.IsPrimaryKey is true,
+                        // because Phase 1 already dropped the PK for Rebuild changes
+                        if (change.OldColumn.IsPrimaryKey && !(isRebuildChange && change.NewColumn != null && change.NewColumn.IsPrimaryKey))
                         {
                             string pkConstraintName = $"PK_{tableDiff.TableName}";
-                            content.AppendLine(GeneratePrimaryKeys.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, schema));
+                            // Use unique suffix to avoid conflicts with Phase 1
+                            string uniqueSuffix = MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(schema, tableDiff.TableName, pkConstraintName, "droppkphase3");
+                            content.AppendLine(GeneratePrimaryKeys.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, schema, uniqueSuffix));
                             MigrationLogger.Log($"    Dropped PK constraint before dropping column {change.OldColumn.Name}");
                         }
                         
@@ -332,10 +350,15 @@ public static class GenerateDownPhase3ReverseColumns
                         MigrationLogger.Log($"    Reversing computed column change: {change.OldColumn.Name} -> {change.NewColumn.Name}");
                         
                         // If the column being dropped has a primary key constraint, drop it first
-                        if (change.OldColumn.IsPrimaryKey)
+                        // BUT: Skip if this is a Rebuild change where NewColumn.IsPrimaryKey is true,
+                        // because Phase 1 already dropped the PK for Rebuild changes
+                        bool localIsRebuildChange = rebuildChanges.Contains(change);
+                        if (change.OldColumn.IsPrimaryKey && !(localIsRebuildChange && change.NewColumn != null && change.NewColumn.IsPrimaryKey))
                         {
                             string pkConstraintName = $"PK_{tableDiff.TableName}";
-                            content.AppendLine(GeneratePrimaryKeys.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, schema));
+                            // Use unique suffix to avoid conflicts with Phase 1
+                            string uniqueSuffix = MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(schema, tableDiff.TableName, pkConstraintName, "droppkphase3");
+                            content.AppendLine(GeneratePrimaryKeys.GenerateDropPrimaryKeyStatement(tableDiff.TableName, pkConstraintName, schema, uniqueSuffix));
                             MigrationLogger.Log($"    Dropped PK constraint before dropping column {change.OldColumn.Name}");
                         }
                         

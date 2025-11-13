@@ -32,6 +32,7 @@ public static class GenerateIncrementalDownScript
         string phase12ColumnReorderContent = GenerateDownPhase12ColumnReorder.Generate(diff, currentSchema, targetSchema);
 
         // Assemble phases into list (only include phases with content)
+        // IMPORTANT: Drop FKs before dropping PKs (FKs reference PKs)
         List<PhaseContent> phases = new List<PhaseContent>();
         int phaseNumber = 1;
         
@@ -39,13 +40,13 @@ public static class GenerateIncrementalDownScript
         {
             phases.Add(new PhaseContent(phaseNumber++, "Reverse Index Changes", phase0IndexesContent));
         }
-        if (!string.IsNullOrWhiteSpace(phase1DropPksContent))
-        {
-            phases.Add(new PhaseContent(phaseNumber++, "Drop Primary Key Constraints", phase1DropPksContent));
-        }
         if (!string.IsNullOrWhiteSpace(phase2DropFksContent))
         {
             phases.Add(new PhaseContent(phaseNumber++, "Drop Foreign Keys", phase2DropFksContent));
+        }
+        if (!string.IsNullOrWhiteSpace(phase1DropPksContent))
+        {
+            phases.Add(new PhaseContent(phaseNumber++, "Drop Primary Key Constraints", phase1DropPksContent));
         }
         if (!string.IsNullOrWhiteSpace(phase3ReverseColumnsContent))
         {

@@ -27,7 +27,7 @@ public static class GenerateDownPhase12ColumnReorder
         foreach (TableDiff tableDiff in diff.ModifiedTables.OrderBy(t => t.TableName))
         {
             // Skip if table doesn't exist in targetSchema (shouldn't happen for ModifiedTables)
-            if (!targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTableDown))
+            if (!targetSchema.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? targetTableDown) || targetTableDown == null)
             {
                 continue;
             }
@@ -112,6 +112,34 @@ public static class GenerateDownPhase12ColumnReorder
                 
                 SqlTable actualTableForReorder = new SqlTable(actualTableDown.Name, actualColumnsAfterDown, actualTableDown.Indexes, actualTableDown.Schema);
                 
+                // Before reordering (which drops and recreates the table), we need to drop FKs that reference this table
+                // Find all FKs in currentSchema that reference this table
+                HashSet<string> processedFksForReorder = new HashSet<string>();
+                if (currentSchema != null)
+                {
+                    foreach (KeyValuePair<string, SqlTable> tablePair in currentSchema)
+                    {
+                        foreach (SqlTableColumn column in tablePair.Value.Columns.Values)
+                        {
+                            foreach (SqlForeignKey fk in column.ForeignKeys)
+                            {
+                                // Check if this FK references the table being reordered
+                                if (fk.RefTable.Equals(tableDiff.TableName, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    if (!processedFksForReorder.Contains(fk.Name))
+                                    {
+                                        MigrationLogger.Log($"  [DROP FK for reorder] {fk.Name} (references {tableDiff.TableName} being reordered)");
+                                        // Use unique suffix to avoid conflicts with Phase 1 FK drops
+                                        string uniqueSuffix = MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(fk.Schema, fk.Table, fk.Name, "reorder");
+                                        content.AppendLine(GenerateForeignKeys.GenerateDropForeignKeyStatement(fk, uniqueSuffix));
+                                        processedFksForReorder.Add(fk.Name);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
                 // Desired table is targetSchema (what we're rolling back to)
                 // Both should have the same columns, but order might differ
                 (string reorderSql, List<string> constraintSql) = GenerateTables.GenerateColumnReorderStatement(
@@ -128,6 +156,67 @@ public static class GenerateDownPhase12ColumnReorder
                     {
                         content.Append(constraint);
                         content.AppendLine();
+                    }
+                    
+                    // Also restore FKs from other tables that reference this reordered table
+                    // These FKs were dropped when we dropped the table, but GenerateColumnReorderStatement
+                    // only restores FKs that belong to the reordered table itself
+                    HashSet<string> restoredFkNames = new HashSet<string>();
+                    if (targetSchema != null)
+                    {
+                        foreach (KeyValuePair<string, SqlTable> tablePair in targetSchema)
+                        {
+                            foreach (SqlTableColumn column in tablePair.Value.Columns.Values)
+                            {
+                                foreach (SqlForeignKey fk in column.ForeignKeys)
+                                {
+                                    // Check if this FK references the table being reordered
+                                    if (fk.RefTable.Equals(tableDiff.TableName, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        if (!restoredFkNames.Contains(fk.Name))
+                                        {
+                                            MigrationLogger.Log($"  [RESTORE FK after reorder] {fk.Name} (references {tableDiff.TableName} that was reordered)");
+                                            
+                                            // Group multi-column FKs
+                                            List<SqlForeignKey> fkGroup = new List<SqlForeignKey> { fk };
+                                            foreach (SqlTableColumn otherColumn in tablePair.Value.Columns.Values)
+                                            {
+                                                foreach (SqlForeignKey otherFk in otherColumn.ForeignKeys)
+                                                {
+                                                    if (otherFk.Name == fk.Name && otherFk.Table == fk.Table && otherFk != fk)
+                                                    {
+                                                        fkGroup.Add(otherFk);
+                                                    }
+                                                }
+                                            }
+                                            
+                                            // Generate FK statement (after table is recreated, so it's safe)
+                                            bool wasNoCheck = fkGroup[0].NotEnforced;
+                                            // Convert ConcurrentDictionary to Dictionary for GenerateForeignKeyStatement
+                                            Dictionary<string, SqlTable> tablesDictForFk = new Dictionary<string, SqlTable>(allTablesForFkDown, StringComparer.OrdinalIgnoreCase);
+                                            string fkSql = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, tablesDictForFk, forceNoCheck: true);
+                                            content.Append(fkSql);
+                                            content.AppendLine();
+                                            
+                                            // Restore CHECK state if needed
+                                            if (!wasNoCheck)
+                                            {
+                                                SqlForeignKey firstFk = fkGroup[0];
+                                                content.AppendLine($"ALTER TABLE [{firstFk.Schema}].[{firstFk.Table}] DROP CONSTRAINT [{firstFk.Name}];");
+                                                string fkSqlWithCheck = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, tablesDictForFk, forceNoCheck: false);
+                                                if (!string.IsNullOrEmpty(fkSqlWithCheck))
+                                                {
+                                                    content.Append(fkSqlWithCheck);
+                                                    content.AppendLine();
+                                                }
+                                            }
+                                            
+                                            restoredFkNames.Add(fk.Name);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -80,9 +80,20 @@ public static class GenerateForeignKeys
         return sb.ToString();
     }
 
-    public static string GenerateDropForeignKeyStatement(SqlForeignKey fk)
+    public static string GenerateDropForeignKeyStatement(SqlForeignKey fk, string? variableSuffix = null)
     {
-        return $"ALTER TABLE [{fk.Schema}].[{fk.Table}] DROP CONSTRAINT [{fk.Name}];";
+        // Use provided suffix or generate a deterministic one to avoid conflicts
+        string varSuffix = variableSuffix ?? MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(fk.Schema, fk.Table, fk.Name, "dropfk");
+        
+        // Use dynamic SQL to check if constraint exists before dropping
+        return $"""
+            DECLARE @fkConstraintName_{varSuffix} NVARCHAR(128);
+            SELECT @fkConstraintName_{varSuffix} = name FROM sys.foreign_keys 
+            WHERE parent_object_id = OBJECT_ID('[{fk.Schema}].[{fk.Table}]') 
+            AND name = '{fk.Name}';
+            IF @fkConstraintName_{varSuffix} IS NOT NULL
+                EXEC('ALTER TABLE [{fk.Schema}].[{fk.Table}] DROP CONSTRAINT [' + @fkConstraintName_{varSuffix} + ']');
+            """;
     }
 }
 

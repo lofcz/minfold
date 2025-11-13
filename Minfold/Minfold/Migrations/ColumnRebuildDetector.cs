@@ -79,6 +79,23 @@ public static class ColumnRebuildDetector
             return true;
         }
 
+        // Converting FROM text/ntext/image (legacy LOB types) also always requires rebuild
+        // These types cannot be altered directly and must be dropped and recreated
+        if (oldBaseType == SqlDbTypeExt.Text && newBaseType != SqlDbTypeExt.Text)
+        {
+            return true;
+        }
+
+        if (oldBaseType == SqlDbTypeExt.NText && newBaseType != SqlDbTypeExt.NText)
+        {
+            return true;
+        }
+
+        if (oldBaseType == SqlDbTypeExt.Image && newBaseType != SqlDbTypeExt.Image)
+        {
+            return true;
+        }
+
         return false;
     }
 

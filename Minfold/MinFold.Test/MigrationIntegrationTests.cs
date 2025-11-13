@@ -435,7 +435,9 @@ public class MigrationIntegrationTests
                 IsComputed: false,
                 IsPrimaryKey: true,
                 ComputedSql: null,
-                LengthOrPrecision: null
+                Length: null,
+                Precision: null,
+                Scale: null
             ), 
             "Categories");
         
@@ -472,7 +474,9 @@ public class MigrationIntegrationTests
                 IsComputed: false,
                 IsPrimaryKey: false,
                 ComputedSql: null,
-                LengthOrPrecision: null
+                Length: null,
+                Precision: null,
+                Scale: null
             ), 
             "Categories");
         
@@ -533,7 +537,9 @@ public class MigrationIntegrationTests
                 IsComputed: false,
                 IsPrimaryKey: false,
                 ComputedSql: null,
-                LengthOrPrecision: null
+                Length: null,
+                Precision: null,
+                Scale: null
             ), 
             "Posts");
         

@@ -425,7 +425,9 @@ public class ZeroColumnTableTests
                 IsComputed: false,
                 IsPrimaryKey: false,
                 ComputedSql: null,
-                LengthOrPrecision: null
+                Length: null,
+                Precision: null,
+                Scale: null
             ), 
             "TestTable");
         string dropOldColumnSql = GenerateColumns.GenerateDropColumnStatement("id", "TestTable");
@@ -601,7 +603,9 @@ public class ZeroColumnTableTests
                 IsComputed: false,
                 IsPrimaryKey: false,
                 ComputedSql: null,
-                LengthOrPrecision: null
+                Length: null,
+                Precision: null,
+                Scale: null
             ), 
             "TestTable");
         string dropOldColumnSql = GenerateColumns.GenerateDropColumnStatement("id", "TestTable");
@@ -846,7 +850,9 @@ public class ZeroColumnTableTests
                 IsComputed: false,
                 IsPrimaryKey: true,
                 ComputedSql: null,
-                LengthOrPrecision: null,
+                Length: null,
+                Precision: null,
+                Scale: null,
                 IdentitySeed: 1,
                 IdentityIncrement: 1
             ), 

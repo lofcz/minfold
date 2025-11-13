@@ -142,29 +142,34 @@ public static class GeneratePhase3Constraints
             }
         }
 
-        // Add PRIMARY KEY constraints for columns that are gaining PK status
+        // Add PRIMARY KEY constraints for columns that are gaining PK status or being rebuilt with PK
         // Get current schema (after modifications) to find new PK columns
         ConcurrentDictionary<string, SqlTable> currentSchemaAfterChanges = MigrationSchemaSnapshot.ApplySchemaDiffToTarget(targetSchema, diff);
         HashSet<string> tablesWithPkAdded = new HashSet<string>();
         
         foreach (TableDiff tableDiff in diff.ModifiedTables.OrderBy(t => t.TableName))
         {
-            // Check if any columns are gaining PK status
-            bool hasNewPk = false;
+            // Check if any columns are gaining PK status or being rebuilt with PK
+            bool needsPkRestored = false;
             foreach (ColumnChange change in tableDiff.ColumnChanges)
             {
                 if (change.NewColumn != null && change.NewColumn.IsPrimaryKey)
                 {
                     if (change.ChangeType == ColumnChangeType.Add || 
-                        (change.ChangeType == ColumnChangeType.Modify && change.OldColumn != null && !change.OldColumn.IsPrimaryKey))
+                        (change.ChangeType == ColumnChangeType.Modify && change.OldColumn != null && !change.OldColumn.IsPrimaryKey) ||
+                        (change.ChangeType == ColumnChangeType.Rebuild && change.OldColumn != null && change.OldColumn.IsPrimaryKey))
                     {
-                        hasNewPk = true;
+                        // PK needs to be restored if:
+                        // 1. New column with PK (Add)
+                        // 2. Column gaining PK status (Modify: OldColumn not PK, NewColumn is PK)
+                        // 3. Column being rebuilt that was already PK (Rebuild: OldColumn was PK, NewColumn is PK)
+                        needsPkRestored = true;
                         break;
                     }
                 }
             }
             
-            if (hasNewPk && !tablesWithPkAdded.Contains(tableDiff.TableName.ToLowerInvariant()))
+            if (needsPkRestored && !tablesWithPkAdded.Contains(tableDiff.TableName.ToLowerInvariant()))
             {
                 // Get all PK columns from the new schema (after changes)
                 if (currentSchemaAfterChanges.TryGetValue(tableDiff.TableName.ToLowerInvariant(), out SqlTable? newTable))
@@ -182,6 +187,72 @@ public static class GeneratePhase3Constraints
         }
 
         // Add PRIMARY KEY constraints for new tables (already included in CREATE TABLE, so no action needed)
+
+        // Restore FKs that were dropped in Phase 0 due to PK dependencies
+        // After restoring PKs, we need to restore FKs that reference those PKs
+        // These FKs were dropped in Phase 0 but aren't tracked as changes in the diff
+        foreach (string tableWithPkRestored in tablesWithPkAdded)
+        {
+            // Find all FKs in target schema that reference this table's PK columns
+            foreach (KeyValuePair<string, SqlTable> tablePair in targetSchema)
+            {
+                foreach (SqlTableColumn column in tablePair.Value.Columns.Values)
+                {
+                    foreach (SqlForeignKey fk in column.ForeignKeys)
+                    {
+                        // Check if this FK references the table whose PK was restored
+                        if (fk.RefTable.ToLowerInvariant() == tableWithPkRestored)
+                        {
+                            // Verify the FK references a PK column
+                            if (targetSchema.TryGetValue(fk.RefTable.ToLowerInvariant(), out SqlTable? refTable))
+                            {
+                                if (refTable.Columns.TryGetValue(fk.RefColumn.ToLowerInvariant(), out SqlTableColumn? refColumn) && refColumn.IsPrimaryKey)
+                                {
+                                    // Only restore if not already processed (not in diff changes)
+                                    if (!processedFks.Contains(fk.Name))
+                                    {
+                                        // Group multi-column FKs
+                                        List<SqlForeignKey> fkGroup = new List<SqlForeignKey> { fk };
+                                        // Find other columns with same FK name (multi-column FK)
+                                        foreach (SqlTableColumn otherColumn in tablePair.Value.Columns.Values)
+                                        {
+                                            foreach (SqlForeignKey otherFk in otherColumn.ForeignKeys)
+                                            {
+                                                if (otherFk.Name == fk.Name && otherFk.Table == fk.Table && otherFk != fk)
+                                                {
+                                                    fkGroup.Add(otherFk);
+                                                }
+                                            }
+                                        }
+                                        
+                                        // Generate FK statement (after PK is restored, so it's safe)
+                                        bool wasNoCheck = fkGroup[0].NotEnforced;
+                                        string fkSql = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, tablesDict, forceNoCheck: true);
+                                        sb.Append(fkSql);
+                                        sb.AppendLine();
+                                        
+                                        // Restore CHECK state if needed
+                                        if (!wasNoCheck)
+                                        {
+                                            SqlForeignKey firstFk = fkGroup[0];
+                                            sb.AppendLine($"ALTER TABLE [{firstFk.Schema}].[{firstFk.Table}] DROP CONSTRAINT [{firstFk.Name}];");
+                                            string fkSqlWithCheck = GenerateForeignKeys.GenerateForeignKeyStatement(fkGroup, tablesDict, forceNoCheck: false);
+                                            if (!string.IsNullOrEmpty(fkSqlWithCheck))
+                                            {
+                                                sb.Append(fkSqlWithCheck);
+                                                sb.AppendLine();
+                                            }
+                                        }
+                                        
+                                        processedFks.Add(fk.Name);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Handle index changes (drop modified/dropped indexes, add new/modified indexes)
         // Drop indexes that are being dropped or modified (need to drop old before adding new)

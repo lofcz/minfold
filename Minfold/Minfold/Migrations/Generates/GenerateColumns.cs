@@ -102,27 +102,40 @@ public static class GenerateColumns
             string sqlType = column.SqlType.ToSqlDbType();
             sb.Append(sqlType.ToUpperInvariant());
 
-            // Add length/precision for types that need it
-            if (column.LengthOrPrecision.HasValue)
+            // Add length/precision/scale for types that need it
+            if (sqlType.ToLowerInvariant() is "decimal" or "numeric")
             {
-                if (sqlType.ToLowerInvariant() is "decimal" or "numeric")
+                // For DECIMAL/NUMERIC, if Scale has a value, we should always include precision/scale
+                // Default precision to 18 (SQL Server default) if it's null but scale is present
+                if (column.Scale.HasValue)
                 {
-                    sb.Append($"({column.LengthOrPrecision.Value})");
+                    int precision = column.Precision ?? 18; // Default to 18 if precision is null
+                    sb.Append($"({precision},{column.Scale.Value})");
                 }
-                else if (sqlType.ToLowerInvariant() is "varchar" or "nvarchar" or "char" or "nchar" or "varbinary" or "binary")
+                else if (column.Precision.HasValue)
                 {
-                    if (column.LengthOrPrecision.Value == -1)
+                    sb.Append($"({column.Precision.Value})");
+                }
+            }
+            else if (sqlType.ToLowerInvariant() is "varchar" or "nvarchar" or "char" or "nchar" or "varbinary" or "binary")
+            {
+                if (column.Length.HasValue)
+                {
+                    if (column.Length.Value == -1)
                     {
                         sb.Append("(MAX)");
                     }
                     else
                     {
-                        sb.Append($"({column.LengthOrPrecision.Value})");
+                        sb.Append($"({column.Length.Value})");
                     }
                 }
-                else if (sqlType.ToLowerInvariant() is "datetime2" or "time" or "datetimeoffset")
+            }
+            else if (sqlType.ToLowerInvariant() is "datetime2" or "time" or "datetimeoffset")
+            {
+                if (column.Precision.HasValue)
                 {
-                    sb.Append($"({column.LengthOrPrecision.Value})");
+                    sb.Append($"({column.Precision.Value})");
                 }
             }
 
@@ -254,6 +267,15 @@ public static class GenerateColumns
 
         // Check if we're changing from nullable to NOT NULL
         bool changingToNotNull = oldColumn.IsNullable && !newColumn.IsNullable;
+        bool changingToNullable = !oldColumn.IsNullable && newColumn.IsNullable;
+        
+        // Check if default constraint value changed
+        string? oldDefaultValue = NormalizeDefaultConstraintValue(oldColumn.DefaultConstraintValue ?? string.Empty);
+        string? newDefaultValue = NormalizeDefaultConstraintValue(newColumn.DefaultConstraintValue ?? string.Empty);
+        bool defaultValueChanged = oldDefaultValue != newDefaultValue;
+        bool defaultAdded = string.IsNullOrWhiteSpace(oldColumn.DefaultConstraintValue) && !string.IsNullOrWhiteSpace(newColumn.DefaultConstraintValue);
+        bool defaultRemoved = !string.IsNullOrWhiteSpace(oldColumn.DefaultConstraintValue) && string.IsNullOrWhiteSpace(newColumn.DefaultConstraintValue);
+        
         string? constraintName = null;
         bool isTemporaryConstraint = false;
         
@@ -264,6 +286,9 @@ public static class GenerateColumns
         // 3. Update existing NULL values to the default
         // 4. Alter column to NOT NULL
         // 5. Drop the temporary DEFAULT constraint if it was temporary
+        // When default constraint value changes or is added/removed, we need to:
+        // 1. Drop old default constraint if it exists
+        // 2. Add new default constraint if needed
         if (changingToNotNull && !newColumn.IsIdentity)
         {
             // Always drop any existing default constraint first (may exist from previous migration steps or schema)
@@ -305,27 +330,40 @@ public static class GenerateColumns
         string sqlType = newColumn.SqlType.ToSqlDbType();
         sb.Append(sqlType.ToUpperInvariant());
 
-        // Add length/precision for types that need it
-        if (newColumn.LengthOrPrecision.HasValue)
+        // Add length/precision/scale for types that need it
+        if (sqlType.ToLowerInvariant() is "decimal" or "numeric")
         {
-            if (sqlType.ToLowerInvariant() is "decimal" or "numeric")
+            // For DECIMAL/NUMERIC, if Scale has a value, we should always include precision/scale
+            // Default precision to 18 (SQL Server default) if it's null but scale is present
+            if (newColumn.Scale.HasValue)
             {
-                sb.Append($"({newColumn.LengthOrPrecision.Value})");
+                int precision = newColumn.Precision ?? 18; // Default to 18 if precision is null
+                sb.Append($"({precision},{newColumn.Scale.Value})");
             }
-            else if (sqlType.ToLowerInvariant() is "varchar" or "nvarchar" or "char" or "nchar" or "varbinary" or "binary")
+            else if (newColumn.Precision.HasValue)
             {
-                if (newColumn.LengthOrPrecision.Value == -1)
+                sb.Append($"({newColumn.Precision.Value})");
+            }
+        }
+        else if (sqlType.ToLowerInvariant() is "varchar" or "nvarchar" or "char" or "nchar" or "varbinary" or "binary")
+        {
+            if (newColumn.Length.HasValue)
+            {
+                if (newColumn.Length.Value == -1)
                 {
                     sb.Append("(MAX)");
                 }
                 else
                 {
-                    sb.Append($"({newColumn.LengthOrPrecision.Value})");
+                    sb.Append($"({newColumn.Length.Value})");
                 }
             }
-            else if (sqlType.ToLowerInvariant() is "datetime2" or "time" or "datetimeoffset")
+        }
+        else if (sqlType.ToLowerInvariant() is "datetime2" or "time" or "datetimeoffset")
+        {
+            if (newColumn.Precision.HasValue)
             {
-                sb.Append($"({newColumn.LengthOrPrecision.Value})");
+                sb.Append($"({newColumn.Precision.Value})");
             }
         }
 
@@ -348,6 +386,37 @@ public static class GenerateColumns
         if (changingToNotNull && !newColumn.IsIdentity && isTemporaryConstraint && constraintName != null)
         {
             sb.AppendLine($"ALTER TABLE [{schema}].[{tableName}] DROP CONSTRAINT [{constraintName}];");
+        }
+        
+        // Handle default constraint changes (value changes, additions, removals) when nullability doesn't change
+        if (!changingToNotNull && !changingToNullable && !newColumn.IsIdentity)
+        {
+            if (defaultRemoved || defaultValueChanged || defaultAdded)
+            {
+                // Drop old default constraint if it exists
+                sb.Append(GenerateDropDefaultConstraintStatement(newColumn.Name, tableName, null, schema));
+                
+                // Add new default constraint if needed
+                if (!defaultRemoved && !string.IsNullOrWhiteSpace(newColumn.DefaultConstraintValue))
+                {
+                    string defaultValue = NormalizeDefaultConstraintValue(newColumn.DefaultConstraintValue);
+                    // Use newColumn's constraint name if specified, otherwise try to preserve oldColumn's name, otherwise generate deterministic
+                    string newConstraintName = !string.IsNullOrWhiteSpace(newColumn.DefaultConstraintName)
+                        ? newColumn.DefaultConstraintName
+                        : (!string.IsNullOrWhiteSpace(oldColumn.DefaultConstraintName) && !defaultValueChanged
+                            ? oldColumn.DefaultConstraintName
+                            : $"DF_{tableName}_{newColumn.Name}_{MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(tableName, newColumn.Name, defaultValue, "alter")}");
+                    
+                    sb.AppendLine($"ALTER TABLE [{schema}].[{tableName}] ADD CONSTRAINT [{newConstraintName}] DEFAULT {defaultValue} FOR [{newColumn.Name}];");
+                }
+            }
+        }
+        
+        // Handle default constraint removal when changing to nullable
+        if (changingToNullable && !string.IsNullOrWhiteSpace(oldColumn.DefaultConstraintValue))
+        {
+            // Drop old default constraint when changing to nullable
+            sb.Append(GenerateDropDefaultConstraintStatement(newColumn.Name, tableName, null, schema));
         }
         
         return sb.ToString();
@@ -537,10 +606,62 @@ public static class GenerateColumns
         
         bool sameName = string.Equals(oldColumn.Name, newColumn.Name, StringComparison.OrdinalIgnoreCase);
         
+        // Check if this is an identity-to-non-identity conversion that needs data preservation
+        bool isIdentityToNonIdentity = oldColumn.IsIdentity && !newColumn.IsIdentity;
+        
         // Use direct check if available, otherwise fall back to diff-based check
         bool needsSafeHandling = isOnlyColumn || isOnlyColumnByDiff || wouldReduceToZero;
         
-        if (needsSafeHandling)
+        // For identity-to-non-identity conversions, we need to preserve existing ID values
+        // This requires special handling even if not the only column
+        if (isIdentityToNonIdentity && sameName)
+        {
+            // Identity to non-identity with same name: preserve existing values
+            string tempColumnName = $"{newColumn.Name}_tmp_{MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(schema, tableName, newColumn.Name, "tmp")}";
+            SqlTableColumn tempColumn = newColumn with { Name = tempColumnName };
+            
+            // Add temp column with DEFAULT (required for NOT NULL on non-empty table)
+            sb.Append(GenerateAddColumnStatement(tempColumn, tableName, schema));
+            
+            // Copy values from old column to temp column (use dynamic SQL to ensure separate batch)
+            sb.AppendLine($"-- Copy values from {oldColumn.Name} to {tempColumnName}");
+            string updateSuffix = MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(schema, tableName, tempColumnName, "update");
+            sb.AppendLine($"DECLARE @updateSql_{updateSuffix} NVARCHAR(MAX) = N'UPDATE [{schema}].[{tableName}] SET [{tempColumnName}] = [{oldColumn.Name}];';");
+            sb.AppendLine($"EXEC sp_executesql @updateSql_{updateSuffix};");
+            sb.AppendLine();
+            
+            // Drop the default constraint on temp column (no longer needed after copying values)
+            string tempDefaultSuffix = MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(schema, tableName, tempColumnName, "drop_temp_default");
+            sb.AppendLine($"-- Drop temporary default constraint");
+            sb.AppendLine($"DECLARE @constraintName_{tempDefaultSuffix} NVARCHAR(128);");
+            sb.AppendLine($"SELECT @constraintName_{tempDefaultSuffix} = name FROM sys.default_constraints ");
+            sb.AppendLine($"WHERE parent_object_id = OBJECT_ID('[{schema}].[{tableName}]') ");
+            sb.AppendLine($"AND parent_column_id = COLUMNPROPERTY(OBJECT_ID('[{schema}].[{tableName}]'), '{tempColumnName}', 'ColumnId');");
+            sb.AppendLine($"IF @constraintName_{tempDefaultSuffix} IS NOT NULL");
+            sb.AppendLine($"    EXEC('ALTER TABLE [{schema}].[{tableName}] DROP CONSTRAINT [' + @constraintName_{tempDefaultSuffix} + ']');");
+            sb.AppendLine();
+            
+            // Drop old column
+            sb.AppendLine(GenerateDropColumnStatement(oldColumn.Name, tableName, schema));
+            
+            // Rename temp column to final name
+            sb.AppendLine(GenerateRenameColumnStatement(tableName, tempColumnName, newColumn.Name, schema));
+            
+            // After renaming, if the new column shouldn't have a default constraint (but the temp column had one),
+            // drop the temporary constraint. The constraint is now associated with the renamed column.
+            // Check if temp column would have gotten a default constraint but new column shouldn't have one
+            // We always add a default constraint for NOT NULL non-identity columns, so check if temp column got one
+            bool tempColumnNeedsDefault = !tempColumn.IsIdentity && string.IsNullOrWhiteSpace(tempColumn.DefaultConstraintValue);
+            bool newColumnShouldHaveDefault = !string.IsNullOrWhiteSpace(newColumn.DefaultConstraintValue);
+            
+            if (tempColumnNeedsDefault && !newColumnShouldHaveDefault)
+            {
+                // Temp column got a default constraint, but new column shouldn't have one - drop it
+                // After renaming, the constraint is associated with the new column name, so use that
+                sb.Append(GenerateDropDefaultConstraintStatement(newColumn.Name, tableName, null, schema));
+            }
+        }
+        else if (needsSafeHandling)
         {
             // Unsafe scenario: need to add first, then drop, then rename if needed
             if (sameName)

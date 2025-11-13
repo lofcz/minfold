@@ -278,10 +278,18 @@ public class SqlService
                    isnull(j.pk, cast(0 as bit)) as IS_PRIMARY,
                    cc.definition as COMPUTED_DEFINITION, 
                    case
-                       when DATA_TYPE in('datetime2', 'datetime', 'time', 'timestamp') then DATETIME_PRECISION
-                       when DATA_TYPE in ('varchar', 'nvarchar', 'text', 'binary', 'varbinary', 'blob') then CHARACTER_MAXIMUM_LENGTH
+                       when DATA_TYPE in ('varchar', 'nvarchar', 'text', 'binary', 'varbinary', 'blob', 'char', 'nchar') then CHARACTER_MAXIMUM_LENGTH
                        else null
-                   end as LENGTH_OR_PRECISION,
+                   end as LENGTH,
+                   case
+                       when DATA_TYPE in ('decimal', 'numeric') then COALESCE(NUMERIC_PRECISION, sc.precision)
+                       when DATA_TYPE in('datetime2', 'datetime', 'time', 'datetimeoffset') then DATETIME_PRECISION
+                       else null
+                   end as PRECISION,
+                   case
+                       when DATA_TYPE in ('decimal', 'numeric') then COALESCE(NUMERIC_SCALE, sc.scale)
+                       else null
+                   end as SCALE,
                    ic.seed_value as IDENTITY_SEED,
                    ic.increment_value as IDENTITY_INCR,
                    dc.name as DEFAULT_CONSTRAINT_NAME,
@@ -311,6 +319,9 @@ public class SqlService
                     left join sys.default_constraints dc
                         on dc.parent_object_id = object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME)
                         and dc.parent_column_id = columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'ColumnId')
+                    left join sys.columns sc
+                        on sc.object_id = object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME)
+                        and sc.column_id = columnproperty(object_id(col.TABLE_SCHEMA + '.' + col.TABLE_NAME), col.COLUMN_NAME, 'ColumnId')
                     left join (
                         select k.COLUMN_NAME, 
                                k.TABLE_NAME, 
@@ -588,15 +599,23 @@ public class SqlService
             bool isComputed = reader.GetInt32(7) is 1;
             bool isPk = reader.GetInt32(8) is 1;
             string? computedSql = reader.GetValue(9) as string;
-            int? lengthOrPrecision = reader.GetValue(10) as int?;
+            int? length = reader.GetValue(10) as int?;
+            int? precision = reader.GetValue(11) as int?;
+            int? scale = reader.GetValue(12) as int?;
+            
+            // Log precision/scale for DECIMAL columns
+            if (dataType.ToLowerInvariant() is "decimal" or "numeric")
+            {
+                MigrationLogger.Log($"  GetSchema: Column {columnName} (DECIMAL/NUMERIC) - Precision={precision?.ToString() ?? "null"}, Scale={scale?.ToString() ?? "null"}");
+            }
             
             // Read identity seed and increment (sql_variant, need to convert)
             long? identitySeed = null;
             long? identityIncrement = null;
             if (isIdentity)
             {
-                object? seedValue = reader.GetValue(11);
-                object? incrementValue = reader.GetValue(12);
+                object? seedValue = reader.GetValue(13);
+                object? incrementValue = reader.GetValue(14);
                 
                 if (seedValue != null && seedValue != DBNull.Value)
                 {
@@ -611,8 +630,8 @@ public class SqlService
             }
             
             // Read default constraint information
-            string? defaultConstraintName = reader.GetValue(13) as string;
-            string? defaultConstraintValue = reader.GetValue(14) as string;
+            string? defaultConstraintName = reader.GetValue(15) as string;
+            string? defaultConstraintValue = reader.GetValue(16) as string;
             
             SqlDbTypeExt sqlDbTypeExt;
             if (Enum.TryParse(typeof(SqlDbType), dataType, true, out object? dataTypeObject) && dataTypeObject is SqlDbType dt)
@@ -629,7 +648,7 @@ public class SqlService
                 }
             }
             
-            SqlTableColumn column = new SqlTableColumn(columnName, ordinalPosition, isNullable, isIdentity, sqlDbTypeExt, [], isComputed, isPk, computedSql, lengthOrPrecision, identitySeed, identityIncrement, defaultConstraintName, defaultConstraintValue);
+            SqlTableColumn column = new SqlTableColumn(columnName, ordinalPosition, isNullable, isIdentity, sqlDbTypeExt, [], isComputed, isPk, computedSql, length, precision, scale, identitySeed, identityIncrement, defaultConstraintName, defaultConstraintValue);
             
             if (tables.TryGetValue(tableName.ToLowerInvariant(), out SqlTable? table))
             {

@@ -34,29 +34,48 @@ public static class GenerateTables
                 string sqlType = col.SqlType.ToSqlDbType();
                 sb.Append(sqlType.ToUpperInvariant());
 
-                // Add length/precision for types that need it
-                if (col.LengthOrPrecision.HasValue)
+                // Add length/precision/scale for types that need it
+                if (sqlType.ToLowerInvariant() is "decimal" or "numeric")
                 {
-                    if (sqlType.ToLowerInvariant() is "decimal" or "numeric")
+                    MigrationLogger.Log($"  GenerateCreateTableStatement: Column {col.Name} (DECIMAL/NUMERIC) - Precision={col.Precision?.ToString() ?? "null"}, Scale={col.Scale?.ToString() ?? "null"}");
+                    
+                    // For DECIMAL/NUMERIC, if Scale has a value, we should always include precision/scale
+                    // Default precision to 18 (SQL Server default) if it's null but scale is present
+                    if (col.Scale.HasValue)
                     {
-                        // For decimal/numeric, we'd need precision and scale, but we only have one value
-                        // This is a limitation - we'd need to query for precision and scale separately
-                        sb.Append($"({col.LengthOrPrecision.Value})");
+                        int precision = col.Precision ?? 18; // Default to 18 if precision is null
+                        sb.Append($"({precision},{col.Scale.Value})");
+                        MigrationLogger.Log($"    Added precision/scale: ({precision},{col.Scale.Value})");
                     }
-                    else if (sqlType.ToLowerInvariant() is "varchar" or "nvarchar" or "char" or "nchar" or "varbinary" or "binary")
+                    else if (col.Precision.HasValue)
                     {
-                        if (col.LengthOrPrecision.Value == -1)
+                        sb.Append($"({col.Precision.Value})");
+                        MigrationLogger.Log($"    Added precision only: ({col.Precision.Value})");
+                    }
+                    else
+                    {
+                        MigrationLogger.Log($"    WARNING: No precision/scale for DECIMAL column {col.Name} - SQL Server will default to DECIMAL(18,0)");
+                    }
+                }
+                else if (sqlType.ToLowerInvariant() is "varchar" or "nvarchar" or "char" or "nchar" or "varbinary" or "binary")
+                {
+                    if (col.Length.HasValue)
+                    {
+                        if (col.Length.Value == -1)
                         {
                             sb.Append("(MAX)");
                         }
                         else
                         {
-                            sb.Append($"({col.LengthOrPrecision.Value})");
+                            sb.Append($"({col.Length.Value})");
                         }
                     }
-                    else if (sqlType.ToLowerInvariant() is "datetime2" or "time" or "datetimeoffset")
+                }
+                else if (sqlType.ToLowerInvariant() is "datetime2" or "time" or "datetimeoffset")
+                {
+                    if (col.Precision.HasValue)
                     {
-                        sb.Append($"({col.LengthOrPrecision.Value})");
+                        sb.Append($"({col.Precision.Value})");
                     }
                 }
 
@@ -292,91 +311,133 @@ public static class GenerateTables
         // Check if table has IDENTITY columns for IDENTITY_INSERT handling
         bool hasIdentityColumns = desiredColumns.Any(c => c.IsIdentity);
         
-        // Create temp table with columns in correct order (reuse GenerateCreateTableStatement logic)
-        sb.Append($"CREATE TABLE [{actualTable.Schema}].[{tempTableName}]");
-        sb.AppendLine("(");
+        // Build CREATE TABLE statement - use actual columns from database to preserve precision/scale
+        Dictionary<string, SqlTableColumn> actualColumnsByName = actualColumns
+            .ToDictionary(c => c.Name.ToLowerInvariant(), c => c, StringComparer.OrdinalIgnoreCase);
         
+        // Build CREATE TABLE statement - use actual columns to preserve precision/scale for DECIMAL
+        sb.AppendLine($"CREATE TABLE [{actualTable.Schema}].[{tempTableName}] (");
+        
+        List<string> columnDefParts = new List<string>();
         for (int i = 0; i < desiredColumns.Count; i++)
         {
-            SqlTableColumn col = desiredColumns[i];
-            bool isLast = i == desiredColumns.Count - 1;
+            SqlTableColumn desiredCol = desiredColumns[i];
             
-            sb.Append("    [");
-            sb.Append(col.Name);
-            sb.Append("] ");
+            // Use actual column from database for DECIMAL/NUMERIC to preserve precision/scale
+            SqlTableColumn col = desiredCol;
+            if (actualColumnsByName.TryGetValue(desiredCol.Name.ToLowerInvariant(), out SqlTableColumn? actualCol))
+            {
+                // For DECIMAL/NUMERIC, use actual column to preserve precision/scale
+                if (desiredCol.SqlType == SqlDbTypeExt.Decimal || desiredCol.SqlType == SqlDbTypeExt.Numeric)
+                {
+                    col = actualCol; // Use actual column completely to preserve precision/scale
+                }
+            }
             
-            // Column type (reuse logic from GenerateAddColumnStatement)
+            StringBuilder colDef = new StringBuilder();
+            colDef.Append($"    [{col.Name}] ");
+            
             if (col.IsComputed && !string.IsNullOrWhiteSpace(col.ComputedSql))
             {
-                sb.Append("AS ");
-                sb.Append(col.ComputedSql);
+                colDef.Append("AS ");
+                colDef.Append(col.ComputedSql);
             }
             else
             {
                 string sqlType = col.SqlType.ToSqlDbType();
-                sb.Append(sqlType.ToUpperInvariant());
+                colDef.Append(sqlType.ToUpperInvariant());
                 
-                if (col.LengthOrPrecision.HasValue)
+                // Add length/precision/scale for types that need it
+                if (sqlType.ToLowerInvariant() is "decimal" or "numeric")
                 {
-                    if (sqlType.ToLowerInvariant() is "decimal" or "numeric")
+                    // For DECIMAL/NUMERIC, if Scale has a value, we should always include precision/scale
+                    // Default precision to 18 (SQL Server default) if it's null but scale is present
+                    if (col.Scale.HasValue)
                     {
-                        sb.Append($"({col.LengthOrPrecision.Value})");
+                        int precision = col.Precision ?? 18; // Default to 18 if precision is null
+                        colDef.Append($"({precision},{col.Scale.Value})");
                     }
-                    else if (sqlType.ToLowerInvariant() is "varchar" or "nvarchar" or "char" or "nchar" or "varbinary" or "binary")
+                    else if (col.Precision.HasValue)
                     {
-                        if (col.LengthOrPrecision.Value == -1)
+                        colDef.Append($"({col.Precision.Value})");
+                    }
+                }
+                else if (sqlType.ToLowerInvariant() is "varchar" or "nvarchar" or "char" or "nchar" or "varbinary" or "binary")
+                {
+                    if (col.Length.HasValue)
+                    {
+                        if (col.Length.Value == -1)
                         {
-                            sb.Append("(MAX)");
+                            colDef.Append("(MAX)");
                         }
                         else
                         {
-                            sb.Append($"({col.LengthOrPrecision.Value})");
+                            colDef.Append($"({col.Length.Value})");
                         }
                     }
-                    else if (sqlType.ToLowerInvariant() is "datetime2" or "time" or "datetimeoffset")
+                }
+                else if (sqlType.ToLowerInvariant() is "datetime2" or "time" or "datetimeoffset")
+                {
+                    if (col.Precision.HasValue)
                     {
-                        sb.Append($"({col.LengthOrPrecision.Value})");
+                        colDef.Append($"({col.Precision.Value})");
                     }
                 }
                 
                 if (!col.IsNullable)
                 {
-                    sb.Append(" NOT NULL");
+                    colDef.Append(" NOT NULL");
                 }
                 
-                // Default constraint (if exists) - preserve value but generate new constraint name when reordering
-                // to avoid conflicts (the original constraint may still exist in the database)
                 if (!string.IsNullOrWhiteSpace(col.DefaultConstraintValue))
                 {
-                    // Always generate a new constraint name to avoid conflicts during reordering
                     string normalizedValue = GenerateColumns.NormalizeDefaultConstraintValue(col.DefaultConstraintValue);
-                    string constraintName = $"DF_{actualTable.Name}_{col.Name}_{MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(actualTable.Schema, actualTable.Name, col.Name, normalizedValue, "reorder")}";
-                    sb.Append($" CONSTRAINT [{constraintName}] DEFAULT {normalizedValue}");
+                    string tempConstraintName = $"DF_{actualTable.Name}_{col.Name}_{MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(actualTable.Schema, actualTable.Name, col.Name, normalizedValue, "reorder", "temp")}";
+                    colDef.Append($" CONSTRAINT [{tempConstraintName}] DEFAULT {normalizedValue}");
                 }
                 
                 if (col.IsIdentity)
                 {
-                    sb.Append(" IDENTITY");
+                    colDef.Append(" IDENTITY");
                     if (col.IdentitySeed.HasValue && col.IdentityIncrement.HasValue)
                     {
-                        sb.Append($"({col.IdentitySeed.Value},{col.IdentityIncrement.Value})");
+                        colDef.Append($"({col.IdentitySeed.Value},{col.IdentityIncrement.Value})");
                     }
                     else
                     {
-                        sb.Append("(1,1)");
+                        colDef.Append("(1,1)");
                     }
                 }
             }
             
-            if (!isLast)
-            {
-                sb.Append(",");
-            }
-            sb.AppendLine();
+            columnDefParts.Add(colDef.ToString());
         }
         
+        sb.AppendLine(string.Join(",\r\n", columnDefParts));
         sb.AppendLine(");");
         sb.AppendLine();
+        
+        // Before creating the temp table, drop any default constraints that might conflict
+        // This handles cases where constraint names from targetSchema might already exist
+        foreach (SqlTableColumn col in desiredColumns)
+        {
+            if (!string.IsNullOrWhiteSpace(col.DefaultConstraintName) && !string.IsNullOrWhiteSpace(col.DefaultConstraintValue))
+            {
+                string constraintNameVar = $"@constraintName_{MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(actualTable.Schema, actualTable.Name, col.Name, "reorder", "check")}";
+                sb.AppendLine($"-- Drop default constraint if it exists (may conflict with temp table creation)");
+                sb.AppendLine($"DECLARE {constraintNameVar} NVARCHAR(128);");
+                sb.AppendLine($"SELECT {constraintNameVar} = name FROM sys.default_constraints WHERE name = '{col.DefaultConstraintName.Replace("'", "''")}';");
+                sb.AppendLine($"IF {constraintNameVar} IS NOT NULL");
+                sb.AppendLine($"BEGIN");
+                sb.AppendLine($"    -- Find the table that owns this constraint and drop it");
+                sb.AppendLine($"    DECLARE @dropConstraintSql_{MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(actualTable.Schema, actualTable.Name, col.Name, "reorder", "drop")} NVARCHAR(MAX);");
+                sb.AppendLine($"    SELECT @dropConstraintSql_{MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(actualTable.Schema, actualTable.Name, col.Name, "reorder", "drop")} = 'ALTER TABLE [' + OBJECT_SCHEMA_NAME(parent_object_id) + '].[' + OBJECT_NAME(parent_object_id) + '] DROP CONSTRAINT [' + name + ']'");
+                sb.AppendLine($"    FROM sys.default_constraints WHERE name = {constraintNameVar};");
+                sb.AppendLine($"    IF @dropConstraintSql_{MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(actualTable.Schema, actualTable.Name, col.Name, "reorder", "drop")} IS NOT NULL");
+                sb.AppendLine($"        EXEC sp_executesql @dropConstraintSql_{MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(actualTable.Schema, actualTable.Name, col.Name, "reorder", "drop")};");
+                sb.AppendLine($"END");
+            }
+        }
         
         // Copy data from old table to temp table
         // Note: IDENTITY_INSERT will be set inside the IF block if columns exist
@@ -394,10 +455,6 @@ public static class GenerateTables
         MigrationLogger.Log($"  GenerateColumnReorderStatement: Building SELECT list for INSERT");
         MigrationLogger.Log($"    actualColumns: [{string.Join(", ", actualColumns.Select(c => c.Name))}]");
         MigrationLogger.Log($"    desiredColumns: [{string.Join(", ", desiredColumns.Select(c => c.Name))}]");
-        
-        // Build a mapping from column name to actual column for fast lookup
-        Dictionary<string, SqlTableColumn> actualColumnsByName = actualColumns
-            .ToDictionary(c => c.Name.ToLowerInvariant(), c => c, StringComparer.OrdinalIgnoreCase);
         
         // Build a set of desired column names for quick lookup
         HashSet<string> desiredColumnNames = desiredColumns
@@ -522,7 +579,31 @@ public static class GenerateTables
         sb.AppendLine($"EXEC sp_rename '[{actualTable.Schema}].[{tempTableName}]', '{actualTable.Name}', 'OBJECT';");
         sb.AppendLine();
         
+        // Restore original constraint names if they differ from temp names
+        // This ensures the final table has the same constraint names as the target schema
+        foreach (SqlTableColumn col in desiredColumns)
+        {
+            if (!string.IsNullOrWhiteSpace(col.DefaultConstraintName) && !string.IsNullOrWhiteSpace(col.DefaultConstraintValue))
+            {
+                string normalizedValue = GenerateColumns.NormalizeDefaultConstraintValue(col.DefaultConstraintValue);
+                string tempConstraintName = $"DF_{actualTable.Name}_{col.Name}_{MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(actualTable.Schema, actualTable.Name, col.Name, normalizedValue, "reorder", "temp")}";
+                
+                // Only rename if the temp name differs from the original name
+                if (!tempConstraintName.Equals(col.DefaultConstraintName, StringComparison.OrdinalIgnoreCase))
+                {
+                    sb.AppendLine($"-- Restore original constraint name for {col.Name}");
+                    sb.AppendLine($"DECLARE @tempConstraintName_{MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(actualTable.Schema, actualTable.Name, col.Name, "reorder", "rename")} NVARCHAR(128) = '{tempConstraintName}';");
+                    sb.AppendLine($"DECLARE @originalConstraintName_{MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(actualTable.Schema, actualTable.Name, col.Name, "reorder", "rename")} NVARCHAR(128) = '{col.DefaultConstraintName.Replace("'", "''")}';");
+                    sb.AppendLine($"IF EXISTS (SELECT 1 FROM sys.default_constraints WHERE name = @tempConstraintName_{MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(actualTable.Schema, actualTable.Name, col.Name, "reorder", "rename")})");
+                    sb.AppendLine($"BEGIN");
+                    sb.AppendLine($"    EXEC sp_rename @objname = @tempConstraintName_{MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(actualTable.Schema, actualTable.Name, col.Name, "reorder", "rename")}, @newname = @originalConstraintName_{MigrationSqlGeneratorUtilities.GenerateDeterministicSuffix(actualTable.Schema, actualTable.Name, col.Name, "reorder", "rename")}, @objtype = 'OBJECT';");
+                    sb.AppendLine($"END");
+                }
+            }
+        }
+        
         return (sb.ToString(), constraintSql);
     }
 }
+
 
