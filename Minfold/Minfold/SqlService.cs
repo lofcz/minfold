@@ -171,7 +171,9 @@ public class SqlService
                                          WHERE c.is_included_column = 1
                                              AND c.index_id = i.index_id
                                          ORDER BY c.name COLLATE Latin1_General_CI_AS
-                                         FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '') + ')', '')  + CHAR(13)
+                                         FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '') + ')', '')
+                                     + CASE WHEN i.filter_definition IS NOT NULL THEN ' WHERE ' + i.filter_definition ELSE '' END
+                                     + CHAR(13)
                              FROM sys.indexes i WITH (NOWAIT)
                              WHERE i.[object_id] = @object_id
                                  AND i.is_primary_key = 0
@@ -676,6 +678,7 @@ public class SqlService
                 SELECT 
                     i.name AS INDEX_NAME,
                     i.is_unique,
+                    MAX(i.filter_definition) AS FILTER_DEFINITION,
                     STRING_AGG(c.name, ',') WITHIN GROUP (ORDER BY ic.key_ordinal) AS COLUMN_NAMES
                 FROM sys.indexes i
                 INNER JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
@@ -694,10 +697,11 @@ public class SqlService
             {
                 string indexName = indexReader.GetString(0);
                 bool isUnique = indexReader.GetBoolean(1);
-                string columnNamesStr = indexReader.GetString(2);
+                string? filterPredicate = indexReader.IsDBNull(2) ? null : indexReader.GetString(2);
+                string columnNamesStr = indexReader.GetString(3);
                 List<string> columnNames = columnNamesStr.Split(',').ToList();
                 
-                indexes.Add(new SqlIndex(indexName, tableName, columnNames, isUnique, table.Schema));
+                indexes.Add(new SqlIndex(indexName, tableName, columnNames, isUnique, table.Schema, filterPredicate));
             }
             
             await indexReader.CloseAsync();
