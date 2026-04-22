@@ -4,6 +4,7 @@
       <LangVersion>12.0</LangVersion>
       <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
       <Nullable>enable</Nullable>
+      <IsPackable>false</IsPackable>
     </PropertyGroup>
 
       <ItemGroup>
