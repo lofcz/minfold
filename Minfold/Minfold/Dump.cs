@@ -10,7 +10,7 @@ namespace Minfold;
 public record SqlTable(string Name, Dictionary<string, SqlTableColumn> Columns, List<SqlIndex> Indexes, string Schema = "dbo");
 public record SqlTableColumn(string Name, int OrdinalPosition, bool IsNullable, bool IsIdentity, SqlDbTypeExt SqlType, List<SqlForeignKey> ForeignKeys, bool IsComputed, bool IsPrimaryKey, string? ComputedSql, int? Length = null, int? Precision = null, int? Scale = null, long? IdentitySeed = null, long? IdentityIncrement = null, string? DefaultConstraintName = null, string? DefaultConstraintValue = null);
 public record SqlForeignKey(string Name, string Table, string Column, string RefTable, string RefColumn, bool NotEnforced, bool NotForReplication = false, int DeleteAction = 0, int UpdateAction = 0, string Schema = "dbo", string RefSchema = "dbo");
-public record SqlIndex(string Name, string Table, List<string> Columns, bool IsUnique, string Schema = "dbo");
+public record SqlIndex(string Name, string Table, List<string> Columns, bool IsUnique, string Schema = "dbo", string? FilterPredicate = null);
 public record SqlSequence(string Name, string DataType, long? StartValue, long? Increment, long? MinValue, long? MaxValue, bool Cycle, long? CacheSize, string? Definition, string Schema = "dbo");
 public record SqlStoredProcedure(string Name, string Definition, string Schema = "dbo");
 public record CsModelSource(string Name, string ModelPath, string? DaoPath, string ModelSourceCode, string? DaoSourceCode, SyntaxTree ModelAst, SyntaxTree? DaoAst, string NameLastPart, SqlTable? Table, SyntaxNode ModelRootNode, SyntaxNode? DaoRootNode, ConcurrentDictionary<string, string> Columns, ModelInfo ModelInfo);

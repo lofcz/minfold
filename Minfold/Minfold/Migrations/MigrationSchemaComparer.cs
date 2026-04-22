@@ -470,10 +470,16 @@ public static class MigrationSchemaComparer
 
     private static bool AreIndexesEqual(SqlIndex idx1, SqlIndex idx2)
     {
+        string? f1 = string.IsNullOrWhiteSpace(idx1.FilterPredicate) ? null : idx1.FilterPredicate;
+        string? f2 = string.IsNullOrWhiteSpace(idx2.FilterPredicate) ? null : idx2.FilterPredicate;
+        bool filtersEqual = (f1 is null && f2 is null) ||
+                            (f1 is not null && f2 is not null && f1.Equals(f2, StringComparison.OrdinalIgnoreCase));
+
         return idx1.Name.Equals(idx2.Name, StringComparison.OrdinalIgnoreCase) &&
                idx1.IsUnique == idx2.IsUnique &&
                idx1.Columns.Count == idx2.Columns.Count &&
-               idx1.Columns.SequenceEqual(idx2.Columns, StringComparer.OrdinalIgnoreCase);
+               idx1.Columns.SequenceEqual(idx2.Columns, StringComparer.OrdinalIgnoreCase) &&
+               filtersEqual;
     }
 
     private static bool AreColumnsEqual(SqlTableColumn col1, SqlTableColumn col2)
